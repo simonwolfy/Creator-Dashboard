@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "modules": [
+    {
+      "path": "creator_intelligence.modules.storage.module",
+      "enabled": true
+    },
+    {
+      "path": "creator_intelligence.modules.analytics.module",
+      "enabled": true
+    },
+    {
+      "path": "creator_intelligence.modules.predictions.module",
+      "enabled": true
+    },
+    {
+      "path": "creator_intelligence.modules.content.module",
+      "enabled": true
+    },
+    {
+      "path": "creator_intelligence.modules.imports.module",
+      "enabled": true
+    },
+    {
+      "path": "creator_intelligence.modules.integrations.module",
+      "enabled": true
+    },
+    {
+      "path": "creator_intelligence.modules.system.module",
+      "enabled": true
+    }
+  ],
+  "enabled_modules": [
+    "creator_intelligence.modules.live.module",
+    "creator_intelligence.modules.highlights.module",
+    "creator_intelligence.modules.production.module",
+    "creator_intelligence.modules.publishing.module",
+    "creator_intelligence.modules.creator_planner.module",
+    "creator_intelligence.modules.video_processing.module",
+    "creator_intelligence.modules.transcripts.module",
+    "creator_intelligence.modules.scene_intelligence.module",
+    "creator_intelligence.modules.highlight_scoring.module",
+    "creator_intelligence.modules.content_recommendations.module",
+    "creator_intelligence.modules.opportunity_workload.module",
+    "creator_intelligence.modules.highlight_learning.module",
+    "creator_intelligence.modules.editor_workspace.module",
+    "creator_intelligence.modules.review_revision.module"
+  ]
+}
