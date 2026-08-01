@@ -116,4 +116,65 @@ MIGRATIONS = [
         WHERE name IS NULL OR target_value IS NULL OR updated_at IS NULL;
         """
     ),
+    (
+        4,
+        "unified_content_library",
+        """
+        CREATE TABLE IF NOT EXISTS content_items (
+            id TEXT PRIMARY KEY,
+            platform TEXT NOT NULL,
+            external_id TEXT,
+            content_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            game_topic TEXT,
+            series_name TEXT,
+            episode_number TEXT,
+            status TEXT NOT NULL DEFAULT 'Planned',
+            editor TEXT,
+            collaborators_json TEXT NOT NULL DEFAULT '[]',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            thumbnail_url TEXT,
+            source_url TEXT,
+            local_path TEXT,
+            recorded_at TEXT,
+            published_at TEXT,
+            duration_seconds REAL,
+            views INTEGER NOT NULL DEFAULT 0,
+            watch_hours REAL NOT NULL DEFAULT 0,
+            engagement_rate REAL,
+            retention_rate REAL,
+            revenue REAL NOT NULL DEFAULT 0,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(platform, external_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS unified_content_relationships (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_content_id TEXT NOT NULL,
+            child_content_id TEXT NOT NULL,
+            relationship_type TEXT NOT NULL DEFAULT 'derived_from',
+            start_seconds REAL,
+            end_seconds REAL,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(parent_content_id, child_content_id, relationship_type),
+            FOREIGN KEY(parent_content_id) REFERENCES content_items(id) ON DELETE CASCADE,
+            FOREIGN KEY(child_content_id) REFERENCES content_items(id) ON DELETE CASCADE,
+            CHECK(parent_content_id <> child_content_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_content_items_platform_type
+            ON content_items(platform, content_type);
+        CREATE INDEX IF NOT EXISTS idx_content_items_game_series
+            ON content_items(game_topic, series_name);
+        CREATE INDEX IF NOT EXISTS idx_content_items_status
+            ON content_items(status);
+        CREATE INDEX IF NOT EXISTS idx_unified_content_relationships_parent
+            ON unified_content_relationships(parent_content_id);
+        CREATE INDEX IF NOT EXISTS idx_unified_content_relationships_child
+            ON unified_content_relationships(child_content_id);
+        """
+    ),
 ]
