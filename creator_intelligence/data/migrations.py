@@ -97,4 +97,23 @@ MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_audit_event_ts ON audit_log(event_ts);
         """
     ),
+    (
+        3,
+        "creator_goals_runtime_schema",
+        """
+        ALTER TABLE creator_goals ADD COLUMN name TEXT;
+        ALTER TABLE creator_goals ADD COLUMN current_value REAL NOT NULL DEFAULT 0;
+        ALTER TABLE creator_goals ADD COLUMN target_value REAL;
+        ALTER TABLE creator_goals ADD COLUMN target_date TEXT;
+        ALTER TABLE creator_goals ADD COLUMN notes TEXT;
+        ALTER TABLE creator_goals ADD COLUMN updated_at TEXT;
+        ALTER TABLE creator_goals ADD COLUMN status TEXT NOT NULL DEFAULT 'Active';
+
+        UPDATE creator_goals
+        SET name = COALESCE(name, metric),
+            target_value = COALESCE(target_value, target),
+            updated_at = COALESCE(updated_at, created_at)
+        WHERE name IS NULL OR target_value IS NULL OR updated_at IS NULL;
+        """
+    ),
 ]
