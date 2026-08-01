@@ -1,0 +1,42 @@
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local runtime data
+backups/
+logs/
+cache/
+temp/
+exports/
+models/
+workspace.json
+config/settings.json
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.zip
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
