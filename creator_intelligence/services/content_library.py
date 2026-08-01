@@ -9,6 +9,8 @@ from uuid import uuid4
 class ContentLibraryService:
     """Canonical content catalog and relationship graph."""
 
+    RELATIONSHIP_TABLE = "unified_content_relationships"
+
     def __init__(self, db):
         self.db = db
 
@@ -168,8 +170,8 @@ class ContentLibraryService:
             raise ValueError("A content item cannot be related to itself.")
         return int(
             self.db.execute(
-                """
-                INSERT INTO content_relationships(
+                f"""
+                INSERT INTO {self.RELATIONSHIP_TABLE}(
                     parent_content_id, child_content_id, relationship_type,
                     start_seconds, end_seconds, notes, created_at
                 ) VALUES(?,?,?,?,?,?,?)
@@ -188,10 +190,10 @@ class ContentLibraryService:
 
     def children(self, content_id: str) -> list[dict[str, Any]]:
         frame = self.db.frame(
-            """
+            f"""
             SELECT child.*, rel.relationship_type, rel.start_seconds,
                    rel.end_seconds, rel.notes AS relationship_notes
-            FROM content_relationships rel
+            FROM {self.RELATIONSHIP_TABLE} rel
             JOIN content_items child ON child.id=rel.child_content_id
             WHERE rel.parent_content_id=?
             ORDER BY child.created_at
@@ -202,10 +204,10 @@ class ContentLibraryService:
 
     def parents(self, content_id: str) -> list[dict[str, Any]]:
         frame = self.db.frame(
-            """
+            f"""
             SELECT parent.*, rel.relationship_type, rel.start_seconds,
                    rel.end_seconds, rel.notes AS relationship_notes
-            FROM content_relationships rel
+            FROM {self.RELATIONSHIP_TABLE} rel
             JOIN content_items parent ON parent.id=rel.parent_content_id
             WHERE rel.child_content_id=?
             ORDER BY parent.created_at
