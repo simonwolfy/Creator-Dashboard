@@ -1,17 +1,40 @@
-# Creator Intelligence 4.7 — Phase 7.0E.2 Review & Revision System
+# Creator Intelligence 5.0 — Application Core
 
-This build adds the complete structured review loop:
+Creator Intelligence is a desktop creator operating system for Twitch, YouTube, long-form VOD analysis, highlight detection, production planning, and review workflows.
 
-- numbered edit versions and parent relationships
-- side-by-side metadata comparison
-- timestamp and frame comments
-- threaded replies
-- structured revision requests
-- per-change completion tracking
-- approval checklist and blocking rules
-- thumbnail version approval
-- production/editor-workspace status synchronization
-- review and feedback analytics
-- dedicated Review & Revision desktop page
+## Version 5 development
 
-Source media is never modified by the review system.
+Phase 8.1A introduces the central desktop application framework:
+
+- deterministic startup and shutdown pipelines
+- application lifecycle state and step reporting
+- a canonical application runtime
+- workspace initialization and validation
+- versioned workspace metadata
+- centralized configuration, database, backup, module, and diagnostic startup
+- application and workspace services exposed through dependency injection
+- a main window that consumes the prepared runtime instead of initializing services itself
+
+The existing Phase 7 features remain available, including transcription, scene intelligence, highlight scoring and learning, production management, editor workspace, and review/revision tracking.
+
+## Run
+
+On Windows, run:
+
+```text
+START_CREATOR_INTELLIGENCE.bat
+```
+
+Or from a configured Python environment:
+
+```bash
+python -m creator_intelligence
+```
+
+## Tests
+
+```bash
+python -m pytest
+```
+
+See [`docs/APPLICATION_CORE.md`](docs/APPLICATION_CORE.md) for the Phase 8.1A architecture.
