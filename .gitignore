@@ -20,6 +20,7 @@ exports/
 models/
 workspace.json
 config/settings.json
+config/ffmpeg.json
 
 # Local databases
 *.db
