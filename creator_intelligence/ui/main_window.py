@@ -1,7 +1,6 @@
 import logging
 from PySide6.QtWidgets import QMainWindow,QWidget,QHBoxLayout,QListWidget,QStackedWidget,QStatusBar,QLabel,QVBoxLayout
 from PySide6.QtCore import QSize
-from creator_intelligence.core.bootstrap import bootstrap_application
 
 log = logging.getLogger(__name__)
 
@@ -39,11 +38,14 @@ class ModuleFailurePage(QWidget):
         layout.addStretch()
 
 class MainWindow(QMainWindow):
-    def __init__(self, db):
+    def __init__(self, runtime, application_core=None):
         super().__init__()
-        self.db = db
-        self.context, self.registry = bootstrap_application(db)
-        self.setWindowTitle("Creator Intelligence 3.0 — Modular Creator OS")
+        self.runtime = runtime
+        self.application_core = application_core
+        self.db = runtime.db
+        self.context = runtime.context
+        self.registry = runtime.registry
+        self.setWindowTitle("Creator Intelligence 5.0 — Creator OS")
         self.resize(1600,960)
         self.setMinimumSize(QSize(1180,740))
         self.setStyleSheet(STYLE)
@@ -80,13 +82,20 @@ class MainWindow(QMainWindow):
         status=QStatusBar()
         loaded = len(self.registry.modules)
         failed = len(self.registry.failures)
+        health_issues = len([check for check in runtime.health_checks if not check.ok])
         status.showMessage(
-            f"Database: {db.path} | Modules loaded: {loaded} | Failed: {failed}"
+            f"Workspace: {runtime.workspace.paths.root} | "
+            f"Modules: {loaded} | Failed: {failed} | Health issues: {health_issues}"
         )
         self.setStatusBar(status)
-        self.registry.emit("application_started")
 
     def closeEvent(self,event):
-        self.registry.emit("application_closing")
+        if self.application_core is not None:
+            try:
+                self.application_core.stop()
+            except Exception:
+                log.exception("Application shutdown pipeline failed")
+        else:
+            self.registry.emit("application_closing")
         log.info("Application closed normally")
         event.accept()
