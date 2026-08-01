@@ -150,7 +150,7 @@ MIGRATIONS = [
             UNIQUE(platform, external_id)
         );
 
-        CREATE TABLE IF NOT EXISTS content_relationships (
+        CREATE TABLE IF NOT EXISTS unified_content_relationships (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             parent_content_id TEXT NOT NULL,
             child_content_id TEXT NOT NULL,
@@ -171,10 +171,10 @@ MIGRATIONS = [
             ON content_items(game_topic, series_name);
         CREATE INDEX IF NOT EXISTS idx_content_items_status
             ON content_items(status);
-        CREATE INDEX IF NOT EXISTS idx_content_relationships_parent
-            ON content_relationships(parent_content_id);
-        CREATE INDEX IF NOT EXISTS idx_content_relationships_child
-            ON content_relationships(child_content_id);
+        CREATE INDEX IF NOT EXISTS idx_unified_content_relationships_parent
+            ON unified_content_relationships(parent_content_id);
+        CREATE INDEX IF NOT EXISTS idx_unified_content_relationships_child
+            ON unified_content_relationships(child_content_id);
         """
     ),
 ]
