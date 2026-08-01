@@ -108,7 +108,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 log.exception("Failed to create page %s", item.label)
                 page = ModuleFailurePage(item.label, exc)
-            nav_item = self._add_navigation_item(item.label, key)
+            self._add_navigation_item(item.label, key)
             self.pages_by_key[key] = page
             self.stack.addWidget(page)
 
@@ -121,7 +121,7 @@ class MainWindow(QMainWindow):
             self.pages_by_key["system:no-modules"] = page
             self.stack.addWidget(page)
 
-        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav.currentRowChanged.connect(self._show_current_navigation_page)
         self.nav.orderChanged.connect(self._navigation_reordered)
         self.nav.setCurrentRow(0)
         layout.addWidget(self.nav)
@@ -140,7 +140,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _navigation_key(item) -> str:
-        return str(item.module_id or f"label:{item.label}")
+        # A module may expose multiple pages, so module_id alone is not unique.
+        module = str(item.module_id or "unowned")
+        return f"{module}:{item.label}"
 
     def _add_navigation_item(self, label: str, key: str):
         self.nav.addItem(label)
@@ -148,25 +150,21 @@ class MainWindow(QMainWindow):
         item.setData(NAV_KEY_ROLE, key)
         return item
 
+    def _show_current_navigation_page(self, row: int) -> None:
+        item = self.nav.item(row) if row >= 0 else None
+        key = item.data(NAV_KEY_ROLE) if item else None
+        page = self.pages_by_key.get(str(key)) if key is not None else None
+        if page is not None:
+            self.stack.setCurrentWidget(page)
+
     def _navigation_reordered(self) -> None:
-        current_item = self.nav.currentItem()
-        current_key = current_item.data(NAV_KEY_ROLE) if current_item else None
         ordered_keys = [
             str(self.nav.item(index).data(NAV_KEY_ROLE))
             for index in range(self.nav.count())
         ]
-
-        for key in ordered_keys:
-            page = self.pages_by_key.get(key)
-            if page is not None:
-                self.stack.removeWidget(page)
-                self.stack.addWidget(page)
-
         self.settings.setValue("navigation/order", ordered_keys)
-        if current_key in ordered_keys:
-            row = ordered_keys.index(current_key)
-            self.nav.setCurrentRow(row)
-            self.stack.setCurrentIndex(row)
+        self.settings.sync()
+        self._show_current_navigation_page(self.nav.currentRow())
 
     def closeEvent(self, event):
         if self.application_core is not None:
