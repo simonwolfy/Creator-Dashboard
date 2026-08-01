@@ -1,20 +1,26 @@
 from __future__ import annotations
-import sqlite3
+
 import logging
+import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Any
-from datetime import datetime
+from typing import Any, Iterable
+
 import pandas as pd
-from creator_intelligence.data.migrations import MIGRATIONS
+
 from creator_intelligence.core.exceptions import DatabaseError, MigrationError
+from creator_intelligence.data.migration_manager import MigrationManager, MigrationRecord
+from creator_intelligence.data.migrations import MIGRATIONS
 
 log = logging.getLogger(__name__)
+
 
 class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.migration_manager = MigrationManager(MIGRATIONS)
+        self.last_applied_migrations: list[MigrationRecord] = []
 
     def _configure(self, con):
         con.execute("PRAGMA foreign_keys=ON")
@@ -36,28 +42,21 @@ class Database:
         finally:
             con.close()
 
-    def migrate(self):
+    def migrate(self) -> list[MigrationRecord]:
         try:
             with self.connect() as con:
-                con.execute("""CREATE TABLE IF NOT EXISTS schema_migrations(
-                    version INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    applied_at TEXT NOT NULL
-                )""")
-                applied = {
-                    row[0] for row in con.execute("SELECT version FROM schema_migrations")
-                }
-                for version, name, sql in MIGRATIONS:
-                    if version in applied:
-                        continue
-                    log.info("Applying migration %s: %s", version, name)
-                    con.executescript(sql)
-                    con.execute(
-                        "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",
-                        (version, name, datetime.now().isoformat())
-                    )
+                self.last_applied_migrations = self.migration_manager.apply(con)
+                return list(self.last_applied_migrations)
         except Exception as exc:
             raise MigrationError(f"Migration failed: {exc}") from exc
+
+    def migration_history(self) -> list[MigrationRecord]:
+        with self.connect() as con:
+            return self.migration_manager.history(con)
+
+    def pending_migrations(self) -> list[tuple[int, str, str]]:
+        with self.connect() as con:
+            return self.migration_manager.pending(con)
 
     def frame(self, sql: str, params: Iterable[Any] = ()) -> pd.DataFrame:
         try:
@@ -92,7 +91,7 @@ class Database:
     def table_exists(self, table: str) -> bool:
         return bool(self.scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-            (table,)
+            (table,),
         ))
 
     def integrity_check(self):

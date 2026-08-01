@@ -6,6 +6,7 @@ import logging
 
 from creator_intelligence.core.bootstrap import bootstrap_application
 from creator_intelligence.core.config import ConfigService
+from creator_intelligence.core.diagnostics import DiagnosticsService, DiagnosticsSnapshot
 from creator_intelligence.core.health import HealthService
 from creator_intelligence.core.lifecycle import ApplicationLifecycle, LifecycleReport
 from creator_intelligence.core.logging import configure_logging
@@ -24,13 +25,14 @@ class ApplicationRuntime:
     registry: object
     health_checks: list
     startup_report: LifecycleReport
+    diagnostics: DiagnosticsSnapshot
 
 
 class CreatorIntelligenceApplication:
     """Owns Creator Intelligence startup, runtime services, and shutdown."""
 
     APPLICATION_NAME = "Creator Intelligence"
-    VERSION = "5.0.0-dev"
+    VERSION = "5.0.0-alpha.2"
 
     def __init__(self, workspace_root: Path | None = None):
         self.workspace = WorkspaceManager(workspace_root or PROJECT_ROOT)
@@ -53,7 +55,6 @@ class CreatorIntelligenceApplication:
         self.lifecycle.add_startup_step("Create startup backup", self._create_backup, required=False)
         self.lifecycle.add_startup_step("Load application modules", self._load_modules)
         self.lifecycle.add_startup_step("Run startup diagnostics", self._run_diagnostics, required=False)
-
         self.lifecycle.add_shutdown_step("Emit application closing", self._emit_closing)
         self.lifecycle.add_shutdown_step("Clear transient services", self._clear_services)
 
@@ -61,6 +62,14 @@ class CreatorIntelligenceApplication:
         report = self.lifecycle.start()
         if not all((self._db, self._settings, self._context, self._registry)):
             raise RuntimeError("Application startup completed without a complete runtime.")
+        diagnostics = DiagnosticsService().build(
+            version=self.VERSION,
+            workspace=self.workspace.paths.root,
+            db=self._db,
+            registry=self._registry,
+            health_checks=self._health_checks,
+            startup_report=report,
+        )
         self.runtime = ApplicationRuntime(
             workspace=self.workspace,
             db=self._db,
@@ -69,13 +78,16 @@ class CreatorIntelligenceApplication:
             registry=self._registry,
             health_checks=self._health_checks,
             startup_report=report,
+            diagnostics=diagnostics,
         )
+        self._context.set("diagnostics", diagnostics)
         self._registry.emit("application_started")
         self.logger.info(
-            "%s %s ready with %s modules",
+            "%s %s ready with %s modules in %.2f ms",
             self.APPLICATION_NAME,
             self.VERSION,
             len(self._registry.modules),
+            report.duration_ms,
         )
         return self.runtime
 
@@ -101,8 +113,8 @@ class CreatorIntelligenceApplication:
 
     def _migrate_database(self) -> str:
         assert self._db is not None
-        self._db.migrate()
-        return "database migrations complete"
+        applied = self._db.migrate()
+        return f"{len(applied)} migration(s) applied"
 
     def _create_backup(self) -> str:
         assert self._db is not None
@@ -117,10 +129,7 @@ class CreatorIntelligenceApplication:
 
     def _load_modules(self) -> str:
         assert self._db is not None
-        self._context, self._registry = bootstrap_application(
-            self._db,
-            settings=self._settings,
-        )
+        self._context, self._registry = bootstrap_application(self._db, settings=self._settings)
         self._context.set("application", self)
         self._context.set("workspace", self.workspace)
         return f"{len(self._registry.modules)} modules loaded"
