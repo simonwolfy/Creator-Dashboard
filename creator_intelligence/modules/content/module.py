@@ -4,6 +4,7 @@ from creator_intelligence.services.content_library import ContentLibraryService
 from creator_intelligence.services.creator_dashboard import CreatorDashboardService
 from creator_intelligence.services.cross_platform import CrossPlatformService
 from creator_intelligence.services.folder_watcher import FolderWatcherService
+from creator_intelligence.services.google_drive import GoogleDriveService
 from creator_intelligence.services.pipeline_intelligence import PipelineIntelligenceService
 
 
@@ -25,6 +26,12 @@ def _folder_watcher_page(registry):
     return FolderWatcherPage(registry.resolve("folder_watcher"))
 
 
+def _google_drive_page(registry):
+    from creator_intelligence.ui.pages.google_drive import GoogleDrivePage
+
+    return GoogleDrivePage(registry.resolve("google_drive"))
+
+
 def _cross_platform_page(registry):
     from creator_intelligence.ui.pages.cross_platform import CrossPlatformPage
 
@@ -41,9 +48,9 @@ class ContentModule:
     metadata = ModuleMetadata(
         module_id="content",
         name="Content Operations",
-        version="1.4.0",
+        version="1.5.0",
         category="content",
-        description="Dashboard, asset library and watcher, content library, linking, and pipeline.",
+        description="Dashboard, asset discovery, Google Drive connection, content linking, and pipeline.",
         dependencies=("storage", "analytics"),
     )
 
@@ -66,6 +73,13 @@ class ContentModule:
             ServiceBinding(
                 "folder_watcher",
                 lambda ctx: FolderWatcherService(ctx.db),
+                module_id=self.metadata.module_id,
+            )
+        )
+        registry.register_service(
+            ServiceBinding(
+                "google_drive",
+                lambda ctx: GoogleDriveService(ctx.db),
                 module_id=self.metadata.module_id,
             )
         )
@@ -111,6 +125,14 @@ class ContentModule:
                 "Folder Watcher",
                 lambda: _folder_watcher_page(registry),
                 order=20,
+                module_id=self.metadata.module_id,
+            )
+        )
+        registry.register_navigation(
+            NavigationItem(
+                "Google Drive",
+                lambda: _google_drive_page(registry),
+                order=30,
                 module_id=self.metadata.module_id,
             )
         )
