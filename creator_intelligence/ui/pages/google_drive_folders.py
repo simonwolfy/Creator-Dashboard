@@ -2,19 +2,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QPushButton,
-    QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QVBoxLayout,
-    QWidget,
+    QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSplitter,
+    QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
+
+from creator_intelligence.services.google_drive_metadata_sync import GoogleDriveMetadataSyncService
 
 FOLDER_ID_ROLE = Qt.ItemDataRole.UserRole
 PATH_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -25,6 +18,7 @@ class GoogleDriveFoldersPage(QWidget):
     def __init__(self, service):
         super().__init__()
         self.service = service
+        self.sync_service = GoogleDriveMetadataSyncService(service.db, service.drive_service)
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
@@ -32,11 +26,14 @@ class GoogleDriveFoldersPage(QWidget):
         title.setObjectName("pageTitle")
         browse = QPushButton("Load My Drive")
         browse.clicked.connect(self.load_root)
+        sync_all = QPushButton("Sync all mappings")
+        sync_all.clicked.connect(self.sync_all)
         refresh = QPushButton("Refresh mappings")
         refresh.clicked.connect(self.refresh)
         header.addWidget(title)
         header.addStretch()
         header.addWidget(browse)
+        header.addWidget(sync_all)
         header.addWidget(refresh)
         layout.addLayout(header)
 
@@ -45,7 +42,6 @@ class GoogleDriveFoldersPage(QWidget):
         layout.addWidget(self.summary)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
-
         browser_panel = QWidget()
         browser_layout = QVBoxLayout(browser_panel)
         self.tree = QTreeWidget()
@@ -84,10 +80,13 @@ class GoogleDriveFoldersPage(QWidget):
         mappings_layout.addWidget(self.table)
 
         actions = QHBoxLayout()
+        sync_selected = QPushButton("Sync selected")
+        sync_selected.clicked.connect(self.sync_selected)
         validate = QPushButton("Validate selected")
         validate.clicked.connect(self.validate_selected)
         remove = QPushButton("Remove selected")
         remove.clicked.connect(self.remove_selected)
+        actions.addWidget(sync_selected)
         actions.addWidget(validate)
         actions.addWidget(remove)
         actions.addStretch()
@@ -124,7 +123,6 @@ class GoogleDriveFoldersPage(QWidget):
         item.setData(0, FOLDER_ID_ROLE, folder_id)
         item.setData(0, PATH_ROLE, f"{parent_path}/{name}")
         item.setData(0, LOADED_ROLE, False)
-        # Placeholder supplies an expansion arrow. It is replaced on first expand.
         placeholder = QTreeWidgetItem(["Loading...", ""])
         placeholder.setDisabled(True)
         item.addChild(placeholder)
@@ -154,10 +152,7 @@ class GoogleDriveFoldersPage(QWidget):
         folder_id = item.data(0, FOLDER_ID_ROLE) if item else None
         selectable = bool(folder_id and folder_id != "root")
         self.map_button.setEnabled(selectable)
-        if selectable:
-            self.selected_label.setText(str(item.data(0, PATH_ROLE) or item.text(0)))
-        else:
-            self.selected_label.setText("Select a folder to map it.")
+        self.selected_label.setText(str(item.data(0, PATH_ROLE) or item.text(0)) if selectable else "Select a folder to map it.")
 
     def add_mapping(self) -> None:
         item = self.tree.currentItem()
@@ -167,9 +162,7 @@ class GoogleDriveFoldersPage(QWidget):
             return
         try:
             self.service.add_mapping(
-                str(folder_id),
-                item.text(0),
-                purpose=self.purpose_box.currentText(),
+                str(folder_id), item.text(0), purpose=self.purpose_box.currentText(),
                 folder_path=str(item.data(0, PATH_ROLE) or item.text(0)),
             )
             self.refresh()
@@ -180,10 +173,7 @@ class GoogleDriveFoldersPage(QWidget):
     def refresh(self) -> None:
         mappings = self.service.list_mappings()
         self.table.setRowCount(len(mappings))
-        keys = (
-            "folder_name", "purpose", "drive_folder_id", "recursive", "metadata_only",
-            "enabled", "last_validated_at", "last_error", "id",
-        )
+        keys = ("folder_name", "purpose", "drive_folder_id", "recursive", "metadata_only", "enabled", "last_validated_at", "last_error", "id")
         for row_index, mapping in enumerate(mappings):
             for column_index, key in enumerate(keys):
                 value = mapping.get(key)
@@ -200,6 +190,34 @@ class GoogleDriveFoldersPage(QWidget):
             return None
         item = self.table.item(row, 8)
         return int(item.text()) if item and item.text() else None
+
+    def sync_selected(self) -> None:
+        mapping_id = self._selected_id()
+        if mapping_id is None:
+            QMessageBox.information(self, "Google Drive", "Select a saved mapping first.")
+            return
+        try:
+            self.summary.setText("Synchronizing selected Drive folder...")
+            result = self.sync_service.sync_mapping(mapping_id)
+            self.refresh()
+            self.summary.setText(
+                f"Sync complete | Scanned: {result.scanned} | New: {result.created} | Updated: {result.updated} | Missing: {result.missing}"
+            )
+        except Exception as exc:
+            self.refresh()
+            QMessageBox.critical(self, "Drive sync failed", str(exc))
+
+    def sync_all(self) -> None:
+        try:
+            self.summary.setText("Synchronizing all enabled Drive mappings...")
+            results = self.sync_service.sync_all()
+            self.refresh()
+            self.summary.setText(
+                f"Synced {len(results)} mappings | Scanned: {sum(r.scanned for r in results)} | New: {sum(r.created for r in results)} | Updated: {sum(r.updated for r in results)} | Missing: {sum(r.missing for r in results)}"
+            )
+        except Exception as exc:
+            self.refresh()
+            QMessageBox.critical(self, "Drive sync failed", str(exc))
 
     def validate_selected(self) -> None:
         mapping_id = self._selected_id()
