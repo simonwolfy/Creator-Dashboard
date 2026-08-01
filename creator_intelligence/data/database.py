@@ -10,6 +10,7 @@ import pandas as pd
 
 from creator_intelligence.core.exceptions import DatabaseError, MigrationError
 from creator_intelligence.data.google_drive_folder_migration import GOOGLE_DRIVE_FOLDER_MIGRATIONS
+from creator_intelligence.data.google_drive_metadata_migration import GOOGLE_DRIVE_METADATA_MIGRATIONS
 from creator_intelligence.data.google_drive_migrations import GOOGLE_DRIVE_MIGRATIONS
 from creator_intelligence.data.migration_manager import MigrationManager, MigrationRecord
 from creator_intelligence.data.migrations import MIGRATIONS
@@ -22,7 +23,12 @@ class Database:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.migration_manager = MigrationManager(
-            [*MIGRATIONS, *GOOGLE_DRIVE_MIGRATIONS, *GOOGLE_DRIVE_FOLDER_MIGRATIONS]
+            [
+                *MIGRATIONS,
+                *GOOGLE_DRIVE_MIGRATIONS,
+                *GOOGLE_DRIVE_FOLDER_MIGRATIONS,
+                *GOOGLE_DRIVE_METADATA_MIGRATIONS,
+            ]
         )
         self.last_applied_migrations: list[MigrationRecord] = []
 
