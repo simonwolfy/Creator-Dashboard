@@ -3,6 +3,7 @@ from creator_intelligence.services.asset_management import AssetManagementServic
 from creator_intelligence.services.content_library import ContentLibraryService
 from creator_intelligence.services.creator_dashboard import CreatorDashboardService
 from creator_intelligence.services.cross_platform import CrossPlatformService
+from creator_intelligence.services.folder_watcher import FolderWatcherService
 from creator_intelligence.services.pipeline_intelligence import PipelineIntelligenceService
 
 
@@ -16,6 +17,12 @@ def _asset_library_page(registry):
     from creator_intelligence.ui.pages.asset_library import AssetLibraryPage
 
     return AssetLibraryPage(registry.resolve("asset_management"))
+
+
+def _folder_watcher_page(registry):
+    from creator_intelligence.ui.pages.folder_watcher import FolderWatcherPage
+
+    return FolderWatcherPage(registry.resolve("folder_watcher"))
 
 
 def _cross_platform_page(registry):
@@ -34,9 +41,9 @@ class ContentModule:
     metadata = ModuleMetadata(
         module_id="content",
         name="Content Operations",
-        version="1.3.0",
+        version="1.4.0",
         category="content",
-        description="Dashboard, asset and content libraries, cross-platform linking, pipeline, and calendar.",
+        description="Dashboard, asset library and watcher, content library, linking, and pipeline.",
         dependencies=("storage", "analytics"),
     )
 
@@ -52,6 +59,13 @@ class ContentModule:
             ServiceBinding(
                 "asset_management",
                 lambda ctx: AssetManagementService(ctx.db),
+                module_id=self.metadata.module_id,
+            )
+        )
+        registry.register_service(
+            ServiceBinding(
+                "folder_watcher",
+                lambda ctx: FolderWatcherService(ctx.db),
                 module_id=self.metadata.module_id,
             )
         )
@@ -89,6 +103,14 @@ class ContentModule:
                 "Asset Library",
                 lambda: _asset_library_page(registry),
                 order=10,
+                module_id=self.metadata.module_id,
+            )
+        )
+        registry.register_navigation(
+            NavigationItem(
+                "Folder Watcher",
+                lambda: _folder_watcher_page(registry),
+                order=20,
                 module_id=self.metadata.module_id,
             )
         )

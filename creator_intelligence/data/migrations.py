@@ -242,4 +242,60 @@ MIGRATIONS = [
             ON managed_asset_relationships(child_asset_id);
         """
     ),
+    (
+        6,
+        "automatic_folder_watcher",
+        """
+        CREATE TABLE IF NOT EXISTS watched_folders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            recursive INTEGER NOT NULL DEFAULT 1,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            include_extensions TEXT NOT NULL DEFAULT '',
+            exclude_extensions TEXT NOT NULL DEFAULT '',
+            calculate_checksums INTEGER NOT NULL DEFAULT 0,
+            asset_role TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_scan_at TEXT,
+            last_error TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS watched_folder_assets (
+            folder_id INTEGER NOT NULL,
+            asset_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            size_bytes INTEGER,
+            modified_ns INTEGER,
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY(folder_id, file_path),
+            UNIQUE(folder_id, asset_id),
+            FOREIGN KEY(folder_id) REFERENCES watched_folders(id) ON DELETE CASCADE,
+            FOREIGN KEY(asset_id) REFERENCES managed_assets(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS folder_scan_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            folder_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            discovered INTEGER NOT NULL DEFAULT 0,
+            created INTEGER NOT NULL DEFAULT 0,
+            updated INTEGER NOT NULL DEFAULT 0,
+            unchanged INTEGER NOT NULL DEFAULT 0,
+            missing INTEGER NOT NULL DEFAULT 0,
+            errors INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            FOREIGN KEY(folder_id) REFERENCES watched_folders(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_watched_folders_enabled
+            ON watched_folders(enabled);
+        CREATE INDEX IF NOT EXISTS idx_watched_folder_assets_asset
+            ON watched_folder_assets(asset_id);
+        CREATE INDEX IF NOT EXISTS idx_folder_scan_runs_folder
+            ON folder_scan_runs(folder_id, started_at);
+        """
+    ),
 ]
