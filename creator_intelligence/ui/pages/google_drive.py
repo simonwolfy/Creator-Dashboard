@@ -30,23 +30,26 @@ class GoogleDrivePage(QWidget):
         layout.addLayout(header)
 
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+
         self.status_value = QLabel()
         self.account_value = QLabel()
         self.client_path = QLineEdit()
         self.client_path.setReadOnly(True)
-        choose = QPushButton("Choose client-secrets JSON")
-        choose.clicked.connect(self.choose_client_file)
-        path_row = QHBoxLayout()
-        path_row.addWidget(self.client_path)
-        path_row.addWidget(choose)
-        path_widget = QWidget()
-        path_widget.setLayout(path_row)
+        self.client_path.setPlaceholderText("No OAuth client-secrets file selected")
+
+        self.choose_button = QPushButton("Browse for client-secrets JSON...")
+        self.choose_button.clicked.connect(self.choose_client_file)
+
         self.last_tested_value = QLabel()
         self.error_value = QLabel()
         self.error_value.setWordWrap(True)
+
         form.addRow("Status", self.status_value)
         form.addRow("Account", self.account_value)
-        form.addRow("OAuth client file", path_widget)
+        form.addRow("OAuth client file", self.client_path)
+        form.addRow("", self.choose_button)
         form.addRow("Last tested", self.last_tested_value)
         form.addRow("Last error", self.error_value)
         layout.addLayout(form)
@@ -65,8 +68,9 @@ class GoogleDrivePage(QWidget):
         layout.addLayout(actions)
 
         note = QLabel(
-            "Tokens are stored in the Windows credential vault, not in the Creator Intelligence database. "
-            "This phase establishes authentication and connection testing only; folder mapping and file sync follow next."
+            "Choose a Google OAuth desktop client-secrets JSON file first. "
+            "Connect becomes available after the file is accepted. Tokens are stored in the Windows credential vault, "
+            "not in the Creator Intelligence database."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -123,6 +127,7 @@ class GoogleDrivePage(QWidget):
         self.client_path.setText(status.client_secrets_path or "")
         self.last_tested_value.setText(status.last_tested_at or "Never")
         self.error_value.setText(status.last_error or "None")
+        self.choose_button.setEnabled(True)
         self.connect_button.setEnabled(status.configured)
         self.test_button.setEnabled(status.connected)
         self.disconnect_button.setEnabled(status.connected)
