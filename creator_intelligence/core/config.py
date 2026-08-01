@@ -1,8 +1,11 @@
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+
+from dataclasses import dataclass
 from pathlib import Path
-import json
+
+from creator_intelligence.core.settings import SettingsManager
 from creator_intelligence.utils.paths import CONFIG_DIR
+
 
 @dataclass
 class AppConfig:
@@ -17,26 +20,19 @@ class AppConfig:
     exclude_outliers: bool = False
     short_duration_threshold_seconds: int = 180
 
+
 class ConfigService:
+    """Compatibility facade over the workspace SettingsManager."""
+
     def __init__(self, path: Path | None = None):
         self.path = path or (CONFIG_DIR / "settings.json")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.manager = SettingsManager(self.path, AppConfig)
 
     def load(self) -> AppConfig:
-        if not self.path.exists():
-            config = AppConfig()
-            self.save(config)
-            return config
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            valid = {k: v for k, v in data.items() if k in AppConfig.__annotations__}
-            return AppConfig(**valid)
-        except Exception:
-            config = AppConfig()
-            self.save(config)
-            return config
+        return self.manager.load()
 
-    def save(self, config: AppConfig):
-        temp = self.path.with_suffix(".tmp")
-        temp.write_text(json.dumps(asdict(config), indent=2), encoding="utf-8")
-        temp.replace(self.path)
+    def save(self, config: AppConfig) -> None:
+        self.manager.save(config)
+
+    def export(self, destination: Path, config: AppConfig) -> Path:
+        return self.manager.export(destination, config)
