@@ -1,4 +1,5 @@
 from creator_intelligence.core.contracts import ModuleMetadata, NavigationItem, ServiceBinding
+from creator_intelligence.services.asset_management import AssetManagementService
 from creator_intelligence.services.content_library import ContentLibraryService
 from creator_intelligence.services.creator_dashboard import CreatorDashboardService
 from creator_intelligence.services.cross_platform import CrossPlatformService
@@ -9,6 +10,12 @@ def _dashboard_page(registry):
     from creator_intelligence.ui.pages.creator_dashboard import CreatorDashboardPage
 
     return CreatorDashboardPage(registry.resolve("creator_dashboard"))
+
+
+def _asset_library_page(registry):
+    from creator_intelligence.ui.pages.asset_library import AssetLibraryPage
+
+    return AssetLibraryPage(registry.resolve("asset_management"))
 
 
 def _cross_platform_page(registry):
@@ -27,9 +34,9 @@ class ContentModule:
     metadata = ModuleMetadata(
         module_id="content",
         name="Content Operations",
-        version="1.2.0",
+        version="1.3.0",
         category="content",
-        description="Dashboard, unified library, cross-platform linking, pipeline, and calendar.",
+        description="Dashboard, asset and content libraries, cross-platform linking, pipeline, and calendar.",
         dependencies=("storage", "analytics"),
     )
 
@@ -38,6 +45,13 @@ class ContentModule:
             ServiceBinding(
                 "content_library",
                 lambda ctx: ContentLibraryService(ctx.db),
+                module_id=self.metadata.module_id,
+            )
+        )
+        registry.register_service(
+            ServiceBinding(
+                "asset_management",
+                lambda ctx: AssetManagementService(ctx.db),
                 module_id=self.metadata.module_id,
             )
         )
@@ -67,6 +81,14 @@ class ContentModule:
                 "Dashboard",
                 lambda: _dashboard_page(registry),
                 order=0,
+                module_id=self.metadata.module_id,
+            )
+        )
+        registry.register_navigation(
+            NavigationItem(
+                "Asset Library",
+                lambda: _asset_library_page(registry),
+                order=10,
                 module_id=self.metadata.module_id,
             )
         )
