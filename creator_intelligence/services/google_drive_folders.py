@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+
 
 class GoogleDriveFolderMappingService:
     PURPOSES = ("Raw Recordings", "Exports", "Thumbnails", "Project Files", "Subtitles", "Other")
@@ -12,22 +14,50 @@ class GoogleDriveFolderMappingService:
         self.drive_service = drive_service
 
     def browse_folders(self, parent_id: str | None = None) -> list[dict[str, Any]]:
+        """Return all visible folders directly beneath a Drive parent.
+
+        ``None`` means My Drive root. Results are fully paginated and sorted
+        locally so the live browser remains deterministic across API pages.
+        """
         credentials = self.drive_service._load_credentials()
         drive = self.drive_service.drive_factory(credentials)
-        clauses = ["mimeType='application/vnd.google-apps.folder'", "trashed=false"]
-        if parent_id:
-            clauses.append(f"'{parent_id}' in parents")
-        response = (
+        effective_parent = parent_id or "root"
+        query = (
+            f"mimeType='{FOLDER_MIME_TYPE}' and trashed=false "
+            f"and '{effective_parent}' in parents"
+        )
+        folders: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            response = (
+                drive.files()
+                .list(
+                    q=query,
+                    fields="nextPageToken,files(id,name,parents,modifiedTime,webViewLink)",
+                    orderBy="name",
+                    pageSize=1000,
+                    pageToken=page_token,
+                    spaces="drive",
+                )
+                .execute()
+            )
+            folders.extend(response.get("files", []))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+        return sorted(folders, key=lambda item: str(item.get("name") or "").casefold())
+
+    def folder_details(self, folder_id: str) -> dict[str, Any]:
+        credentials = self.drive_service._load_credentials()
+        drive = self.drive_service.drive_factory(credentials)
+        return (
             drive.files()
-            .list(
-                q=" and ".join(clauses),
-                fields="files(id,name,parents,modifiedTime,webViewLink)",
-                orderBy="name",
-                pageSize=1000,
+            .get(
+                fileId=folder_id,
+                fields="id,name,parents,modifiedTime,webViewLink,trashed,mimeType",
             )
             .execute()
         )
-        return list(response.get("files", []))
 
     def add_mapping(
         self,
@@ -97,16 +127,10 @@ class GoogleDriveFolderMappingService:
             raise ValueError("Folder mapping was not found.")
         row = frame.iloc[0].to_dict()
         try:
-            credentials = self.drive_service._load_credentials()
-            drive = self.drive_service.drive_factory(credentials)
-            folder = (
-                drive.files()
-                .get(fileId=row["drive_folder_id"], fields="id,name,trashed,mimeType")
-                .execute()
-            )
+            folder = self.folder_details(str(row["drive_folder_id"]))
             if folder.get("trashed"):
                 raise RuntimeError("The mapped folder is in Google Drive trash.")
-            if folder.get("mimeType") != "application/vnd.google-apps.folder":
+            if folder.get("mimeType") != FOLDER_MIME_TYPE:
                 raise RuntimeError("The mapped item is no longer a folder.")
             now = _now()
             self.db.execute(
