@@ -9,6 +9,7 @@ from typing import Any, Iterable
 import pandas as pd
 
 from creator_intelligence.core.exceptions import DatabaseError, MigrationError
+from creator_intelligence.data.google_drive_migrations import GOOGLE_DRIVE_MIGRATIONS
 from creator_intelligence.data.migration_manager import MigrationManager, MigrationRecord
 from creator_intelligence.data.migrations import MIGRATIONS
 
@@ -19,7 +20,7 @@ class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.migration_manager = MigrationManager(MIGRATIONS)
+        self.migration_manager = MigrationManager([*MIGRATIONS, *GOOGLE_DRIVE_MIGRATIONS])
         self.last_applied_migrations: list[MigrationRecord] = []
 
     def _configure(self, con):
@@ -89,10 +90,12 @@ class Database:
             raise DatabaseError(str(exc)) from exc
 
     def table_exists(self, table: str) -> bool:
-        return bool(self.scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-            (table,),
-        ))
+        return bool(
+            self.scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            )
+        )
 
     def integrity_check(self):
         return self.scalar("PRAGMA integrity_check", default="unknown")
