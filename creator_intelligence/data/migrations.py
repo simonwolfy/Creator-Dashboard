@@ -177,4 +177,69 @@ MIGRATIONS = [
             ON unified_content_relationships(child_content_id);
         """
     ),
+    (
+        5,
+        "asset_management",
+        """
+        CREATE TABLE IF NOT EXISTS managed_assets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            asset_type TEXT NOT NULL,
+            role TEXT,
+            storage_provider TEXT NOT NULL DEFAULT 'Local',
+            provider_key TEXT,
+            location TEXT,
+            mime_type TEXT,
+            extension TEXT,
+            size_bytes INTEGER,
+            checksum_sha256 TEXT,
+            status TEXT NOT NULL DEFAULT 'Available',
+            recorded_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_verified_at TEXT,
+            notes TEXT,
+            UNIQUE(storage_provider, provider_key),
+            UNIQUE(storage_provider, location)
+        );
+
+        CREATE TABLE IF NOT EXISTS content_asset_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_id TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'supporting',
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            UNIQUE(content_id, asset_id, role),
+            FOREIGN KEY(content_id) REFERENCES content_items(id) ON DELETE CASCADE,
+            FOREIGN KEY(asset_id) REFERENCES managed_assets(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS managed_asset_relationships (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_asset_id TEXT NOT NULL,
+            child_asset_id TEXT NOT NULL,
+            relationship_type TEXT NOT NULL DEFAULT 'derived_from',
+            created_at TEXT NOT NULL,
+            notes TEXT,
+            UNIQUE(parent_asset_id, child_asset_id, relationship_type),
+            FOREIGN KEY(parent_asset_id) REFERENCES managed_assets(id) ON DELETE CASCADE,
+            FOREIGN KEY(child_asset_id) REFERENCES managed_assets(id) ON DELETE CASCADE,
+            CHECK(parent_asset_id <> child_asset_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_managed_assets_type_status
+            ON managed_assets(asset_type, status);
+        CREATE INDEX IF NOT EXISTS idx_managed_assets_checksum
+            ON managed_assets(checksum_sha256);
+        CREATE INDEX IF NOT EXISTS idx_content_asset_links_content
+            ON content_asset_links(content_id);
+        CREATE INDEX IF NOT EXISTS idx_content_asset_links_asset
+            ON content_asset_links(asset_id);
+        CREATE INDEX IF NOT EXISTS idx_managed_asset_relationships_parent
+            ON managed_asset_relationships(parent_asset_id);
+        CREATE INDEX IF NOT EXISTS idx_managed_asset_relationships_child
+            ON managed_asset_relationships(child_asset_id);
+        """
+    ),
 ]
