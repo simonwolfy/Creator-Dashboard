@@ -25,6 +25,8 @@ dev = [
 ]
 transcription = [
   "faster-whisper>=1.1",
+  "nvidia-cublas-cu12>=12.8; platform_system == 'Windows' and platform_machine == 'AMD64'",
+  "nvidia-cudnn-cu12>=9.8; platform_system == 'Windows' and platform_machine == 'AMD64'",
 ]
 
 [tool.setuptools.packages.find]
