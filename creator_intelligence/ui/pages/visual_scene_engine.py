@@ -160,14 +160,34 @@ class VisualSceneEnginePage(QWidget):
 
     @Slot(int)
     def _finished(self, count: int):
-        self.status.setText(f"Complete — {count} visual scene changes detected")
+        analyzed_asset_id = self.selected_asset_id()
+
+        self.status.setText(
+            f"Complete — {count} visual scene changes detected"
+        )
+
         self.refresh()
+
+        if analyzed_asset_id is not None:
+            frame = self.assets.model().frame
+            matches = frame.index[
+                frame["id"] == analyzed_asset_id
+            ].tolist()
+
+            if matches:
+                row = int(matches[0])
+                self.assets.selectRow(row)
+                self.refresh_changes()
 
     @Slot(str)
     def _failed(self, message: str):
         self.status.setText("Analysis failed")
-        QMessageBox.critical(self, "Visual scene detection failed", message)
-
+        QMessageBox.critical(
+            self,
+            "Visual scene detection failed",
+            message,
+        )
+    
     @Slot()
     def _cleanup(self):
         self._thread = None
