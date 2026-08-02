@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableView,
     QAbstractItemView, QDoubleSpinBox, QMessageBox,
@@ -21,25 +21,29 @@ class SceneWorker(QObject):
         self.threshold = threshold
         self.min_gap = min_gap
 
+    @Slot()
     def run(self):
         try:
             result = self.service.detect(
                 self.media_asset_id,
                 threshold=self.threshold,
                 min_gap_seconds=self.min_gap,
-                progress_callback=lambda pct, msg: self.progress.emit(pct, msg),
+                progress_callback=self._emit_progress,
             )
             self.finished.emit(len(result))
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def _emit_progress(self, percent: float, message: str) -> None:
+        self.progress.emit(float(percent), str(message))
 
 
 class VisualSceneEnginePage(QWidget):
     def __init__(self, service):
         super().__init__()
         self.service = service
-        self._thread = None
-        self._worker = None
+        self._thread: QThread | None = None
+        self._worker: SceneWorker | None = None
 
         layout = QVBoxLayout(self)
         title = QLabel("Visual Scene Detection")
@@ -80,7 +84,7 @@ class VisualSceneEnginePage(QWidget):
 
         self.assets = QTableView()
         self.assets.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.assets.clicked.connect(lambda _: self.refresh_changes())
+        self.assets.clicked.connect(self.refresh_changes)
         layout.addWidget(self.assets, 2)
 
         layout.addWidget(QLabel("Detected scene changes"))
@@ -95,6 +99,7 @@ class VisualSceneEnginePage(QWidget):
             return None
         return int(self.assets.model().frame.iloc[index.row()]["id"])
 
+    @Slot()
     def refresh(self):
         selected = self.selected_asset_id()
         self.assets.setModel(FrameModel(self.service.assets()))
@@ -105,12 +110,14 @@ class VisualSceneEnginePage(QWidget):
                 self.assets.selectRow(int(matches[0]))
         self.refresh_changes()
 
-    def refresh_changes(self):
+    @Slot()
+    def refresh_changes(self, *_):
         asset_id = self.selected_asset_id()
         self.changes.setModel(FrameModel(
             self.service.changes(asset_id) if asset_id else self.service.changes(-1)
         ))
 
+    @Slot()
     def analyze(self):
         asset_id = self.selected_asset_id()
         if asset_id is None:
@@ -121,7 +128,8 @@ class VisualSceneEnginePage(QWidget):
 
         self.run_button.setEnabled(False)
         self.status.setText("Starting visual scene analysis…")
-        thread = QThread(self)
+
+        thread = QThread()
         worker = SceneWorker(
             self.service,
             asset_id,
@@ -129,30 +137,47 @@ class VisualSceneEnginePage(QWidget):
             self.min_gap.value(),
         )
         worker.moveToThread(thread)
+
         thread.started.connect(worker.run)
-        worker.progress.connect(
-            lambda pct, msg: self.status.setText(f"{pct:.1f}% — {msg}")
-        )
+        worker.progress.connect(self._on_progress)
         worker.finished.connect(self._finished)
         worker.failed.connect(self._failed)
+
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
         thread.finished.connect(self._cleanup)
+        thread.finished.connect(thread.deleteLater)
+
         self._thread = thread
         self._worker = worker
         thread.start()
 
+    @Slot(float, str)
+    def _on_progress(self, percent: float, message: str):
+        self.status.setText(f"{percent:.1f}% — {message}")
+
+    @Slot(int)
     def _finished(self, count: int):
         self.status.setText(f"Complete — {count} visual scene changes detected")
         self.refresh()
 
+    @Slot(str)
     def _failed(self, message: str):
         self.status.setText("Analysis failed")
         QMessageBox.critical(self, "Visual scene detection failed", message)
 
+    @Slot()
     def _cleanup(self):
         self._thread = None
         self._worker = None
         self.run_button.setEnabled(True)
+
+    def closeEvent(self, event):
+        thread = self._thread
+        if thread is not None and thread.isRunning():
+            thread.requestInterruption()
+            thread.quit()
+            thread.wait(3000)
+        super().closeEvent(event)
