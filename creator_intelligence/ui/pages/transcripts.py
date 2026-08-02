@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
+from datetime import datetime
+import json
+import re
+
 import pandas as pd
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
@@ -43,6 +48,9 @@ class TranscriptsPage(QWidget):
         super().__init__()
         self.service = service
         self.worker = None
+        self._all_segments = pd.DataFrame()
+        self._chapters = pd.DataFrame()
+        self._search_results = pd.DataFrame()
 
         layout = QVBoxLayout(self)
         title = QLabel("Transcript Engine")
@@ -108,6 +116,8 @@ class TranscriptsPage(QWidget):
         layout.addWidget(self.tabs)
 
         self.transcripts_table.clicked.connect(lambda _: self.refresh_details())
+        self.chapters_table.clicked.connect(self.jump_to_chapter)
+        self.search_table.clicked.connect(self.jump_to_search_result)
         self.refresh()
 
     def selected_transcript_id(self):
@@ -157,16 +167,34 @@ class TranscriptsPage(QWidget):
     def refresh_details(self):
         transcript_id = self.selected_transcript_id()
         if not transcript_id:
+            self._all_segments = pd.DataFrame()
+            self._chapters = pd.DataFrame()
             self.segments_table.setModel(FrameModel(pd.DataFrame()))
             self.chapters_table.setModel(FrameModel(pd.DataFrame()))
             return
 
-        segments = self.service.segments(transcript_id)
-        chapters = self.service.chapters(transcript_id)
-        self.segments_table.setModel(FrameModel(segments))
-        self.chapters_table.setModel(FrameModel(chapters))
+        self._all_segments = self.service.segments(transcript_id)
+        self._chapters = self.service.chapters(transcript_id)
+        self._show_segments(self._all_segments)
+        self.chapters_table.setModel(FrameModel(self._chapters))
+        self._stretch_column(self.chapters_table, self._chapters, "summary")
+
+    def _show_segments(self, segments, selected_segment_id=None):
+        model = FrameModel(segments)
+        self.segments_table.setModel(model)
         self._stretch_column(self.segments_table, segments, "text")
-        self._stretch_column(self.chapters_table, chapters, "summary")
+        if segments.empty:
+            return
+        row = 0
+        if selected_segment_id is not None and "id" in segments.columns:
+            matches = segments.index[
+                segments["id"] == int(selected_segment_id)
+            ].tolist()
+            if matches:
+                row = int(matches[0])
+        self.segments_table.selectRow(row)
+        self.segments_table.setCurrentIndex(model.index(row, 0))
+        self.segments_table.scrollTo(model.index(row, 0))
 
     @staticmethod
     def _stretch_column(table, frame, column_name):
@@ -278,6 +306,8 @@ class TranscriptsPage(QWidget):
             chapters = self.service.build_chapters(
                 transcript_id, target_minutes=minutes
             )
+            self._improve_chapter_metadata(transcript_id, chapters)
+            chapters = self.service.chapters(transcript_id)
         except Exception as exc:
             QMessageBox.critical(self, "Chapter generation failed", str(exc))
             return
@@ -288,11 +318,130 @@ class TranscriptsPage(QWidget):
             self.chapters_table.selectRow(0)
         count = len(chapters)
         self.action_status.setText(
-            f"Built {count} chapters for transcript {transcript_id}."
+            f"Built {count} topic-aware chapters for transcript {transcript_id}."
         )
         QMessageBox.information(
             self, "Chapters built", f"{count} chapters were created."
         )
+
+    def _improve_chapter_metadata(self, transcript_id, chapters):
+        if chapters.empty:
+            return
+        stop = {
+            "about", "after", "again", "also", "because", "been", "before",
+            "being", "could", "didnt", "doesnt", "dont", "from", "going",
+            "have", "here", "into", "just", "like", "more", "really", "right",
+            "should", "some", "that", "thats", "their", "them", "then", "there",
+            "these", "they", "thing", "this", "those", "through", "very", "want",
+            "were", "what", "when", "where", "which", "while", "with", "would",
+            "yeah", "your", "youre", "okay", "well", "actually", "little",
+        }
+        now = datetime.now().isoformat()
+        for _, chapter in chapters.iterrows():
+            chapter_segments = self.service.segments(
+                transcript_id,
+                start=float(chapter["start_seconds"]),
+                end=float(chapter["end_seconds"]),
+            )
+            if chapter_segments.empty:
+                continue
+            texts = [str(value).strip() for value in chapter_segments["text"] if str(value).strip()]
+            combined = " ".join(texts)
+            words = [
+                word.lower()
+                for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", combined)
+                if word.lower().replace("'", "") not in stop
+            ]
+            counts = Counter(words)
+            keywords = [word for word, _ in counts.most_common(8)]
+
+            phrases = Counter()
+            for text in texts:
+                tokens = [
+                    word.lower()
+                    for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", text)
+                    if word.lower().replace("'", "") not in stop
+                ]
+                for size in (3, 2):
+                    for offset in range(max(0, len(tokens) - size + 1)):
+                        phrase = tuple(tokens[offset:offset + size])
+                        phrases[phrase] += 1
+
+            title = None
+            ranked_phrases = sorted(
+                phrases.items(),
+                key=lambda item: (
+                    -(item[1] * len(item[0])),
+                    -sum(counts[token] for token in item[0]),
+                    item[0],
+                ),
+            )
+            for phrase, _ in ranked_phrases:
+                candidate = " ".join(word.title() for word in phrase)
+                if 8 <= len(candidate) <= 58:
+                    title = candidate
+                    break
+            if not title and keywords:
+                title = " & ".join(word.title() for word in keywords[:3])
+            if not title:
+                title = f'Chapter {int(chapter["chapter_index"]) + 1}'
+
+            summary_texts = texts[:4]
+            summary = " ".join(summary_texts)
+            summary = re.sub(r"\s+", " ", summary).strip()
+            if len(summary) > 320:
+                summary = summary[:320].rsplit(" ", 1)[0] + "…"
+
+            confidences = pd.to_numeric(
+                chapter_segments.get("confidence", pd.Series(dtype=float)),
+                errors="coerce",
+            ).dropna()
+            transcript_confidence = float(confidences.mean()) if not confidences.empty else 0.5
+            keyword_support = min(1.0, sum(counts[word] for word in keywords[:3]) / 12.0)
+            confidence = round(min(0.95, max(0.35, transcript_confidence * 0.75 + keyword_support * 0.25)), 2)
+
+            self.service.db.execute(
+                """UPDATE transcript_chapters
+                   SET title=?,summary=?,keywords_json=?,confidence=?,
+                       source='topic-heuristic',updated_at=?
+                   WHERE id=?""",
+                (
+                    title,
+                    summary,
+                    json.dumps(keywords[:6]),
+                    confidence,
+                    now,
+                    int(chapter["id"]),
+                ),
+            )
+
+    def jump_to_chapter(self, index):
+        if not index.isValid() or self._chapters.empty:
+            return
+        chapter = self._chapters.iloc[index.row()]
+        transcript_id = int(chapter["transcript_id"])
+        self._select_transcript(transcript_id)
+        segments = self.service.segments(
+            transcript_id,
+            start=float(chapter["start_seconds"]),
+            end=float(chapter["end_seconds"]),
+        )
+        self._show_segments(segments)
+        self.tabs.setCurrentWidget(self.segments_table)
+        self.action_status.setText(
+            f'Chapter {int(chapter["chapter_index"]) + 1}: {chapter["title"]} '
+            f'({self._clock(chapter["start_seconds"])}–{self._clock(chapter["end_seconds"])})'
+        )
+
+    def _select_transcript(self, transcript_id):
+        model = self.transcripts_table.model()
+        if model is None or not hasattr(model, "frame") or model.frame.empty:
+            return
+        matches = model.frame.index[model.frame["id"] == int(transcript_id)].tolist()
+        if matches:
+            row = int(matches[0])
+            self.transcripts_table.selectRow(row)
+            self.transcripts_table.setCurrentIndex(model.index(row, 0))
 
     def export_srt(self):
         transcript_id = self.selected_transcript_id()
@@ -334,15 +483,73 @@ class TranscriptsPage(QWidget):
             return
         try:
             results = self.service.search(query, transcript_id=None)
+            results = self._add_chapter_context(results)
         except Exception as exc:
             QMessageBox.critical(self, "Transcript search failed", str(exc))
             return
 
+        self._search_results = results
         self.search_table.setModel(FrameModel(results))
         self._stretch_column(self.search_table, results, "text")
         self.tabs.setCurrentWidget(self.search_table)
         if not results.empty:
             self.search_table.selectRow(0)
         self.action_status.setText(
-            f'Found {len(results)} result(s) for “{query}”.'
+            f'Found {len(results)} result(s) for “{query}”. Click a result to jump to it.'
         )
+
+    def _add_chapter_context(self, results):
+        if results.empty:
+            return results
+        enriched = results.copy()
+        chapter_ids = []
+        chapter_indexes = []
+        chapter_titles = []
+        for _, result in enriched.iterrows():
+            transcript_id = int(result["transcript_id"])
+            start = float(result["start_seconds"])
+            chapters = self.service.chapters(transcript_id)
+            match = chapters[
+                (chapters["start_seconds"] <= start)
+                & (chapters["end_seconds"] >= start)
+            ] if not chapters.empty else chapters
+            if match.empty:
+                chapter_ids.append(None)
+                chapter_indexes.append(None)
+                chapter_titles.append("Unassigned")
+            else:
+                chapter = match.iloc[0]
+                chapter_ids.append(int(chapter["id"]))
+                chapter_indexes.append(int(chapter["chapter_index"]) + 1)
+                chapter_titles.append(str(chapter["title"]))
+        insert_at = min(3, len(enriched.columns))
+        enriched.insert(insert_at, "chapter_id", chapter_ids)
+        enriched.insert(insert_at + 1, "chapter_number", chapter_indexes)
+        enriched.insert(insert_at + 2, "chapter_title", chapter_titles)
+        return enriched
+
+    def jump_to_search_result(self, index):
+        if not index.isValid() or self._search_results.empty:
+            return
+        result = self._search_results.iloc[index.row()]
+        transcript_id = int(result["transcript_id"])
+        segment_id = int(result["segment_id"])
+        self._select_transcript(transcript_id)
+        self._all_segments = self.service.segments(transcript_id)
+        self._show_segments(self._all_segments, selected_segment_id=segment_id)
+        self._chapters = self.service.chapters(transcript_id)
+        self.chapters_table.setModel(FrameModel(self._chapters))
+        self._stretch_column(self.chapters_table, self._chapters, "summary")
+        self.tabs.setCurrentWidget(self.segments_table)
+        chapter_title = result.get("chapter_title", "Unassigned")
+        self.action_status.setText(
+            f'Jumped to {self._clock(result["start_seconds"])} in “{result["title"]}” '
+            f'— chapter: {chapter_title}.'
+        )
+
+    @staticmethod
+    def _clock(seconds):
+        total = max(0, int(float(seconds)))
+        hours, remainder = divmod(total, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
