@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from creator_intelligence.services.transcript_intelligence import TranscriptIntelligenceMixin
 from creator_intelligence.services.transcripts import (
     TranscriptEngineStatus,
     TranscriptService,
@@ -19,19 +20,13 @@ _DLL_DIRECTORIES_REGISTERED = False
 
 
 def _register_nvidia_dll_directories() -> list[Path]:
-    """Expose pip- and toolkit-installed NVIDIA runtime DLLs on Windows.
-
-    Modern Windows Python does not reliably search package-local ``bin``
-    directories when CTranslate2 loads cuBLAS and cuDNN. Keep the directory
-    handles alive for the process lifetime so faster-whisper can load them.
-    """
+    """Expose pip- and toolkit-installed NVIDIA runtime DLLs on Windows."""
     global _DLL_DIRECTORIES_REGISTERED
     if _DLL_DIRECTORIES_REGISTERED:
         return []
     _DLL_DIRECTORIES_REGISTERED = True
 
     candidates: list[Path] = []
-
     for package_name in ("nvidia.cublas", "nvidia.cudnn"):
         try:
             package = importlib.import_module(package_name)
@@ -54,7 +49,6 @@ def _register_nvidia_dll_directories() -> list[Path]:
     registered: list[Path] = []
     seen: set[str] = set()
     add_dll_directory = getattr(os, "add_dll_directory", None)
-
     for directory in candidates:
         if not directory.is_dir():
             continue
@@ -62,7 +56,6 @@ def _register_nvidia_dll_directories() -> list[Path]:
         if normalized in seen:
             continue
         seen.add(normalized)
-
         os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
         if add_dll_directory is not None:
             try:
@@ -70,16 +63,11 @@ def _register_nvidia_dll_directories() -> list[Path]:
             except OSError:
                 continue
         registered.append(directory)
-
     return registered
 
 
-class LocalWhisperTranscriptService(TranscriptService):
-    """Transcript service with direct faster-whisper integration.
-
-    This avoids depending on a fragile command-line wrapper and gives Creator
-    Intelligence timestamped segments and words directly from Python.
-    """
+class LocalWhisperTranscriptService(TranscriptIntelligenceMixin, TranscriptService):
+    """Transcript service with direct faster-whisper and editing intelligence."""
 
     def engine_status(self):
         if importlib.util.find_spec("faster_whisper") is not None:
@@ -96,15 +84,12 @@ class LocalWhisperTranscriptService(TranscriptService):
             return super()._run_engine(job, status, cancel, progress_callback)
 
         _register_nvidia_dll_directories()
-        from faster_whisper import WhisperModel
-
         settings = self._job_settings(job)
         model_name = str(job.get("model_name") or "base")
         input_path = str(job["input_path"])
         transcript = self.transcript(job["transcript_id"])
         language = str(transcript.get("language") or "en")
         duration = self._duration_for_job(job)
-
         device = str(settings.get("device") or "auto").lower()
         compute_type = str(settings.get("compute_type") or "auto").lower()
         beam_size = max(1, int(settings.get("beam_size") or 5))
@@ -124,7 +109,6 @@ class LocalWhisperTranscriptService(TranscriptService):
         for segment in segment_iter:
             if cancel.is_set():
                 return []
-
             words = []
             probabilities = []
             for word in segment.words or []:
@@ -138,10 +122,7 @@ class LocalWhisperTranscriptService(TranscriptService):
                     "probability": probability,
                 })
 
-            confidence = (
-                sum(probabilities) / len(probabilities)
-                if probabilities else None
-            )
+            confidence = sum(probabilities) / len(probabilities) if probabilities else None
             end_seconds = float(segment.end or 0)
             rows.append({
                 "start": float(segment.start or 0),
@@ -151,20 +132,13 @@ class LocalWhisperTranscriptService(TranscriptService):
                 "words": words,
                 "tags": ["faster-whisper", f"language:{info.language}"],
             })
-
             percent = min(99.0, end_seconds / duration * 100.0) if duration else 0.0
             self.db.execute(
-                """UPDATE transcript_jobs SET progress_percent=?,updated_at=?
-                   WHERE id=?""",
+                """UPDATE transcript_jobs SET progress_percent=?,updated_at=? WHERE id=?""",
                 (percent, datetime.now().isoformat(), int(job["id"])),
             )
             if progress_callback:
-                progress_callback(
-                    int(job["id"]),
-                    percent,
-                    f"{end_seconds:.1f}s transcribed",
-                )
-
+                progress_callback(int(job["id"]), percent, f"{end_seconds:.1f}s transcribed")
         return rows
 
     def _load_model(self, model_name: str, device: str, compute_type: str):
@@ -175,11 +149,7 @@ class LocalWhisperTranscriptService(TranscriptService):
             resolved_compute = compute_type
             if resolved_compute == "auto":
                 resolved_compute = "float16" if device == "cuda" else "int8"
-            return WhisperModel(
-                model_name,
-                device=device,
-                compute_type=resolved_compute,
-            )
+            return WhisperModel(model_name, device=device, compute_type=resolved_compute)
 
         try:
             return WhisperModel(
