@@ -96,8 +96,35 @@ class TranscriptsPage(QWidget):
         return int(self.jobs_table.model().frame.iloc[index.row()]["id"])
 
     def refresh(self):
-        self.transcripts_table.setModel(FrameModel(self.service.transcripts()))
-        self.jobs_table.setModel(FrameModel(self.service.jobs()))
+        selected_transcript=self.selected_transcript_id()
+        selected_job=self.selected_job_id()
+
+        transcripts=self.service.transcripts()
+        transcript_model=FrameModel(transcripts)
+        self.transcripts_table.setModel(transcript_model)
+        if not transcripts.empty:
+            row=0
+            if selected_transcript is not None:
+                matches=transcripts.index[
+                    transcripts["id"] == selected_transcript
+                ].tolist()
+                if matches:
+                    row=int(matches[0])
+            self.transcripts_table.selectRow(row)
+            self.transcripts_table.setCurrentIndex(transcript_model.index(row,0))
+
+        jobs=self.service.jobs()
+        jobs_model=FrameModel(jobs)
+        self.jobs_table.setModel(jobs_model)
+        if not jobs.empty:
+            row=0
+            if selected_job is not None:
+                matches=jobs.index[jobs["id"] == selected_job].tolist()
+                if matches:
+                    row=int(matches[0])
+            self.jobs_table.selectRow(row)
+            self.jobs_table.setCurrentIndex(jobs_model.index(row,0))
+
         self.refresh_details()
 
     def refresh_details(self):
