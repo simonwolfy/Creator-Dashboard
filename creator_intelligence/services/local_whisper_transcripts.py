@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+import importlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,66 @@ from creator_intelligence.services.transcripts import (
     TranscriptEngineStatus,
     TranscriptService,
 )
+
+
+_DLL_DIRECTORY_HANDLES: list[Any] = []
+_DLL_DIRECTORIES_REGISTERED = False
+
+
+def _register_nvidia_dll_directories() -> list[Path]:
+    """Expose pip- and toolkit-installed NVIDIA runtime DLLs on Windows.
+
+    Modern Windows Python does not reliably search package-local ``bin``
+    directories when CTranslate2 loads cuBLAS and cuDNN. Keep the directory
+    handles alive for the process lifetime so faster-whisper can load them.
+    """
+    global _DLL_DIRECTORIES_REGISTERED
+    if _DLL_DIRECTORIES_REGISTERED:
+        return []
+    _DLL_DIRECTORIES_REGISTERED = True
+
+    candidates: list[Path] = []
+
+    for package_name in ("nvidia.cublas", "nvidia.cudnn"):
+        try:
+            package = importlib.import_module(package_name)
+            for package_path in getattr(package, "__path__", []):
+                candidates.append(Path(package_path) / "bin")
+        except ImportError:
+            continue
+
+    cuda_path = os.environ.get("CUDA_PATH")
+    if cuda_path:
+        candidates.append(Path(cuda_path) / "bin")
+
+    toolkit_root = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+    if toolkit_root.is_dir():
+        candidates.extend(
+            version_dir / "bin"
+            for version_dir in sorted(toolkit_root.glob("v*"), reverse=True)
+        )
+
+    registered: list[Path] = []
+    seen: set[str] = set()
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+
+    for directory in candidates:
+        if not directory.is_dir():
+            continue
+        normalized = os.path.normcase(str(directory.resolve()))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+
+        os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
+        if add_dll_directory is not None:
+            try:
+                _DLL_DIRECTORY_HANDLES.append(add_dll_directory(str(directory)))
+            except OSError:
+                continue
+        registered.append(directory)
+
+    return registered
 
 
 class LocalWhisperTranscriptService(TranscriptService):
@@ -33,6 +95,7 @@ class LocalWhisperTranscriptService(TranscriptService):
         if status.engine != "embedded-faster-whisper":
             return super()._run_engine(job, status, cancel, progress_callback)
 
+        _register_nvidia_dll_directories()
         from faster_whisper import WhisperModel
 
         settings = self._job_settings(job)
@@ -105,6 +168,7 @@ class LocalWhisperTranscriptService(TranscriptService):
         return rows
 
     def _load_model(self, model_name: str, device: str, compute_type: str):
+        _register_nvidia_dll_directories()
         from faster_whisper import WhisperModel
 
         if device != "auto":
