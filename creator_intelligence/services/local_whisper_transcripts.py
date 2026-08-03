@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from creator_intelligence.services.transcript_exports import TranscriptExportMixin
 from creator_intelligence.services.transcript_intelligence import TranscriptIntelligenceMixin
 from creator_intelligence.services.transcripts import (
     TranscriptEngineStatus,
@@ -66,8 +67,12 @@ def _register_nvidia_dll_directories() -> list[Path]:
     return registered
 
 
-class LocalWhisperTranscriptService(TranscriptIntelligenceMixin, TranscriptService):
-    """Transcript service with direct faster-whisper and editing intelligence."""
+class LocalWhisperTranscriptService(
+    TranscriptExportMixin,
+    TranscriptIntelligenceMixin,
+    TranscriptService,
+):
+    """Transcript service with faster-whisper, editing, and professional exports."""
 
     def _shift_indexes_up(self, table: str, index_column: str,
                           transcript_id: int, after_index: int) -> None:
