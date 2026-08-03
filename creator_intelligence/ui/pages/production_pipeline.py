@@ -185,17 +185,35 @@ class ProductionPipelinePage(ProductionPage):
             self.refresh_clip_notes()
 
     def export_clip_queue(self):
+        formats = [
+            "Production Queue (.csv)",
+            "Production Queue (.json)",
+            "Edit Decision List (.edl)",
+            "Adobe Premiere Pro Markers (.csv)",
+            "DaVinci Resolve Markers (.csv)",
+        ]
+
         format_name, ok = QInputDialog.getItem(
-            self, "Export queue", "Format",
-            ["CSV", "JSON", "EDL", "Premiere markers", "Resolve markers"],
-            0, False,
+            self,
+            "Export queue",
+            "Export format",
+            formats,
+            0,
+            False,
         )
         if not ok:
             return
-        suffix = {
-            "CSV": ".csv", "JSON": ".json", "EDL": ".edl",
-            "Premiere markers": ".csv", "Resolve markers": ".csv",
-        }[format_name]
+
+        export_map = {
+            "Production Queue (.csv)": ("CSV", ".csv"),
+            "Production Queue (.json)": ("JSON", ".json"),
+            "Edit Decision List (.edl)": ("EDL", ".edl"),
+            "Adobe Premiere Pro Markers (.csv)": ("Premiere markers", ".csv"),
+            "DaVinci Resolve Markers (.csv)": ("Resolve markers", ".csv"),
+        }
+    
+        export_type, suffix = export_map[format_name]
+
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export production queue",
@@ -203,11 +221,13 @@ class ProductionPipelinePage(ProductionPage):
         )
         if not path:
             return
+
         try:
-            saved = self.service.export_clip_jobs(path, format_name)
+            saved = self.service.export_clip_jobs(path, export_type)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
+
         QMessageBox.information(self, "Queue exported", saved)
 
     def seek_clip_job(self, index):
