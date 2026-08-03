@@ -63,7 +63,7 @@ def make_service(tmp_path):
     return service, transcript_id, clip_id
 
 
-def test_analyze_clip_candidate_persists_scores_and_suggestions(tmp_path):
+def test_analyze_clip_candidate_builds_creator_package(tmp_path):
     service, transcript_id, clip_id = make_service(tmp_path)
 
     result = service.analyze_clip_candidate(clip_id)
@@ -73,16 +73,37 @@ def test_analyze_clip_candidate_persists_scores_and_suggestions(tmp_path):
     assert result["surprise_score"] > 40
     assert result["suggested_start_seconds"] < 10
     assert result["suggested_end_seconds"] > 28
-    assert result["suggested_title"]
-    assert "#gaming" in result["suggested_hashtags"]
+    assert result["suggested_title"] != "Wait, what"
+    assert len(result["title_alternatives"]) >= 5
+    assert len(result["suggested_caption"]) < 180
+    assert "?" in result["suggested_caption"]
+    assert result["hook_line"]
+    assert result["packaging_reasoning"]
+    assert result["likely_audience"] == "RimWorld viewers"
+    assert result["platform_packages"]["youtube_shorts"]["title"]
+    assert "#RimWorld" in result["suggested_hashtags"]
 
-    row = service.clip_candidates(transcript_id).iloc[0]
-    assert row["intelligence_version"] == "local-heuristic-v1"
-    assert float(row["viral_score"]) == result["viral_score"]
-    assert json.loads(row["suggested_hashtags_json"])
+    row = service.clip_packaging(clip_id)
+    assert row["intelligence_version"] == "creator-packaging-v2"
+    assert json.loads(row["title_alternatives_json"])
+    assert json.loads(row["platform_packages_json"])["tiktok"]["caption"]
 
 
-def test_batch_analysis_and_production_use_intelligent_title_and_trim(tmp_path):
+def test_caption_is_packaging_copy_not_transcript_dump(tmp_path):
+    service, _, clip_id = make_service(tmp_path)
+    result = service.analyze_clip_candidate(clip_id)
+
+    transcript_text = (
+        "Wait, what? No way! We found the secret tunnel and this is insane! "
+        "That was actually funny, bro."
+    )
+    assert result["suggested_caption"] != transcript_text
+    assert result["caption_style"] == "conversational-engagement"
+    assert result["retention_estimate"] > 40
+    assert result["performance_prediction"] in {"High", "Moderate", "Experimental"}
+
+
+def test_batch_analysis_and_production_use_packaged_title_and_trim(tmp_path):
     service, transcript_id, clip_id = make_service(tmp_path)
 
     analyzed = service.analyze_clip_candidates([clip_id, clip_id])
