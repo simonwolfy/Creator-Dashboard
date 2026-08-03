@@ -1,11 +1,17 @@
-from creator_intelligence.services.local_whisper_transcripts import LocalWhisperTranscriptService
+from creator_intelligence.services.creator_packaging_intelligence import (
+    CreatorPackagingIntelligenceMixin,
+)
+from creator_intelligence.services.local_whisper_transcripts import (
+    LocalWhisperTranscriptService,
+)
 from creator_intelligence.services.transcript_production import TranscriptProductionMixin
 
 
 class LocalWhisperProductionService(
+    CreatorPackagingIntelligenceMixin,
     TranscriptProductionMixin,
     LocalWhisperTranscriptService,
 ):
-    """Local Whisper transcript service with clip review and production handoff."""
+    """Local transcript service with packaging intelligence and production handoff."""
 
     pass
