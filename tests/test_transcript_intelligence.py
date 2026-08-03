@@ -24,6 +24,13 @@ class SQLiteDB:
 
 def make_service(tmp_path):
     db = SQLiteDB(tmp_path / "transcripts.db")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS media_assets(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            display_name TEXT,
+            source_path TEXT
+        )"""
+    )
     service = LocalWhisperTranscriptService(db)
     transcript_id = service.create_transcript("Test stream")
     service.add_segments(
