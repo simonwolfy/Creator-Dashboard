@@ -7,21 +7,22 @@ from creator_intelligence.services.local_whisper_transcripts import (
 
 
 def _page(registry):
-    from creator_intelligence.ui.pages.transcript_editor_polished import (
-        PolishedTranscriptEditorPage,
+    from creator_intelligence.ui.pages.transcript_production import (
+        TranscriptProductionPage,
     )
-    return PolishedTranscriptEditorPage(registry.resolve("transcripts"))
+    return TranscriptProductionPage(registry.resolve("transcripts"))
 
 
 class TranscriptModule:
     metadata = ModuleMetadata(
         module_id="transcripts",
         name="Transcript Engine",
-        version="1.3.0",
+        version="1.4.0",
         category="media",
         description=(
             "GPU-accelerated transcription, transcript editing and review, "
-            "chapter management, search, statistics, and professional exports."
+            "chapter management, search, statistics, professional exports, "
+            "and editor clip handoff."
         ),
         dependencies=("storage", "video_processing"),
     )
