@@ -1,5 +1,5 @@
-from creator_intelligence.services.creator_packaging_intelligence import (
-    CreatorPackagingIntelligenceMixin,
+from creator_intelligence.services.creator_packaging_context import (
+    CreatorPackagingContextMixin,
 )
 from creator_intelligence.services.creator_packaging_queries import (
     CreatorPackagingQueriesMixin,
@@ -12,7 +12,7 @@ from creator_intelligence.services.transcript_production import TranscriptProduc
 
 class LocalWhisperProductionService(
     CreatorPackagingQueriesMixin,
-    CreatorPackagingIntelligenceMixin,
+    CreatorPackagingContextMixin,
     TranscriptProductionMixin,
     LocalWhisperTranscriptService,
 ):
