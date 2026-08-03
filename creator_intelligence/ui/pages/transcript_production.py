@@ -48,56 +48,64 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
         super()._update_action_states()
         button = getattr(self, "_editor_buttons", {}).get("create_clip")
         if button is not None:
-            button.setEnabled(len(self._selected_segments()) >= 1)
+            button.setEnabled(
+                self.selected_transcript_id() is not None
+                and len(self._selected_segments()) >= 1
+            )
 
     def create_clip_candidate(self) -> None:
         rows = self._selected_segments()
-        if rows.empty:
+        transcript_id = self.selected_transcript_id()
+        if rows.empty or transcript_id is None:
             QMessageBox.warning(
                 self, "No transcript selected", "Select one or more transcript rows."
             )
             return
 
-        transcript_ids = {int(value) for value in rows["transcript_id"]}
-        if len(transcript_ids) != 1:
-            QMessageBox.warning(
-                self, "Mixed transcripts", "All selected rows must use one transcript."
+        try:
+            ordered = rows.sort_values(["start_seconds", "end_seconds"])
+            start = float(ordered.iloc[0]["start_seconds"])
+            end = float(ordered.iloc[-1]["end_seconds"])
+            combined_text = " ".join(
+                str(value).strip() for value in ordered["text"]
+            )
+            default_title = combined_text[:72].strip() or f"Clip at {self._clock(start)}"
+
+            title, ok = QInputDialog.getText(
+                self, "Create editor clip", "Clip title", text=default_title
+            )
+            if not ok or not title.strip():
+                return
+            reason, ok = QInputDialog.getMultiLineText(
+                self,
+                "Editor instruction",
+                "Why should the editor use this moment?",
+                "Creator-selected transcript moment.",
+            )
+            if not ok:
+                return
+
+            confidence = pd.to_numeric(
+                ordered.get("confidence", pd.Series(dtype=float)), errors="coerce"
+            ).dropna()
+            score = float(confidence.mean() * 100.0) if len(confidence) else 50.0
+            clip_id = self.service.add_clip_candidate(
+                int(transcript_id),
+                start,
+                end,
+                title.strip(),
+                reason.strip(),
+                score,
+                "creator-selection",
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Clip creation failed",
+                str(exc),
             )
             return
 
-        ordered = rows.sort_values(["start_seconds", "end_seconds"])
-        start = float(ordered.iloc[0]["start_seconds"])
-        end = float(ordered.iloc[-1]["end_seconds"])
-        combined_text = " ".join(str(value).strip() for value in ordered["text"])
-        default_title = combined_text[:72].strip() or f"Clip at {self._clock(start)}"
-
-        title, ok = QInputDialog.getText(
-            self, "Create editor clip", "Clip title", text=default_title
-        )
-        if not ok or not title.strip():
-            return
-        reason, ok = QInputDialog.getMultiLineText(
-            self,
-            "Editor instruction",
-            "Why should the editor use this moment?",
-            "Creator-selected transcript moment.",
-        )
-        if not ok:
-            return
-
-        confidence = pd.to_numeric(
-            ordered.get("confidence", pd.Series(dtype=float)), errors="coerce"
-        ).dropna()
-        score = float(confidence.mean() * 100.0) if len(confidence) else 50.0
-        clip_id = self.service.add_clip_candidate(
-            int(next(iter(transcript_ids))),
-            start,
-            end,
-            title.strip(),
-            reason.strip(),
-            score,
-            "creator-selection",
-        )
         self.status.setText(
             f"Created clip candidate {clip_id}: {self._clock(start)}–{self._clock(end)}."
         )
