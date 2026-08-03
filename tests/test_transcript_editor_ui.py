@@ -3,6 +3,10 @@ from creator_intelligence.ui.pages.transcript_editor import (
     TranscriptEditorPage,
     format_transcript_statistics,
 )
+from creator_intelligence.ui.pages.transcript_editor_polished import (
+    MetricCard,
+    PolishedTranscriptEditorPage,
+)
 
 
 def test_transcript_statistics_summary_formats_review_metrics():
@@ -43,3 +47,10 @@ def test_editor_exposes_every_supported_export_format():
 
 def test_transcript_editor_page_keeps_seek_signal_contract():
     assert hasattr(TranscriptEditorPage, "seek_requested")
+
+
+def test_polished_editor_preserves_editor_contract():
+    assert issubclass(PolishedTranscriptEditorPage, TranscriptEditorPage)
+    assert hasattr(PolishedTranscriptEditorPage, "_update_action_states")
+    assert hasattr(PolishedTranscriptEditorPage, "_update_polished_state")
+    assert hasattr(MetricCard, "set_value")
