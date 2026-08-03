@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+
+import pandas as pd
+
+from creator_intelligence.services.creator_dna import CreatorDNAService
+
+
+class SQLiteDB:
+    def __init__(self, path):
+        self.connection = sqlite3.connect(str(path))
+
+    def execute(self, sql, params=()):
+        cursor = self.connection.execute(sql, tuple(params))
+        self.connection.commit()
+        return cursor.lastrowid
+
+    def frame(self, sql, params=()):
+        return pd.read_sql_query(sql, self.connection, params=tuple(params))
+
+
+def make_service(tmp_path):
+    db = SQLiteDB(tmp_path / "creator_dna.db")
+    db.execute(
+        """CREATE TABLE transcript_clip_candidates(
+            id INTEGER PRIMARY KEY,
+            title TEXT,start_seconds REAL,end_seconds REAL,review_status TEXT,
+            hook_score REAL,humor_score REAL,surprise_score REAL,emotion_score REAL,
+            quote_score REAL,viral_score REAL,retention_estimate REAL,
+            suggested_title TEXT,suggested_caption TEXT,caption_style TEXT,
+            suggested_hashtags_json TEXT
+        )"""
+    )
+    db.execute(
+        """CREATE TABLE production_clip_jobs(
+            id INTEGER PRIMARY KEY,clip_candidate_id INTEGER
+        )"""
+    )
+    rows = [
+        (1,"Secret",10,30,"Approved",80,20,75,60,82,78,76,
+         "The Secret I Almost Missed","Did you know this was here?",
+         "conversational-engagement",json.dumps(["#RimWorld","#GamingShorts"])),
+        (2,"Fail",40,55,"Approved",70,68,55,72,75,74,73,
+         "I Knew This Was a Bad Idea","Would you have done the same?",
+         "conversational-engagement",json.dumps(["#RimWorld","#GamingFails"])),
+        (3,"Pending",60,70,"Unreviewed",50,10,20,15,60,45,61,
+         "Wait Until You See This","What happens next?",
+         "question",json.dumps(["#GamingShorts"])),
+    ]
+    for row in rows:
+        db.execute(
+            "INSERT INTO transcript_clip_candidates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            row,
+        )
+    return CreatorDNAService(db)
+
+
+def test_rebuild_profile_learns_from_approved_clips(tmp_path):
+    service = make_service(tmp_path)
+    profile = service.rebuild_profile()
+
+    assert profile["approved_clips"] == 2
+    assert profile["average_clip_length"] == 17.5
+    assert profile["average_hook"] == 75.0
+    assert profile["preferred_caption_style"] == "conversational-engagement"
+    assert "#RimWorld" in profile["favorite_hashtags"]
+    assert profile["packaging_confidence"] == 25.0
+
+
+def test_learning_events_persist(tmp_path):
+    service = make_service(tmp_path)
+    event_id = service.record_event(
+        "approved", clip_id=2, old_value="Unreviewed", new_value="Approved"
+    )
+
+    events = service.learning_events()
+    assert int(events.iloc[0]["id"]) == event_id
+    assert events.iloc[0]["event_type"] == "approved"
+    assert int(events.iloc[0]["clip_id"]) == 2
+
+
+def test_recommendations_surface_backlog_and_production_actions(tmp_path):
+    service = make_service(tmp_path)
+    service.rebuild_profile()
+    recommendations = service.recommendations()
+
+    keys = set(recommendations["recommendation_key"])
+    assert "review-backlog" in keys
+    assert "approved-ready" in keys
+    assert recommendations.iloc[0]["priority"] >= recommendations.iloc[-1]["priority"]
