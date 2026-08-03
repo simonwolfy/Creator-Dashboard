@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import json
 import pandas as pd
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QHBoxLayout,
+    QMessageBox,
+    QPushButton,
+    QTextEdit,
+    QVBoxLayout,
+)
 
 from creator_intelligence.ui.pages.transcript_production import TranscriptProductionPage
 from creator_intelligence.ui.pages.twitch import FrameModel
@@ -37,7 +46,9 @@ class CreatorPackagingPage(TranscriptProductionPage):
         trim_start = row.get("suggested_start_seconds") or row["start_seconds"]
         trim_end = row.get("suggested_end_seconds") or row["end_seconds"]
 
-        title_lines = "\n".join(f"  {index + 1}. {title}" for index, title in enumerate(titles))
+        title_lines = "\n".join(
+            f"  {index + 1}. {title}" for index, title in enumerate(titles)
+        )
         reason_lines = "\n".join(f"  • {reason}" for reason in reasons)
         package_lines = []
         for platform, package in packages.items():
@@ -73,14 +84,37 @@ class CreatorPackagingPage(TranscriptProductionPage):
             f"{row.get('suggested_caption') or ''}\n\n"
             f"HASHTAGS\n{' '.join(hashtags)}\n\n"
             f"WHY THIS CLIP WORKS\n{reason_lines}\n\n"
-            f"PLATFORM PACKAGES\n{chr(10).join(line for line in package_lines if line is not None)}"
+            f"PLATFORM PACKAGES\n"
+            f"{chr(10).join(line for line in package_lines if line is not None)}"
         )
-        box = QMessageBox(self)
-        box.setWindowTitle("Creator packaging intelligence")
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setText(message)
-        box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        box.exec()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Creator packaging intelligence")
+        dialog.setMinimumSize(760, 560)
+        dialog.resize(900, 700)
+
+        layout = QVBoxLayout(dialog)
+        report = QTextEdit(dialog)
+        report.setReadOnly(True)
+        report.setPlainText(message)
+        report.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        layout.addWidget(report)
+
+        button_row = QHBoxLayout()
+        copy_button = QPushButton("Copy all", dialog)
+        copy_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(message)
+        )
+        button_row.addWidget(copy_button)
+        button_row.addStretch()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.clicked.connect(dialog.accept)
+        button_row.addWidget(buttons)
+        layout.addLayout(button_row)
+
+        dialog.exec()
 
     def _refresh_clip_candidates(self, *_args, selected_id: int | None = None) -> None:
         transcript_id = self.selected_transcript_id()
