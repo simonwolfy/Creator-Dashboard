@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
-    QWidget,
 )
 
 from creator_intelligence.ui.pages.transcript_editor import (
@@ -50,6 +49,17 @@ class PolishedTranscriptEditorPage(TranscriptEditorPage):
     def __init__(self, service):
         super().__init__(service)
         self._editor_buttons: dict[str, QPushButton] = {}
+        self._segment_selection_model = None
+        self._chapter_selection_model = None
+        self._transcript_selection_model = None
+
+        # A chapter should only open its related transcript segments on a
+        # deliberate double-click. The base page connected single-click.
+        try:
+            self.chapters_table.clicked.disconnect(self.jump_to_chapter)
+        except (TypeError, RuntimeError):
+            pass
+        self.chapters_table.doubleClicked.connect(self._open_chapter_transcript)
 
         # Hide the original dense editor rows while retaining their behavior.
         hidden_labels = {
@@ -109,17 +119,8 @@ class PolishedTranscriptEditorPage(TranscriptEditorPage):
         ribbon.setColumnStretch(3, 1)
         root.insertLayout(insert_at, ribbon)
 
-        self.transcripts_table.selectionModel().selectionChanged.connect(
-            lambda *_: self._update_polished_state()
-        )
-        self.segments_table.selectionModel().selectionChanged.connect(
-            lambda *_: self._update_action_states()
-        )
-        self.chapters_table.selectionModel().selectionChanged.connect(
-            lambda *_: self._update_action_states()
-        )
         self.tabs.currentChanged.connect(lambda *_: self._update_action_states())
-
+        self._connect_selection_models()
         self._install_style()
         self._update_polished_state()
 
@@ -186,10 +187,38 @@ class PolishedTranscriptEditorPage(TranscriptEditorPage):
         if index >= 0:
             self.export_format.setCurrentIndex(index)
 
+    def _connect_selection_models(self) -> None:
+        """Reconnect after table models are replaced during refresh/edit actions."""
+        transcript_selection = self.transcripts_table.selectionModel()
+        if transcript_selection is not None and transcript_selection is not self._transcript_selection_model:
+            transcript_selection.selectionChanged.connect(
+                lambda *_: self._update_polished_state()
+            )
+            self._transcript_selection_model = transcript_selection
+
+        segment_selection = self.segments_table.selectionModel()
+        if segment_selection is not None and segment_selection is not self._segment_selection_model:
+            segment_selection.selectionChanged.connect(
+                lambda *_: self._update_action_states()
+            )
+            self._segment_selection_model = segment_selection
+
+        chapter_selection = self.chapters_table.selectionModel()
+        if chapter_selection is not None and chapter_selection is not self._chapter_selection_model:
+            chapter_selection.selectionChanged.connect(
+                lambda *_: self._update_action_states()
+            )
+            self._chapter_selection_model = chapter_selection
+
     def refresh_details(self):
         super().refresh_details()
         if hasattr(self, "metric_cards"):
+            self._connect_selection_models()
             self._update_polished_state()
+
+    def _open_chapter_transcript(self, index) -> None:
+        """Open the selected chapter's transcript range on double-click only."""
+        self.jump_to_chapter(index)
 
     def _update_polished_state(self) -> None:
         transcript_id = self.selected_transcript_id()
@@ -241,13 +270,25 @@ class PolishedTranscriptEditorPage(TranscriptEditorPage):
         if not hasattr(self, "_editor_buttons"):
             return
         transcript_selected = self.selected_transcript_id() is not None
-        segment_count = len(self._selected_segments())
-        chapter_count = len(self._selected_chapters())
+        selected_segments = self._selected_segments()
+        selected_chapters = self._selected_chapters()
+        segment_count = len(selected_segments)
+        chapter_count = len(selected_chapters)
+
+        segments_adjacent = False
+        if segment_count == 2 and "segment_index" in selected_segments:
+            indexes = sorted(int(value) for value in selected_segments["segment_index"])
+            segments_adjacent = indexes[1] == indexes[0] + 1
+
+        chapters_adjacent = False
+        if chapter_count == 2 and "chapter_index" in selected_chapters:
+            indexes = sorted(int(value) for value in selected_chapters["chapter_index"])
+            chapters_adjacent = indexes[1] == indexes[0] + 1
 
         states = {
             "edit": segment_count == 1,
             "split_segment": segment_count == 1,
-            "merge_segment": segment_count == 2,
+            "merge_segment": segments_adjacent,
             "delete_segment": segment_count >= 1,
             "speaker": segment_count >= 1,
             "reviewed": segment_count >= 1,
@@ -255,7 +296,7 @@ class PolishedTranscriptEditorPage(TranscriptEditorPage):
             "unreviewed": segment_count >= 1,
             "rename_chapter": chapter_count == 1,
             "split_chapter": chapter_count == 1,
-            "merge_chapter": chapter_count == 2,
+            "merge_chapter": chapters_adjacent,
             "delete_chapter": chapter_count >= 1,
             "create_chapter": transcript_selected,
             "export": transcript_selected,
