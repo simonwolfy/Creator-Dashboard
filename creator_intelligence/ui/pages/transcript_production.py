@@ -106,7 +106,7 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
             )
             return
 
-        self.status.setText(
+        self.action_status.setText(
             f"Created clip candidate {clip_id}: {self._clock(start)}–{self._clock(end)}."
         )
         self._refresh_clip_candidates(selected_id=clip_id)
@@ -137,7 +137,7 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
             return
         row = model.frame.iloc[index.row()]
         self.seek_requested.emit(float(row["start_seconds"]))
-        self.status.setText(
+        self.action_status.setText(
             f'Clip: {row["title"]} ({self._clock(row["start_seconds"])}–'
             f'{self._clock(row["end_seconds"])})'
         )
