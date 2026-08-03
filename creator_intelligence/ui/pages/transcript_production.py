@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pandas as pd
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTableView,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -19,7 +21,7 @@ from creator_intelligence.ui.pages.twitch import FrameModel
 
 
 class TranscriptProductionPage(PolishedTranscriptEditorPage):
-    """Transcript editor with creator review and production handoff support."""
+    """Transcript editor with clip intelligence, review, and production handoff."""
 
     def __init__(self, service):
         super().__init__(service)
@@ -34,6 +36,8 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
         self.clip_filter.currentTextChanged.connect(self._refresh_clip_candidates)
         clip_layout.addWidget(self.clip_filter)
         for label, handler in (
+            ("Analyze selected", self.analyze_selected_clips),
+            ("View intelligence", self.view_clip_intelligence),
             ("Approve", lambda: self._review_selected_clips("Approved")),
             ("Reject", lambda: self._review_selected_clips("Rejected")),
             ("Needs work", lambda: self._review_selected_clips("Needs work")),
@@ -55,15 +59,10 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
         self.clip_candidates_table.doubleClicked.connect(self._seek_clip_candidate)
 
         page = QWidget()
-        page_layout = QHBoxLayout(page)
+        page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
-        wrapper = QWidget()
-        from PySide6.QtWidgets import QVBoxLayout
-        wrapper_layout = QVBoxLayout(wrapper)
-        wrapper_layout.setContentsMargins(0, 0, 0, 0)
-        wrapper_layout.addWidget(self.clip_controls)
-        wrapper_layout.addWidget(self.clip_candidates_table)
-        page_layout.addWidget(wrapper)
+        page_layout.addWidget(self.clip_controls)
+        page_layout.addWidget(self.clip_candidates_table)
         self.tabs.addTab(page, "Clip candidates")
         self._refresh_clip_candidates()
 
@@ -123,11 +122,12 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
                 int(transcript_id), start, end, title.strip(), reason.strip(),
                 score, "creator-selection",
             )
+            self.service.analyze_clip_candidate(clip_id)
         except Exception as exc:
             QMessageBox.critical(self, "Clip creation failed", str(exc))
             return
         self.action_status.setText(
-            f"Created clip candidate {clip_id}: {self._clock(start)}–{self._clock(end)}."
+            f"Created and analyzed clip {clip_id}: {self._clock(start)}–{self._clock(end)}."
         )
         self._refresh_clip_candidates(selected_id=clip_id)
         self.tabs.setCurrentIndex(self.tabs.count() - 1)
@@ -141,6 +141,59 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
             int(model.frame.iloc[index.row()]["id"])
             for index in selection.selectedRows()
         ]
+
+    def analyze_selected_clips(self) -> None:
+        clip_ids = self._selected_clip_ids()
+        if not clip_ids:
+            QMessageBox.information(
+                self, "Clip intelligence", "Select one or more clips to analyze."
+            )
+            return
+        try:
+            self.service.analyze_clip_candidates(clip_ids)
+        except Exception as exc:
+            QMessageBox.critical(self, "Clip analysis failed", str(exc))
+            return
+        self.action_status.setText(
+            f"Analyzed {len(clip_ids)} clip(s) with local clip intelligence."
+        )
+        self._refresh_clip_candidates()
+
+    def view_clip_intelligence(self) -> None:
+        clip_ids = self._selected_clip_ids()
+        if len(clip_ids) != 1:
+            QMessageBox.information(
+                self, "Clip intelligence", "Select exactly one clip."
+            )
+            return
+        transcript_id = self.selected_transcript_id()
+        full = self.service.clip_candidates(int(transcript_id))
+        match = full[full["id"] == int(clip_ids[0])]
+        if match.empty:
+            return
+        row = match.iloc[0]
+        if not row.get("analyzed_at"):
+            self.service.analyze_clip_candidate(int(clip_ids[0]))
+            full = self.service.clip_candidates(int(transcript_id))
+            row = full[full["id"] == int(clip_ids[0])].iloc[0]
+        try:
+            hashtags = " ".join(json.loads(row.get("suggested_hashtags_json") or "[]"))
+        except Exception:
+            hashtags = str(row.get("suggested_hashtags_json") or "")
+        message = (
+            f"Hook: {float(row.get('hook_score') or 0):.1f}\n"
+            f"Humor: {float(row.get('humor_score') or 0):.1f}\n"
+            f"Surprise: {float(row.get('surprise_score') or 0):.1f}\n"
+            f"Emotion: {float(row.get('emotion_score') or 0):.1f}\n"
+            f"Quote: {float(row.get('quote_score') or 0):.1f}\n"
+            f"Viral potential: {float(row.get('viral_score') or 0):.1f}\n\n"
+            f"Suggested trim: {self._clock(row.get('suggested_start_seconds') or row['start_seconds'])}–"
+            f"{self._clock(row.get('suggested_end_seconds') or row['end_seconds'])}\n\n"
+            f"Suggested title:\n{row.get('suggested_title') or row.get('title') or ''}\n\n"
+            f"Suggested caption:\n{row.get('suggested_caption') or ''}\n\n"
+            f"Hashtags:\n{hashtags}"
+        )
+        QMessageBox.information(self, "Clip intelligence", message)
 
     def _review_selected_clips(self, status: str) -> None:
         clip_ids = self._selected_clip_ids()
@@ -213,8 +266,10 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
                     ),
                 )
                 visible = [
-                    "id", "time", "title", "score", "source", "review_status",
-                    "sent_to_production", "production_status", "reason",
+                    "id", "time", "title", "viral_score", "hook_score",
+                    "humor_score", "surprise_score", "emotion_score", "quote_score",
+                    "suggested_title", "review_status", "sent_to_production",
+                    "production_status", "reason",
                 ]
                 frame = frame[[column for column in visible if column in frame.columns]]
         self.clip_candidates_table.setModel(FrameModel(frame))
