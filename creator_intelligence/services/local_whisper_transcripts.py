@@ -69,6 +69,105 @@ def _register_nvidia_dll_directories() -> list[Path]:
 class LocalWhisperTranscriptService(TranscriptIntelligenceMixin, TranscriptService):
     """Transcript service with direct faster-whisper and editing intelligence."""
 
+    def _shift_indexes_up(self, table: str, index_column: str,
+                          transcript_id: int, after_index: int) -> None:
+        """Shift ordered rows without violating SQLite's immediate UNIQUE checks."""
+        allowed = {
+            ("transcript_segments", "segment_index"),
+            ("transcript_chapters", "chapter_index"),
+        }
+        if (table, index_column) not in allowed:
+            raise ValueError("Unsupported transcript index table.")
+
+        self.db.execute(
+            f"""UPDATE {table}
+                SET {index_column}=-{index_column}-1
+                WHERE transcript_id=? AND {index_column}>?""",
+            (int(transcript_id), int(after_index)),
+        )
+        self.db.execute(
+            f"""UPDATE {table}
+                SET {index_column}=-{index_column}
+                WHERE transcript_id=? AND {index_column}<0""",
+            (int(transcript_id),),
+        )
+
+    def split_segment(self, segment_id: int, split_seconds: float,
+                      left_text: str | None = None,
+                      right_text: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+        row = self._segment(segment_id)
+        start = float(row["start_seconds"])
+        end = float(row["end_seconds"])
+        split = float(split_seconds)
+        if not start < split < end:
+            raise ValueError("Split time must fall inside the segment.")
+
+        original = str(row["text"]).strip()
+        if left_text is None or right_text is None:
+            words = original.split()
+            ratio = (split - start) / max(0.001, end - start)
+            cut = min(max(1, round(len(words) * ratio)), max(1, len(words) - 1))
+            left_text = left_text or " ".join(words[:cut])
+            right_text = right_text or " ".join(words[cut:])
+        if not str(left_text).strip() or not str(right_text).strip():
+            raise ValueError("Both split segments require text.")
+
+        transcript_id = int(row["transcript_id"])
+        old_index = int(row["segment_index"])
+        now = datetime.now().isoformat()
+        self._shift_indexes_up(
+            "transcript_segments", "segment_index", transcript_id, old_index
+        )
+        self.db.execute(
+            """UPDATE transcript_segments
+               SET end_seconds=?,text=?,updated_at=? WHERE id=?""",
+            (split, str(left_text).strip(), now, int(segment_id)),
+        )
+        new_id = int(self.db.execute(
+            """INSERT INTO transcript_segments(
+                transcript_id,segment_index,start_seconds,end_seconds,text,speaker,
+                confidence,words_json,tags_json,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                transcript_id, old_index + 1, split, end, str(right_text).strip(),
+                row.get("speaker"), row.get("confidence"), "[]",
+                row.get("tags_json") or "[]", now, now,
+            ),
+        ))
+        self._refresh_transcript(transcript_id)
+        return self._segment(segment_id), self._segment(new_id)
+
+    def split_chapter(self, chapter_id: int, split_seconds: float,
+                      second_title: str | None = None) -> int:
+        chapter = self._chapter(chapter_id)
+        split = float(split_seconds)
+        if not float(chapter["start_seconds"]) < split < float(chapter["end_seconds"]):
+            raise ValueError("Split time must fall inside the chapter.")
+
+        transcript_id = int(chapter["transcript_id"])
+        index = int(chapter["chapter_index"])
+        old_end = float(chapter["end_seconds"])
+        now = datetime.now().isoformat()
+        self._shift_indexes_up(
+            "transcript_chapters", "chapter_index", transcript_id, index
+        )
+        self.db.execute(
+            """UPDATE transcript_chapters
+               SET end_seconds=?,source='manual',updated_at=? WHERE id=?""",
+            (split, now, int(chapter_id)),
+        )
+        return int(self.db.execute(
+            """INSERT INTO transcript_chapters(
+                transcript_id,chapter_index,start_seconds,end_seconds,title,summary,
+                keywords_json,confidence,source,review_status,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                transcript_id, index + 1, split, old_end,
+                str(second_title or f'{chapter["title"]} — Part 2'), "", "[]",
+                chapter.get("confidence") or 0.5, "manual", "Unreviewed", now, now,
+            ),
+        ))
+
     def engine_status(self):
         if importlib.util.find_spec("faster_whisper") is not None:
             return TranscriptEngineStatus(
