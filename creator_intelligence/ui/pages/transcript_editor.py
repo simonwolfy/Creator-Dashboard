@@ -54,8 +54,13 @@ class TranscriptEditorPage(TranscriptsPage):
 
     def __init__(self, service):
         super().__init__(service)
+
         self.segments_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.segments_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+
         self.chapters_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.chapters_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+
         self.segments_table.doubleClicked.connect(self._seek_segment)
         self.chapters_table.doubleClicked.connect(self._seek_chapter)
         self.search_table.doubleClicked.connect(self._seek_search_result)
