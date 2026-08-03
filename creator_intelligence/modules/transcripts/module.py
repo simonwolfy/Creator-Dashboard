@@ -17,11 +17,12 @@ class TranscriptModule:
     metadata = ModuleMetadata(
         module_id="transcripts",
         name="Transcript Engine",
-        version="1.5.0",
+        version="1.6.0",
         category="media",
         description=(
-            "GPU-accelerated transcription, transcript editing, clip review, "
-            "production handoff, chapter management, search, statistics, and exports."
+            "GPU-accelerated transcription, transcript editing, local clip "
+            "intelligence, production handoff, chapter management, search, "
+            "statistics, and professional exports."
         ),
         dependencies=("storage", "video_processing"),
     )
