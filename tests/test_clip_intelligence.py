@@ -73,18 +73,23 @@ def test_analyze_clip_candidate_builds_creator_package(tmp_path):
     assert result["surprise_score"] > 40
     assert result["suggested_start_seconds"] < 10
     assert result["suggested_end_seconds"] > 28
-    assert result["suggested_title"] != "Wait, what"
+    assert "Tunnel" in result["suggested_title"]
     assert len(result["title_alternatives"]) >= 5
     assert len(result["suggested_caption"]) < 180
+    assert "tunnel" in result["suggested_caption"].lower()
     assert "?" in result["suggested_caption"]
-    assert result["hook_line"]
+    assert "tunnel" in result["hook_line"].lower()
+    assert result["clip_type"] == "DISCOVERY"
+    assert result["packaging_context"]["subject"] == "tunnel"
     assert result["packaging_reasoning"]
     assert result["likely_audience"] == "RimWorld viewers"
     assert result["platform_packages"]["youtube_shorts"]["title"]
     assert "#RimWorld" in result["suggested_hashtags"]
 
     row = service.clip_packaging(clip_id)
-    assert row["intelligence_version"] == "creator-packaging-v2"
+    assert row["intelligence_version"] == "creator-packaging-v3"
+    assert row["clip_type"] == "DISCOVERY"
+    assert json.loads(row["packaging_context_json"])["subject"] == "tunnel"
     assert json.loads(row["title_alternatives_json"])
     assert json.loads(row["platform_packages_json"])["tiktok"]["caption"]
 
@@ -98,9 +103,56 @@ def test_caption_is_packaging_copy_not_transcript_dump(tmp_path):
         "That was actually funny, bro."
     )
     assert result["suggested_caption"] != transcript_text
-    assert result["caption_style"] == "conversational-engagement"
+    assert result["caption_style"] == "clip-specific-engagement"
     assert result["retention_estimate"] > 40
     assert result["performance_prediction"] in {"High", "Moderate", "Experimental"}
+
+
+def test_sheep_clip_generates_event_specific_package(tmp_path):
+    service, transcript_id, _ = make_service(tmp_path)
+    service.add_segments(
+        transcript_id,
+        [{
+            "start": 40,
+            "end": 48,
+            "text": "Yeah, we can finally destroy the sheep. The sheep problem is over.",
+            "confidence": 0.94,
+        }],
+    )
+    clip_id = service.add_clip_candidate(
+        transcript_id, 40, 48, "Sheep", "Colony sheep payoff", 90, "creator-selection"
+    )
+
+    result = service.analyze_clip_candidate(clip_id)
+
+    assert result["clip_type"] == "CHAOS"
+    assert result["packaging_context"]["subject"] == "sheep"
+    assert "Sheep" in result["suggested_title"]
+    assert "sheep" in result["hook_line"].lower()
+    assert "sheep" in result["suggested_caption"].lower()
+    assert "#RimWorld" in result["suggested_hashtags"]
+
+
+def test_different_events_do_not_reuse_identical_primary_titles(tmp_path):
+    service, transcript_id, first_id = make_service(tmp_path)
+    first = service.analyze_clip_candidate(first_id)
+    service.add_segments(
+        transcript_id,
+        [{
+            "start": 50,
+            "end": 58,
+            "text": "We can finally destroy the sheep. They never saw this coming.",
+            "confidence": 0.93,
+        }],
+    )
+    second_id = service.add_clip_candidate(
+        transcript_id, 50, 58, "Sheep war", "Sheep payoff", 88, "creator-selection"
+    )
+    second = service.analyze_clip_candidate(second_id)
+
+    assert first["suggested_title"] != second["suggested_title"]
+    history = service.db.frame("SELECT * FROM creator_package_history ORDER BY id")
+    assert len(history) == 2
 
 
 def test_batch_analysis_and_production_use_packaged_title_and_trim(tmp_path):
