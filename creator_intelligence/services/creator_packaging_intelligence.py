@@ -1,21 +1,20 @@
 from __future__ import annotations
 
 from datetime import datetime
+from difflib import SequenceMatcher
 import json
 import re
 from typing import Any
 
 
 class CreatorPackagingIntelligenceMixin:
-    """Local packaging intelligence for titles, captions, hooks, and platforms."""
+    """Local, clip-specific packaging intelligence with duplicate prevention."""
 
     def _ensure_clip_intelligence_columns(self) -> None:
         super()._ensure_clip_intelligence_columns()
         existing = {
             str(row["name"])
-            for _, row in self.db.frame(
-                "PRAGMA table_info(transcript_clip_candidates)"
-            ).iterrows()
+            for _, row in self.db.frame("PRAGMA table_info(transcript_clip_candidates)").iterrows()
         }
         columns = {
             "title_alternatives_json": "TEXT",
@@ -29,12 +28,32 @@ class CreatorPackagingIntelligenceMixin:
             "retention_estimate": "REAL",
             "performance_prediction": "TEXT",
             "platform_packages_json": "TEXT",
+            "clip_type": "TEXT",
+            "packaging_context_json": "TEXT",
         }
         for name, sql_type in columns.items():
             if name not in existing:
                 self.db.execute(
                     f"ALTER TABLE transcript_clip_candidates ADD COLUMN {name} {sql_type}"
                 )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS creator_package_history(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clip_candidate_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                hook TEXT,
+                caption TEXT,
+                hashtags_json TEXT NOT NULL DEFAULT '[]',
+                clip_type TEXT,
+                approved INTEGER NOT NULL DEFAULT 0,
+                published INTEGER NOT NULL DEFAULT 0,
+                views INTEGER,
+                ctr REAL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(clip_candidate_id, title)
+            )"""
+        )
 
     def analyze_clip_candidate(self, clip_id: int) -> dict[str, Any]:
         frame = self.db.frame(
@@ -50,9 +69,11 @@ class CreatorPackagingIntelligenceMixin:
         text = " ".join(
             str(value).strip() for value in segments.get("text", []) if str(value).strip()
         ).strip() or str(clip.get("title") or "").strip()
+        metadata = str(getattr(self, "_packaging_context_title", "") or "").strip()
 
         analysis = self._score_clip_text(text, start, end)
-        package = self._build_creator_package(text, analysis)
+        context = self._extract_context(text, metadata, analysis)
+        package = self._build_creator_package(text, analysis, context, int(clip_id))
         analysis.update(package)
         now = datetime.now().isoformat()
         self.db.execute(
@@ -63,8 +84,9 @@ class CreatorPackagingIntelligenceMixin:
                suggested_hashtags_json=?,title_alternatives_json=?,title_score=?,
                caption_style=?,hook_line=?,packaging_reasoning_json=?,likely_audience=?,
                replayability_score=?,shareability_score=?,retention_estimate=?,
-               performance_prediction=?,platform_packages_json=?,
-               intelligence_version=?,analyzed_at=?,updated_at=? WHERE id=?""",
+               performance_prediction=?,platform_packages_json=?,clip_type=?,
+               packaging_context_json=?,intelligence_version=?,analyzed_at=?,updated_at=?
+               WHERE id=?""",
             (
                 analysis["hook_score"], analysis["humor_score"],
                 analysis["surprise_score"], analysis["emotion_score"],
@@ -77,51 +99,57 @@ class CreatorPackagingIntelligenceMixin:
                 json.dumps(analysis["packaging_reasoning"]), analysis["likely_audience"],
                 analysis["replayability_score"], analysis["shareability_score"],
                 analysis["retention_estimate"], analysis["performance_prediction"],
-                json.dumps(analysis["platform_packages"]),
-                "creator-packaging-v2", now, now, int(clip_id),
+                json.dumps(analysis["platform_packages"]), analysis["clip_type"],
+                json.dumps(analysis["packaging_context"]),
+                "creator-packaging-v3", now, now, int(clip_id),
+            ),
+        )
+        self.db.execute(
+            """INSERT OR REPLACE INTO creator_package_history(
+               clip_candidate_id,title,hook,caption,hashtags_json,clip_type,
+               approved,published,views,ctr,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,COALESCE((SELECT approved FROM creator_package_history
+               WHERE clip_candidate_id=? AND title=?),0),
+               COALESCE((SELECT published FROM creator_package_history
+               WHERE clip_candidate_id=? AND title=?),0),NULL,NULL,?,?)""",
+            (
+                int(clip_id), analysis["suggested_title"], analysis["hook_line"],
+                analysis["suggested_caption"], json.dumps(analysis["suggested_hashtags"]),
+                analysis["clip_type"], int(clip_id), analysis["suggested_title"],
+                int(clip_id), analysis["suggested_title"], now, now,
             ),
         )
         return {"id": int(clip_id), **analysis}
 
-    @classmethod
-    def _build_creator_package(cls, text: str, analysis: dict[str, Any]) -> dict[str, Any]:
-        clean = re.sub(r"\s+", " ", text).strip()
-        lowered = clean.lower()
-        topic = cls._topic_label(lowered)
-        moment = cls._moment_type(lowered, analysis)
-        titles = cls._title_options(moment, topic, lowered)
+    def _build_creator_package(
+        self,
+        text: str,
+        analysis: dict[str, Any],
+        context: dict[str, Any],
+        clip_id: int,
+    ) -> dict[str, Any]:
+        titles = self._title_options(context)
+        titles = self._deduplicate_titles(titles, clip_id)
         title = titles[0]
-        title_score = min(100.0, analysis["hook_score"] * 0.45 + analysis["viral_score"] * 0.55)
-        caption, style = cls._social_caption(moment, topic)
-        hook = cls._hook_line(moment)
-        hashtags = cls._contextual_hashtags(lowered, topic, moment)
-        reasoning = cls._packaging_reasoning(clean, analysis, moment)
+        caption, style = self._social_caption(context)
+        hook = self._hook_line(context)
+        hashtags = self._contextual_hashtags(context)
+        reasoning = self._packaging_reasoning(text, analysis, context)
         replay = min(100.0, analysis["surprise_score"] * 0.45 + analysis["quote_score"] * 0.35 + 15)
         share = min(100.0, analysis["humor_score"] * 0.30 + analysis["emotion_score"] * 0.25 + analysis["viral_score"] * 0.45)
         retention = min(95.0, 38 + analysis["hook_score"] * 0.32 + analysis["quote_score"] * 0.18)
+        title_score = min(100.0, analysis["hook_score"] * 0.45 + analysis["viral_score"] * 0.55 + 6)
         performance = "High" if analysis["viral_score"] >= 70 else "Moderate" if analysis["viral_score"] >= 45 else "Experimental"
+        topic = context["topic"]
         audience = f"{topic} viewers" if topic != "Gaming" else "Gaming and livestream viewers"
-        platform_packages = {
-            "youtube_shorts": {
-                "title": title,
-                "description": caption,
-                "hook": hook,
-                "hashtags": hashtags[:5],
-            },
-            "tiktok": {
-                "caption": caption,
-                "hook": hook,
-                "hashtags": hashtags[:6],
-            },
-            "instagram_reels": {
-                "caption": caption,
-                "hook": hook,
-                "hashtags": hashtags[:8],
-            },
+        packages = {
+            "youtube_shorts": {"title": title, "description": caption, "hook": hook, "hashtags": hashtags[:5]},
+            "tiktok": {"caption": caption, "hook": hook, "hashtags": hashtags[:6]},
+            "instagram_reels": {"caption": caption, "hook": hook, "hashtags": hashtags[:8]},
         }
         return {
             "suggested_title": title,
-            "title_alternatives": titles,
+            "title_alternatives": titles[:5],
             "title_score": round(title_score, 1),
             "suggested_caption": caption,
             "caption_style": style,
@@ -133,115 +161,257 @@ class CreatorPackagingIntelligenceMixin:
             "shareability_score": round(share, 1),
             "retention_estimate": round(retention, 1),
             "performance_prediction": performance,
-            "platform_packages": platform_packages,
+            "platform_packages": packages,
+            "clip_type": context["clip_type"],
+            "packaging_context": context,
+        }
+
+    @classmethod
+    def _extract_context(cls, text: str, metadata: str, analysis: dict[str, Any]) -> dict[str, Any]:
+        clean = re.sub(r"\s+", " ", text).strip()
+        lowered = clean.lower()
+        topic = cls._topic_label(f"{metadata} {clean}".lower())
+        subject = cls._subject(lowered)
+        action = cls._action(lowered)
+        clip_type, emotion = cls._clip_type(lowered, analysis, action)
+        quote = cls._strongest_quote(clean)
+        outcome = cls._outcome(lowered, subject, clip_type)
+        return {
+            "subject": subject,
+            "action": action,
+            "outcome": outcome,
+            "quote": quote,
+            "emotion": emotion,
+            "clip_type": clip_type,
+            "topic": topic,
         }
 
     @staticmethod
     def _topic_label(lowered: str) -> str:
-        topics = (
-            ("minecraft", "Minecraft"), ("tarkov", "Escape from Tarkov"),
-            ("rimworld", "RimWorld"), ("pokemon", "Pokémon"),
-            ("zomboid", "Project Zomboid"),
-        )
-        for token, label in topics:
-            if token in lowered:
+        for tokens, label in (
+            (("minecraft", "pixelmon", "cobblemon"), "Minecraft"),
+            (("tarkov", "escape from tarkov"), "Escape from Tarkov"),
+            (("rimworld", "rim world"), "RimWorld"),
+            (("pokemon", "pokémon"), "Pokémon"),
+            (("zomboid", "project zomboid"), "Project Zomboid"),
+        ):
+            if any(token in lowered for token in tokens):
                 return label
         return "Gaming"
 
     @staticmethod
-    def _moment_type(lowered: str, analysis: dict[str, Any]) -> str:
-        if any(term in lowered for term in ("hallucination", "what did i", "brain", "confused")):
-            return "confusion"
-        if any(term in lowered for term in ("died", "death", "failed", "lost", "mistake")):
-            return "fail"
-        if any(term in lowered for term in ("secret", "found", "discovered", "hidden")):
-            return "discovery"
-        if analysis["humor_score"] >= max(analysis["surprise_score"], analysis["emotion_score"]):
-            return "funny"
-        if analysis["surprise_score"] >= analysis["emotion_score"]:
-            return "surprise"
-        return "reaction"
+    def _subject(lowered: str) -> str:
+        preferred = (
+            "sheep", "coffee", "tunnel", "colony", "raid", "boss", "wolf", "zombie",
+            "pokemon", "pokémon", "village", "base", "cave", "dragon", "enemy", "chat",
+        )
+        for token in preferred:
+            if token in lowered:
+                return token
+        words = re.findall(r"[a-z][a-z'-]+", lowered)
+        stop = {"this", "that", "there", "what", "with", "from", "have", "just", "they", "them", "your", "about", "which", "would", "could", "finally"}
+        useful = [word for word in words if len(word) > 3 and word not in stop]
+        return useful[0] if useful else "moment"
 
     @staticmethod
-    def _title_options(moment: str, topic: str, lowered: str) -> list[str]:
-        templates = {
-            "confusion": [
-                "My Brain Completely Broke on Stream",
-                "I Have Absolutely No Explanation for This",
-                "This Conversation Went Completely Off the Rails",
-                "What Did I Just Say?",
-                "I Was Not Ready for This Moment",
-            ],
-            "fail": [
-                "This Went Wrong Immediately",
-                "The Most Avoidable Fail of the Stream",
-                "I Knew This Was a Bad Idea",
-                "Everything Fell Apart in Seconds",
-                "This Mistake Cost Me Everything",
-            ],
-            "discovery": [
-                "I Was Not Supposed to Find This",
-                "The Secret I Almost Missed",
-                "This Changed the Entire Run",
-                "I Finally Found It",
-                "Nobody Warned Me About This",
-            ],
-            "funny": [
-                "This Might Be My Funniest Stream Moment",
-                "I Could Not Stop Laughing After This",
-                "The Timing Could Not Have Been Better",
-                "Chat Completely Lost It Here",
-                "This Got Funnier Every Second",
-            ],
-            "surprise": [
-                "I Did Not See That Coming",
-                "This Escalated Way Too Fast",
-                "Wait Until You See What Happened",
-                "The Stream Took a Wild Turn",
-                "That Was the Last Thing I Expected",
-            ],
-            "reaction": [
-                "My Honest Reaction Says Everything",
-                "I Was Completely Speechless",
-                "This Moment Caught Me Off Guard",
-                "You Can See the Exact Moment I Realized",
-                "I Still Cannot Believe This Happened",
-            ],
-        }
-        options = templates[moment][:]
-        if topic != "Gaming":
-            options[0] = f"{options[0]} in {topic}"
-        return options
+    def _action(lowered: str) -> str:
+        for tokens, label in (
+            (("destroy", "killed", "kill"), "destroy"),
+            (("found", "find", "discover", "secret"), "discover"),
+            (("died", "death", "failed", "lost"), "fail"),
+            (("won", "win", "saved", "survived"), "win"),
+            (("attack", "fight", "shot", "shoot"), "fight"),
+            (("built", "build"), "build"),
+            (("caught", "catch"), "catch"),
+        ):
+            if any(token in lowered for token in tokens):
+                return label
+        return "react"
 
     @staticmethod
-    def _social_caption(moment: str, topic: str) -> tuple[str, str]:
-        captions = {
-            "confusion": "I genuinely have no idea what my brain was doing here 😂 What did you hear?",
-            "fail": "I knew this was a bad idea and did it anyway. Be honest—would you have made the same mistake?",
-            "discovery": "I almost walked right past this. Did you already know it was here?",
-            "funny": "The timing on this absolutely destroyed me 😂 Who else would have lost it here?",
-            "surprise": "This escalated so much faster than I expected. Did you see that coming?",
-            "reaction": "My face says everything. What would your reaction have been?",
-        }
-        caption = captions[moment]
-        if topic != "Gaming":
-            caption = f"{caption} #{topic.replace(' ', '').replace('Pokémon', 'Pokemon')}"
-        return caption, "conversational-engagement"
+    def _clip_type(lowered: str, analysis: dict[str, Any], action: str) -> tuple[str, str]:
+        if any(token in lowered for token in ("hallucination", "confused", "what did i", "brain")):
+            return "CONFUSION", "confusion"
+        if action == "fail":
+            return "FAIL", "frustration"
+        if action == "win":
+            return "VICTORY", "excitement"
+        if action == "discover":
+            return "DISCOVERY", "surprise"
+        if action in {"destroy", "fight"}:
+            return "CHAOS", "anticipation"
+        if "accident" in lowered or "mistake" in lowered:
+            return "ACCIDENT", "surprise"
+        if analysis.get("humor_score", 0) >= 45:
+            return "FUNNY_QUOTE", "humor"
+        if analysis.get("surprise_score", 0) >= analysis.get("emotion_score", 0):
+            return "SURPRISE", "surprise"
+        return "REACTION", "reaction"
 
     @staticmethod
-    def _hook_line(moment: str) -> str:
+    def _strongest_quote(text: str) -> str:
+        sentences = [part.strip(" .") for part in re.split(r"[.!?]+", text) if part.strip()]
+        if not sentences:
+            return text[:100]
+        return max(
+            sentences,
+            key=lambda sentence: (
+                any(token in sentence.lower() for token in ("finally", "never", "secret", "destroy", "insane", "no way")),
+                5 <= len(sentence.split()) <= 16,
+                len(sentence),
+            ),
+        )[:120]
+
+    @staticmethod
+    def _outcome(lowered: str, subject: str, clip_type: str) -> str:
+        if "finally" in lowered:
+            return f"the {subject} problem finally reached its payoff"
         return {
-            "confusion": "Wait until you hear what I accidentally said…",
-            "fail": "This gets worse every second.",
-            "discovery": "I nearly missed the best part of the entire run.",
-            "funny": "I was not prepared for how funny this got.",
-            "surprise": "Nobody in chat saw this coming.",
-            "reaction": "Watch the exact moment I realize what happened.",
-        }[moment]
+            "FAIL": "the plan fell apart",
+            "VICTORY": "the run finally paid off",
+            "DISCOVERY": f"the hidden {subject} changed the run",
+            "CONFUSION": "the conversation stopped making sense",
+            "CHAOS": f"the {subject} became the target",
+            "ACCIDENT": "an unintended choice created the payoff",
+            "FUNNY_QUOTE": "the dialogue delivered the punchline",
+            "SURPRISE": "the outcome was unexpected",
+            "REACTION": "the reaction became the payoff",
+        }.get(clip_type, "the moment produced a payoff")
+
+    @classmethod
+    def _title_options(cls, context: dict[str, Any]) -> list[str]:
+        subject = cls._title_case_subject(context["subject"])
+        topic = context["topic"]
+        clip_type = context["clip_type"]
+        action = context["action"]
+        if clip_type == "CHAOS" and context["subject"] == "sheep":
+            return [
+                "The Sheep Never Saw This Coming",
+                "We Finally Declared War on the Sheep",
+                "Our Colony Finally Snapped",
+                "The Sheep Problem Is Officially Over",
+                "This RimWorld Problem Required Violence",
+            ]
+        templates = {
+            "CONFUSION": [
+                f"{subject} Completely Broke My Brain",
+                f"I Have No Explanation for the {subject} Situation",
+                f"This {subject} Conversation Went Off the Rails",
+                f"What Did I Just Say About {subject}?",
+                f"The {subject} Moment That Made No Sense",
+            ],
+            "DISCOVERY": [
+                f"I Was Not Supposed to Find This {subject}",
+                f"The Hidden {subject} I Almost Missed",
+                f"Finding This {subject} Changed the Entire Run",
+                f"I Finally Found the {subject}",
+                f"Nobody Warned Me About This {subject}",
+            ],
+            "FAIL": [
+                f"The {subject} Plan Failed Immediately",
+                f"This {subject} Mistake Cost Me Everything",
+                f"I Knew the {subject} Plan Was a Bad Idea",
+                f"Everything Fell Apart Because of {subject}",
+                f"The Most Avoidable {subject} Fail",
+            ],
+            "VICTORY": [
+                f"We Finally Beat the {subject}",
+                f"The {subject} Victory We Actually Earned",
+                f"This Changed the Entire {topic} Run",
+                f"I Cannot Believe We Pulled This Off",
+                f"The Exact Moment the Run Turned Around",
+            ],
+            "FUNNY_QUOTE": [
+                f"The Funniest Thing Said About {subject}",
+                f"Chat Lost It Over the {subject}",
+                f"This {subject} Joke Got Better Every Second",
+                f"The Timing on This {subject} Moment Was Perfect",
+                f"I Could Not Stop Laughing at This",
+            ],
+            "SURPRISE": [
+                f"The {subject} Caught Everyone Off Guard",
+                f"This {subject} Moment Escalated Instantly",
+                f"Nobody Expected the {subject} to Do This",
+                f"The Stream Took a Wild Turn Because of {subject}",
+                f"That Was the Last Thing I Expected from {subject}",
+            ],
+            "REACTION": [
+                f"My Reaction to the {subject} Says Everything",
+                f"The {subject} Left Me Speechless",
+                f"This {subject} Moment Caught Me Off Guard",
+                f"The Exact Moment I Understood the {subject}",
+                f"I Still Cannot Believe the {subject} Did This",
+            ],
+            "CHAOS": [
+                f"We Finally Chose Violence Against the {subject}",
+                f"The {subject} Became Public Enemy Number One",
+                f"This {subject} Problem Got Completely Out of Control",
+                f"Our Only Solution Was to {action.title()} the {subject}",
+                f"The {subject} Had No Idea What Was Coming",
+            ],
+            "ACCIDENT": [
+                f"The {subject} Accident That Changed Everything",
+                f"I Did Not Mean to Do This to the {subject}",
+                f"One Mistake Created Total {subject} Chaos",
+                f"This Was Definitely Not the Plan",
+                f"The Accidental {subject} Moment I Cannot Explain",
+            ],
+        }
+        return templates.get(clip_type, templates["REACTION"])
+
+    def _deduplicate_titles(self, candidates: list[str], clip_id: int) -> list[str]:
+        history = self.db.frame(
+            "SELECT title FROM creator_package_history WHERE clip_candidate_id<>?",
+            (int(clip_id),),
+        )
+        existing = [str(value) for value in history.get("title", [])]
+        accepted: list[str] = []
+        for candidate in candidates:
+            if all(self._similarity(candidate, old) < 0.85 for old in existing + accepted):
+                accepted.append(candidate)
+        for candidate in candidates:
+            if candidate not in accepted:
+                accepted.append(candidate)
+        return accepted
 
     @staticmethod
-    def _contextual_hashtags(lowered: str, topic: str, moment: str) -> list[str]:
-        tags = ["#TwitchClips", "#StreamerMoments", "#GamingShorts"]
+    def _similarity(left: str, right: str) -> float:
+        return SequenceMatcher(None, left.lower().strip(), right.lower().strip()).ratio()
+
+    @classmethod
+    def _social_caption(cls, context: dict[str, Any]) -> tuple[str, str]:
+        subject = context["subject"]
+        clip_type = context["clip_type"]
+        captions = {
+            "CHAOS": f"The {subject} situation finally reached its breaking point 😂 Did we go too far?",
+            "CONFUSION": f"I still have no idea what was happening with the {subject} here 😂 What did you hear?",
+            "DISCOVERY": f"I almost walked right past this {subject}. Would you have noticed it?",
+            "FAIL": f"The {subject} plan failed exactly how you would expect. Would you have tried it anyway?",
+            "VICTORY": f"We finally pulled off the {subject} win. Was the payoff worth it?",
+            "FUNNY_QUOTE": f"The {subject} timing absolutely destroyed me 😂 Who else would have lost it?",
+            "SURPRISE": f"The {subject} escalated much faster than expected. Did you see that coming?",
+            "ACCIDENT": f"The {subject} accident was definitely not part of the plan. What would you have done?",
+            "REACTION": f"My reaction to the {subject} says everything. How would you have reacted?",
+        }
+        return captions.get(clip_type, captions["REACTION"]), "clip-specific-engagement"
+
+    @classmethod
+    def _hook_line(cls, context: dict[str, Any]) -> str:
+        subject = context["subject"]
+        return {
+            "CHAOS": f"The {subject} had absolutely no idea what we were planning.",
+            "CONFUSION": f"The {subject} made this conversation stop making sense.",
+            "DISCOVERY": f"I nearly missed the most important {subject} in the run.",
+            "FAIL": f"The {subject} plan gets worse every second.",
+            "VICTORY": f"This was the moment the {subject} run finally paid off.",
+            "FUNNY_QUOTE": f"One line about the {subject} broke the entire stream.",
+            "SURPRISE": f"Nobody expected the {subject} to become the problem.",
+            "ACCIDENT": f"One accidental {subject} decision changed everything.",
+            "REACTION": f"Watch the exact moment I realize what the {subject} means.",
+        }.get(context["clip_type"], f"The {subject} changed everything.")
+
+    @staticmethod
+    def _contextual_hashtags(context: dict[str, Any]) -> list[str]:
         topic_tags = {
             "Minecraft": ["#Minecraft", "#MinecraftShorts", "#MinecraftFunny"],
             "Escape from Tarkov": ["#EscapeFromTarkov", "#Tarkov", "#TarkovMoments"],
@@ -249,25 +419,33 @@ class CreatorPackagingIntelligenceMixin:
             "Pokémon": ["#Pokemon", "#PokemonGaming", "#PokemonMoments"],
             "Project Zomboid": ["#ProjectZomboid", "#ZombieSurvival", "#ZomboidMoments"],
         }
-        tags.extend(topic_tags.get(topic, ["#Gaming", "#GamingClips"]))
-        moment_tags = {
-            "confusion": "#FunnyMoments", "fail": "#GamingFails",
-            "discovery": "#HiddenDetails", "funny": "#GamingComedy",
-            "surprise": "#Unexpected", "reaction": "#StreamerReaction",
+        type_tags = {
+            "CHAOS": "#GamingChaos", "CONFUSION": "#FunnyMoments",
+            "DISCOVERY": "#HiddenDetails", "FAIL": "#GamingFails",
+            "VICTORY": "#GamingWins", "FUNNY_QUOTE": "#GamingComedy",
+            "SURPRISE": "#Unexpected", "ACCIDENT": "#GamingMistakes",
+            "REACTION": "#StreamerReaction",
         }
-        tags.append(moment_tags[moment])
+        tags = topic_tags.get(context["topic"], ["#Gaming", "#GamingClips"])
+        tags += [type_tags.get(context["clip_type"], "#StreamerMoments"), "#TwitchClips", "#GamingShorts"]
         return list(dict.fromkeys(tags))[:8]
 
     @staticmethod
-    def _packaging_reasoning(text: str, analysis: dict[str, Any], moment: str) -> list[str]:
-        reasons = [f"Detected a {moment} moment with a clear emotional angle."]
+    def _packaging_reasoning(text: str, analysis: dict[str, Any], context: dict[str, Any]) -> list[str]:
+        reasons = [
+            f"Detected a {context['clip_type'].lower().replace('_', ' ')} moment centered on {context['subject']}.",
+            f"The key action is '{context['action']}' and {context['outcome']}.",
+        ]
+        if context["quote"]:
+            reasons.append(f"The strongest standalone quote is: “{context['quote']}”.")
         if analysis["hook_score"] >= 50:
             reasons.append("The opening creates enough curiosity to stop a scroll.")
-        if analysis["quote_score"] >= 65:
-            reasons.append("The dialogue contains a short, memorable line that can stand alone.")
-        if analysis["surprise_score"] >= 45:
-            reasons.append("The payoff is unexpected, which supports replays and comments.")
         if len(text.split()) <= 70:
             reasons.append("The moment is compact enough for short-form pacing.")
-        reasons.append("The caption asks a direct question to encourage comments.")
+        reasons.append("The caption references the actual event and asks a direct question.")
         return reasons
+
+    @staticmethod
+    def _title_case_subject(subject: str) -> str:
+        special = {"pokemon": "Pokémon", "pokémon": "Pokémon"}
+        return special.get(subject, subject.title())
