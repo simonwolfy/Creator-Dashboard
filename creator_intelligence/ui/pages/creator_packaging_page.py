@@ -131,6 +131,7 @@ class CreatorPackagingPage(TranscriptProductionPage):
             package_lines.extend([
                 f"{label}:",
                 f"  Outcome package ID: {package.get('package_id', 'Not recorded')}",
+                f"  Experiment ID: {package.get('experiment_id', 'Not created')}",
                 f"  Profile confidence: {package.get('profile_confidence', 'Unknown')}",
                 f"  Title: {package.get('title', '')}" if package.get("title") else "",
                 f"  Caption: {package.get('caption') or package.get('description', '')}",

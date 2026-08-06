@@ -523,7 +523,8 @@ class CreatorPackagingIntelligenceMixin:
         topic = context["topic"]
         audience = f"{topic} viewers" if topic != "Gaming" else "Gaming and livestream viewers"
         packages = {
-            "youtube_shorts": {"title": title, "description": youtube_description, "hook": hook,
+            "youtube_shorts": {"title": title, "title_alternatives": titles[:4],
+                               "description": youtube_description, "hook": hook,
                                "hashtags": hashtags[:5], "historical_evidence": youtube_evidence["examples"],
                                "profile_confidence": platform_profiles["youtube"]["confidence"]},
             "tiktok": {"caption": tiktok_caption, "hook": hook, "hashtags": hashtags[:6],
@@ -542,6 +543,12 @@ class CreatorPackagingIntelligenceMixin:
         )
         for platform, package_id in package_ids.items():
             packages[platform]["package_id"] = package_id
+        from creator_intelligence.services.packaging_experiments import PackagingExperimentService
+        experiments = PackagingExperimentService(self.db)
+        for platform, package_id in package_ids.items():
+            packages[platform]["experiment_id"] = experiments.ensure_for_package(
+                package_id, packages[platform], packages[platform].get("title_alternatives")
+            )
         return {
             "suggested_title": title,
             "title_alternatives": titles[:5],

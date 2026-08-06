@@ -73,6 +73,8 @@ class PublishingPage(QWidget):
             ("Approve package",lambda:self.package_decision("Approved")),
             ("Reject package",lambda:self.package_decision("Rejected")),
             ("Link published post",self.link_selected_package),
+            ("Use experiment variant",self.select_variant),
+            ("Reject experiment variant",self.reject_variant),
             ("Refresh",self.refresh)
         ]
         for label,handler in actions:
@@ -98,8 +100,17 @@ class PublishingPage(QWidget):
         self.outcomes_table=QTableView()
         self.outcomes_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tabs.addTab(self.outcomes_table,"Package outcomes")
+        self.experiments_table=QTableView()
+        self.experiments_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tabs.addTab(self.experiments_table,"Packaging experiments")
+        self.variants_table=QTableView()
+        self.variants_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tabs.addTab(self.variants_table,"Selected experiment variants")
+        self.patterns_table=QTableView()
+        self.tabs.addTab(self.patterns_table,"Winning patterns")
         layout.addWidget(self.tabs)
         self.items_table.clicked.connect(lambda _:self.refresh_dependencies())
+        self.experiments_table.clicked.connect(lambda _:self.refresh_variants())
         self.refresh()
 
     def selected_item_id(self):
@@ -114,7 +125,40 @@ class PublishingPage(QWidget):
         self.slots_table.setModel(FrameModel(self.service.slots()))
         self.insights_table.setModel(FrameModel(self.service.timing_insights()))
         self.outcomes_table.setModel(FrameModel(self.service.outcome_dashboard()))
+        self.experiments_table.setModel(FrameModel(self.service.experiment_dashboard()))
+        self.patterns_table.setModel(FrameModel(self.service.experiment_patterns()))
+        self.refresh_variants()
         self.refresh_dependencies()
+
+    def selected_experiment_id(self):
+        index=self.experiments_table.currentIndex()
+        if not index.isValid(): return None
+        return str(self.experiments_table.model().frame.iloc[index.row()]["id"])
+
+    def selected_variant_id(self):
+        index=self.variants_table.currentIndex()
+        if not index.isValid(): return None
+        return str(self.variants_table.model().frame.iloc[index.row()]["id"])
+
+    def refresh_variants(self):
+        experiment_id=self.selected_experiment_id()
+        if not experiment_id:
+            import pandas as pd
+            self.variants_table.setModel(FrameModel(pd.DataFrame()))
+            return
+        self.variants_table.setModel(FrameModel(self.service.experiment_variants(experiment_id)))
+
+    def select_variant(self):
+        variant_id=self.selected_variant_id()
+        if variant_id:
+            self.service.select_experiment_variant(variant_id)
+            self.refresh()
+
+    def reject_variant(self):
+        variant_id=self.selected_variant_id()
+        if variant_id:
+            self.service.reject_experiment_variant(variant_id)
+            self.refresh()
 
     def selected_package_id(self):
         index=self.outcomes_table.currentIndex()
