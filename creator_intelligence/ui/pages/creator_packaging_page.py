@@ -120,12 +120,19 @@ class CreatorPackagingPage(TranscriptProductionPage):
         package_lines = []
         for platform, package in packages.items():
             label = platform.replace("_", " ").title()
+            evidence = package.get("historical_evidence") or []
+            evidence_text = "; ".join(
+                f"{item.get('title', 'Untitled')} ({int(item.get('views') or 0):,} views)"
+                for item in evidence[:3]
+            )
             package_lines.extend([
                 f"{label}:",
+                f"  Profile confidence: {package.get('profile_confidence', 'Unknown')}",
                 f"  Title: {package.get('title', '')}" if package.get("title") else "",
                 f"  Caption: {package.get('caption') or package.get('description', '')}",
                 f"  Hook: {package.get('hook', '')}",
                 f"  Hashtags: {' '.join(package.get('hashtags', []))}",
+                f"  Historical evidence: {evidence_text}" if evidence_text else "  Historical evidence: Not enough platform data",
                 "",
             ])
 

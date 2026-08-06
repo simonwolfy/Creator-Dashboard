@@ -496,6 +496,11 @@ class CreatorPackagingIntelligenceMixin:
         )
         youtube_evidence = self._youtube_packaging_evidence(context)
         context["youtube_evidence"] = youtube_evidence
+        platform_profiles = {
+            platform: self._platform_performance_profile(platform, context)
+            for platform in ("youtube", "tiktok", "instagram", "twitch")
+        }
+        context["platform_profiles"] = platform_profiles
         titles = self._rank_titles_for_creator(titles, clip_id, youtube_evidence)
         title = titles[0]
         caption, style = self._social_caption(context)
@@ -503,6 +508,9 @@ class CreatorPackagingIntelligenceMixin:
         hashtags = self._contextual_hashtags(context)
         reasoning = self._packaging_reasoning(text, analysis, context)
         youtube_description = self._youtube_description(context, caption, hook, hashtags, youtube_evidence)
+        tiktok_caption = self._platform_caption("tiktok", context, caption, hook, platform_profiles["tiktok"])
+        instagram_caption = self._platform_caption("instagram", context, caption, hook, platform_profiles["instagram"])
+        twitch_titles = self._rank_for_platform(titles, platform_profiles["twitch"])
         replay = min(100.0, analysis["surprise_score"] * 0.45 + analysis["quote_score"] * 0.35 + 15)
         share = min(100.0, analysis["humor_score"] * 0.30 + analysis["emotion_score"] * 0.25 + analysis["viral_score"] * 0.45)
         retention = min(95.0, 38 + analysis["hook_score"] * 0.32 + analysis["quote_score"] * 0.18)
@@ -512,9 +520,17 @@ class CreatorPackagingIntelligenceMixin:
         audience = f"{topic} viewers" if topic != "Gaming" else "Gaming and livestream viewers"
         packages = {
             "youtube_shorts": {"title": title, "description": youtube_description, "hook": hook,
-                               "hashtags": hashtags[:5], "historical_evidence": youtube_evidence["examples"]},
-            "tiktok": {"caption": caption, "hook": hook, "hashtags": hashtags[:6]},
-            "instagram_reels": {"caption": caption, "hook": hook, "hashtags": hashtags[:8]},
+                               "hashtags": hashtags[:5], "historical_evidence": youtube_evidence["examples"],
+                               "profile_confidence": platform_profiles["youtube"]["confidence"]},
+            "tiktok": {"caption": tiktok_caption, "hook": hook, "hashtags": hashtags[:6],
+                       "historical_evidence": platform_profiles["tiktok"]["examples"],
+                       "profile_confidence": platform_profiles["tiktok"]["confidence"]},
+            "instagram_reels": {"caption": instagram_caption, "hook": hook, "hashtags": hashtags[:8],
+                                "historical_evidence": platform_profiles["instagram"]["examples"],
+                                "profile_confidence": platform_profiles["instagram"]["confidence"]},
+            "twitch": {"title": twitch_titles[0], "title_alternatives": twitch_titles[:3], "hook": hook,
+                       "historical_evidence": platform_profiles["twitch"]["examples"],
+                       "profile_confidence": platform_profiles["twitch"]["confidence"]},
         }
         return {
             "suggested_title": title,
@@ -631,6 +647,94 @@ class CreatorPackagingIntelligenceMixin:
                 "description_style": {"count": len(descriptions),
                                       "average_length": round(sum(map(len, descriptions)) / len(descriptions), 1) if descriptions else 0,
                                       "cta_rate": sum(bool(re.search(r"\b(subscribe|follow|comment|watch)\b", d, re.I)) for d in descriptions) / len(descriptions) if descriptions else 0}}
+
+    def _platform_performance_profile(self, platform: str, context: dict[str, Any]) -> dict[str, Any]:
+        columns = {str(row["name"]) for _, row in self.db.frame(
+            "PRAGMA table_info(creator_published_titles)"
+        ).iterrows()}
+        wanted = [name for name in ("title", "description", "content_type", "game", "published_at",
+                                    "views", "likes", "comments", "shares", "watch_time", "source_video_id")
+                  if name in columns]
+        frame = self.db.frame(
+            f"SELECT {','.join(wanted)} FROM creator_published_titles WHERE platform=? AND example_type='published'",
+            (platform,),
+        )
+        if frame.empty:
+            return self._empty_platform_profile(platform)
+        short_types = {"clip", "short", "reel", "reels", "video"}
+        if "content_type" in frame:
+            shorts = frame[frame["content_type"].fillna("").str.lower().isin(short_types)]
+            if not shorts.empty:
+                frame = shorts.copy()
+        if context.get("topic") != "Gaming" and "game" in frame:
+            relevant = frame["game"].fillna("").str.lower() == str(context["topic"]).lower()
+            if relevant.any():
+                frame = frame[relevant].copy()
+        score = pd.Series(0.0, index=frame.index)
+        cohorts = pd.to_datetime(frame.get("published_at"), errors="coerce", utc=True).dt.tz_localize(None).dt.to_period("Q").astype(str) \
+            if "published_at" in frame else None
+        for name, multiplier in (("views", 3.0), ("likes", 1.0), ("comments", 1.2),
+                                 ("shares", 2.0), ("watch_time", 2.5)):
+            if name not in frame:
+                continue
+            values = pd.to_numeric(frame[name], errors="coerce").fillna(0)
+            normalized = values.groupby(cohorts).rank(pct=True) if cohorts is not None else values.rank(pct=True)
+            score += normalized.fillna(.5) * multiplier
+        frame["evidence_score"] = score
+        frame = frame.sort_values("evidence_score", ascending=False)
+        texts = [str(value) for value in frame["title"] if str(value).strip()]
+        weights = frame["evidence_score"].clip(lower=.25)
+        token_scores: dict[str, float] = {}
+        for (_, row), weight in zip(frame.iterrows(), weights):
+            for token in set(re.findall(r"[a-z0-9']+", str(row["title"]).lower())):
+                token_scores[token] = token_scores.get(token, 0.0) + float(weight)
+        count = len(frame)
+        confidence = "High" if count >= 20 else "Medium" if count >= 8 else "Low" if count >= 3 else "Insufficient"
+        examples = [{"source_video_id": row.get("source_video_id"), "title": row.get("title"),
+                     "score": round(float(row["evidence_score"]), 2),
+                     "views": int(value) if pd.notna(value := row.get("views")) else 0}
+                    for _, row in frame.head(3).iterrows()]
+        return {"platform": platform, "count": count, "confidence": confidence,
+                "average_characters": round(sum(map(len, texts)) / len(texts), 1) if texts else 0,
+                "average_words": round(sum(len(text.split()) for text in texts) / len(texts), 1) if texts else 0,
+                "question_rate": sum(text.rstrip().endswith("?") for text in texts) / len(texts) if texts else 0,
+                "cta_rate": sum(bool(re.search(r"\b(follow|subscribe|comment|tell me|what would)\b", text, re.I)) for text in texts) / len(texts) if texts else 0,
+                "preferred_words": [token for token, _ in sorted(token_scores.items(), key=lambda item: -item[1])[:12]],
+                "examples": examples}
+
+    @staticmethod
+    def _empty_platform_profile(platform: str) -> dict[str, Any]:
+        return {"platform": platform, "count": 0, "confidence": "Insufficient",
+                "average_characters": 0, "average_words": 0, "question_rate": 0,
+                "cta_rate": 0, "preferred_words": [], "examples": []}
+
+    @staticmethod
+    def _platform_caption(platform, context, base_caption, hook, profile):
+        if profile.get("confidence") == "Insufficient":
+            return base_caption
+        if platform == "tiktok":
+            caption = f"{hook} {base_caption}"
+            if profile.get("question_rate", 0) >= .4 and "?" not in caption:
+                caption += " What would you do?"
+        else:
+            caption = f"{hook}\n\n{base_caption}"
+        target = int(profile.get("average_characters") or len(caption))
+        caption = caption[:max(80, min(500, target + 80))].strip()
+        if platform == "instagram" and profile.get("cta_rate", 0) >= .35:
+            caption += "\n\nFollow for more moments like this."
+        return caption
+
+    @staticmethod
+    def _rank_for_platform(candidates, profile):
+        if profile.get("confidence") == "Insufficient":
+            return list(candidates)
+        preferred = set(profile.get("preferred_words", []))
+        target = float(profile.get("average_words") or 8)
+        return sorted(candidates, key=lambda title: (
+            len(set(re.findall(r"[a-z0-9']+", title.lower())) & preferred) * 4
+            - abs(len(title.split()) - target) * 1.5
+            + (5 if title.endswith("?") == (profile.get("question_rate", 0) >= .5) else 0)
+        ), reverse=True)
 
     @staticmethod
     def _youtube_description(context, caption, hook, hashtags, evidence):
@@ -968,6 +1072,12 @@ class CreatorPackagingIntelligenceMixin:
                 f"YouTube ranking used {evidence['count']} comparable Short(s), weighted by performance. "
                 f"Top historical evidence: {names}."
             )
+        for platform, profile in (context.get("platform_profiles") or {}).items():
+            if profile.get("count"):
+                reasons.append(
+                    f"{platform.title()} profile confidence is {profile['confidence']} from "
+                    f"{profile['count']} performance-weighted post(s)."
+                )
         if context["quote"]:
             reasons.append(f"The strongest standalone quote is: “{context['quote']}”.")
         if analysis["hook_score"] >= 50:

@@ -365,3 +365,48 @@ def test_youtube_content_performance_guides_title_and_description_packaging(tmp_
     assert "Subscribe for more moments" in youtube["description"]
     assert youtube["historical_evidence"][0]["title"] == "I Finally Found the Hidden Tunnel"
     assert any("weighted by performance" in reason for reason in result["packaging_reasoning"])
+
+
+def test_platform_profiles_generate_distinct_performance_grounded_packages(tmp_path):
+    service, _, clip_id = make_service(tmp_path)
+    for index, title in enumerate((
+        "Would you enter this tunnel?", "Can this run get any stranger?", "What would you do here?"
+    )):
+        service.record_published_title(title, platform="tiktok", content_type="short",
+                                       views=1000 + index * 500, likes=100, comments=20,
+                                       published_at=f"2026-07-0{index + 1}T00:00:00Z",
+                                       source_video_id=f"tt-{index}")
+    for index, title in enumerate((
+        "The tunnel changed everything. Follow for more.",
+        "A hidden discovery from the stream. Follow for more.",
+        "This RimWorld moment surprised us. Follow for more.",
+    )):
+        service.record_published_title(title, platform="instagram", content_type="reel",
+                                       views=2000 + index * 500, likes=200, comments=30,
+                                       published_at=f"2026-07-0{index + 1}T00:00:00Z",
+                                       source_video_id=f"ig-{index}")
+
+    result = service.analyze_clip_candidate(clip_id)
+    packages = result["platform_packages"]
+    profiles = result["packaging_context"]["platform_profiles"]
+
+    assert profiles["tiktok"]["confidence"] == "Low"
+    assert profiles["instagram"]["confidence"] == "Low"
+    assert packages["tiktok"]["caption"] != packages["instagram_reels"]["caption"]
+    assert packages["tiktok"]["historical_evidence"]
+    assert packages["instagram_reels"]["historical_evidence"]
+    assert "Follow for more moments" in packages["instagram_reels"]["caption"]
+    assert packages["youtube_shorts"]["profile_confidence"] == "Insufficient"
+
+
+def test_sparse_platform_history_falls_back_without_cross_platform_leakage(tmp_path):
+    service, _, clip_id = make_service(tmp_path)
+    service.record_published_title("One TikTok Example?", platform="tiktok", views=999999,
+                                   source_video_id="only-one")
+
+    result = service.analyze_clip_candidate(clip_id)
+    profiles = result["packaging_context"]["platform_profiles"]
+
+    assert profiles["tiktok"]["confidence"] == "Insufficient"
+    assert profiles["instagram"]["count"] == 0
+    assert result["platform_packages"]["tiktok"]["caption"] == result["suggested_caption"]
