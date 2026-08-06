@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
-import logging
 
 from creator_intelligence.core.bootstrap import bootstrap_application
 from creator_intelligence.core.config import ConfigService
@@ -44,6 +44,7 @@ class CreatorIntelligenceApplication:
         self._context = None
         self._registry = None
         self._health_checks = []
+        self._upgrade_backup: Path | None = None
         self._configure_pipeline()
 
     def _configure_pipeline(self) -> None:
@@ -51,7 +52,9 @@ class CreatorIntelligenceApplication:
         self.lifecycle.add_startup_step("Initialize workspace", self._initialize_workspace)
         self.lifecycle.add_startup_step("Load configuration", self._load_configuration)
         self.lifecycle.add_startup_step("Open database", self._open_database)
+        self.lifecycle.add_startup_step("Protect workspace upgrade", self._protect_upgrade)
         self.lifecycle.add_startup_step("Apply database migrations", self._migrate_database)
+        self.lifecycle.add_startup_step("Record application version", self._record_version)
         self.lifecycle.add_startup_step("Create startup backup", self._create_backup, required=False)
         self.lifecycle.add_startup_step("Load application modules", self._load_modules)
         self.lifecycle.add_startup_step("Run startup diagnostics", self._run_diagnostics, required=False)
@@ -83,7 +86,7 @@ class CreatorIntelligenceApplication:
         self._context.set("diagnostics", diagnostics)
         self._registry.emit("application_started")
         self.logger.info(
-            "%s %s ready with %s modules in %.2f ms",
+            "%s %s ready with %s modules in %s ms",
             self.APPLICATION_NAME,
             self.VERSION,
             len(self._registry.modules),
@@ -115,6 +118,24 @@ class CreatorIntelligenceApplication:
         assert self._db is not None
         applied = self._db.migrate()
         return f"{len(applied)} migration(s) applied"
+
+    def _protect_upgrade(self) -> str:
+        assert self._db is not None
+        if not self._db.path.exists() or self._db.path.stat().st_size == 0:
+            return "new workspace"
+        pending = self._db.pending_migrations()
+        if not pending:
+            return "workspace schema is current"
+        self._upgrade_backup = BackupService(
+            self._db.path,
+            self.workspace.paths.backups,
+            getattr(self._settings, "backup_retention", 30),
+        ).create(f"pre_upgrade_{self.VERSION}")
+        return f"protected by {self._upgrade_backup}"
+
+    def _record_version(self) -> str:
+        self.workspace.record_application_version(self.VERSION)
+        return self.VERSION
 
     def _create_backup(self) -> str:
         assert self._db is not None

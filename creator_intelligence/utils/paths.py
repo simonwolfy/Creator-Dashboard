@@ -1,6 +1,7 @@
+import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
 DB_PATH = PROJECT_ROOT / "data" / "creator_intelligence.db"
 BACKUP_DIR = PROJECT_ROOT / "backups"
 IMPORT_DIR = PROJECT_ROOT / "imports"

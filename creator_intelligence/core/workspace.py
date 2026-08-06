@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-import json
 
 
 @dataclass(frozen=True)
@@ -86,6 +86,13 @@ class WorkspaceManager:
             "root": str(self.paths.root),
             "database": str(self.paths.database),
         }
+
+    def record_application_version(self, application_version: str) -> None:
+        payload = self.validate()
+        payload["application_version"] = application_version
+        temporary = self.paths.metadata.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(self.paths.metadata)
 
     def _write_metadata(self) -> None:
         payload = {
