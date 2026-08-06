@@ -8,12 +8,19 @@ from creator_intelligence.core.health import HealthService
 from creator_intelligence.utils.paths import DB_PATH, BACKUP_DIR
 
 class SettingsPage(QWidget):
-    def __init__(self, db):
+    def __init__(self, db, context=None):
         super().__init__()
         self.db = db
-        self.config_service = ConfigService()
+        self.context = context
+        self.onboarding = context.services.get("onboarding") if context else None
+        workspace = context.services.get("workspace") if context else None
+        config_path = workspace.paths.config / "settings.json" if workspace else None
+        backup_dir = workspace.paths.backups if workspace else BACKUP_DIR
+        database_path = workspace.paths.database if workspace else DB_PATH
+        self.config_service = ConfigService(config_path)
         self.config = self.config_service.load()
-        self.backups = BackupService(DB_PATH, BACKUP_DIR, self.config.backup_retention)
+        self.backups = BackupService(database_path, backup_dir, self.config.backup_retention)
+        self.database_path = database_path
 
         layout=QVBoxLayout(self)
         title=QLabel("Settings and Maintenance")
@@ -50,8 +57,11 @@ class SettingsPage(QWidget):
         backup.clicked.connect(self.make_backup)
         health = QPushButton("Run startup health checks")
         health.clicked.connect(self.run_health)
+        onboarding = QPushButton("Open welcome and workspace setup")
+        onboarding.clicked.connect(self.open_onboarding)
         buttons.addWidget(backup)
         buttons.addWidget(health)
+        buttons.addWidget(onboarding)
         buttons.addStretch()
         layout.addLayout(buttons)
 
@@ -77,9 +87,16 @@ class SettingsPage(QWidget):
         QMessageBox.information(self,"Backup complete",f"Created:\n{path}")
 
     def run_health(self):
-        checks = HealthService(DB_PATH).run()
+        checks = HealthService(self.database_path).run()
         self.health_table.setRowCount(len(checks))
         for row, check in enumerate(checks):
             values = [check.name, "PASS" if check.ok else "FAIL", check.message]
             for col, value in enumerate(values):
                 self.health_table.setItem(row,col,QTableWidgetItem(value))
+
+    def open_onboarding(self):
+        if not self.onboarding:
+            QMessageBox.information(self,"Welcome setup","Restart the application to open first-run setup.")
+            return
+        from creator_intelligence.ui.dialogs.onboarding import OnboardingWizard
+        OnboardingWizard(self.onboarding,self).exec()

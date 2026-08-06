@@ -19,6 +19,10 @@ The existing Phase 7 features remain available, including transcription, scene i
 
 ## Run
 
+On the first launch, a welcome wizard asks where to create your local workspace,
+checks required and optional media tools, explains the privacy boundary, and
+lets you skip platform connections until later.
+
 On Windows, run:
 
 ```text
@@ -38,3 +42,4 @@ python -m pytest
 ```
 
 See [`docs/APPLICATION_CORE.md`](docs/APPLICATION_CORE.md) for the Phase 8.1A architecture.
+See [`docs/FIRST_RUN_ONBOARDING.md`](docs/FIRST_RUN_ONBOARDING.md) for fresh-install and existing-workspace behavior.
