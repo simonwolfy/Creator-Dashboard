@@ -14,6 +14,7 @@ from creator_intelligence.data.google_drive_metadata_migration import GOOGLE_DRI
 from creator_intelligence.data.google_drive_migrations import GOOGLE_DRIVE_MIGRATIONS
 from creator_intelligence.data.migration_manager import MigrationManager, MigrationRecord
 from creator_intelligence.data.migrations import MIGRATIONS
+from creator_intelligence.data.video_metadata_migration import VIDEO_METADATA_MIGRATIONS
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class Database:
                 *GOOGLE_DRIVE_MIGRATIONS,
                 *GOOGLE_DRIVE_FOLDER_MIGRATIONS,
                 *GOOGLE_DRIVE_METADATA_MIGRATIONS,
+                *VIDEO_METADATA_MIGRATIONS,
             ]
         )
         self.last_applied_migrations: list[MigrationRecord] = []
