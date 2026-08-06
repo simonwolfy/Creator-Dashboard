@@ -6,7 +6,9 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QMessageBox,
     QPushButton,
     QTextEdit,
@@ -20,6 +22,52 @@ from creator_intelligence.ui.pages.twitch import FrameModel
 class CreatorPackagingPage(TranscriptProductionPage):
     """Transcript production page with platform-ready creator packaging."""
 
+    def __init__(self, service):
+        super().__init__(service)
+        layout = self.clip_controls.layout()
+        for label, handler in (("Add historical title", self.add_historical_title),
+                               ("Import title CSV", self.import_title_csv),
+                               ("View title profile", self.view_title_profile)):
+            button = QPushButton(label, self.clip_controls)
+            button.clicked.connect(handler)
+            layout.insertWidget(max(0, layout.count() - 1), button)
+
+    def add_historical_title(self) -> None:
+        title, ok = QInputDialog.getText(self, "Add historical title", "Published clip title:")
+        if ok and title.strip():
+            kind, chosen = QInputDialog.getItem(
+                self, "Example type", "How should this title influence the profile?",
+                ["published", "approved", "rejected"], 0, False,
+            )
+            if not chosen:
+                return
+            self.service.record_published_title(title, example_type=kind)
+            QMessageBox.information(self, "Title DNA", "Historical title saved and profile updated.")
+
+    def import_title_csv(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import historical titles", "", "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            result = self.service.import_published_titles(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Title import", str(exc))
+            return
+        QMessageBox.information(self, "Title import", f"Imported {result['imported']} title(s); skipped {result['skipped']}.")
+
+    def view_title_profile(self) -> None:
+        profile = self.service.title_style_profile()
+        text = (
+            f"Examples: {profile['example_count']} ({profile['positive_count']} positive, {profile['negative_count']} negative)\n"
+            f"Average length: {profile['average_words']} words\n"
+            f"Question titles: {profile['question_rate']:.0%}\n"
+            f"First-person titles: {profile['first_person_rate']:.0%}\n"
+            f"Exclamation titles: {profile['exclamation_rate']:.0%}\n\n"
+            f"Preferred words: {', '.join(profile['preferred_words']) or 'Not enough data'}\n"
+            f"Avoided words: {', '.join(profile['avoided_words']) or 'None learned'}"
+        )
+        QMessageBox.information(self, "Learned title profile", text)
+
     def view_clip_intelligence(self) -> None:
         clip_ids = self._selected_clip_ids()
         if len(clip_ids) != 1:
@@ -29,7 +77,7 @@ class CreatorPackagingPage(TranscriptProductionPage):
             return
         clip_id = int(clip_ids[0])
         row = self.service.clip_packaging(clip_id)
-        if not row.get("analyzed_at") or row.get("intelligence_version") != "creator-packaging-v2":
+        if not row.get("analyzed_at") or row.get("intelligence_version") != "creator-packaging-v4":
             self.service.analyze_clip_candidate(clip_id)
             row = self.service.clip_packaging(clip_id)
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from difflib import SequenceMatcher
+import csv
+import math
 import json
 import re
 from typing import Any
@@ -54,6 +56,124 @@ class CreatorPackagingIntelligenceMixin:
                 UNIQUE(clip_candidate_id, title)
             )"""
         )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS creator_published_titles(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL DEFAULT 'twitch',
+                content_type TEXT NOT NULL DEFAULT 'clip',
+                title TEXT NOT NULL,
+                game TEXT,
+                published_at TEXT,
+                views INTEGER,
+                likes INTEGER,
+                comments INTEGER,
+                watch_time REAL,
+                example_type TEXT NOT NULL DEFAULT 'published',
+                source_video_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(platform, content_type, title)
+            )"""
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_creator_titles_example ON creator_published_titles(example_type)"
+        )
+
+    def record_published_title(self, title: str, *, platform: str = "twitch",
+                               content_type: str = "clip", game: str | None = None,
+                               published_at: str | None = None, views: int | None = None,
+                               likes: int | None = None, comments: int | None = None,
+                               watch_time: float | None = None,
+                               example_type: str = "published",
+                               source_video_id: str | None = None) -> int:
+        clean = re.sub(r"\s+", " ", str(title)).strip()
+        if not clean:
+            raise ValueError("Title cannot be empty.")
+        kind = str(example_type).strip().lower()
+        if kind not in {"published", "approved", "rejected"}:
+            raise ValueError("example_type must be published, approved, or rejected.")
+        now = datetime.now().isoformat()
+        self.db.execute(
+            """INSERT INTO creator_published_titles(
+               platform,content_type,title,game,published_at,views,likes,comments,
+               watch_time,example_type,source_video_id,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(platform,content_type,title) DO UPDATE SET
+               game=excluded.game,published_at=excluded.published_at,
+               views=excluded.views,likes=excluded.likes,comments=excluded.comments,
+               watch_time=excluded.watch_time,example_type=excluded.example_type,
+               source_video_id=excluded.source_video_id,updated_at=excluded.updated_at""",
+            (platform.strip().lower(), content_type.strip().lower(), clean, game,
+             published_at, views, likes, comments, watch_time, kind,
+             source_video_id, now, now),
+        )
+        row = self.db.frame(
+            "SELECT id FROM creator_published_titles WHERE platform=? AND content_type=? AND title=?",
+            (platform.strip().lower(), content_type.strip().lower(), clean),
+        )
+        return int(row.iloc[0]["id"])
+
+    def import_published_titles(self, path: str) -> dict[str, int]:
+        counts = {"imported": 0, "skipped": 0}
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or "title" not in {n.strip().lower() for n in reader.fieldnames}:
+                raise ValueError("CSV must include a title column.")
+            for raw in reader:
+                row = {str(k).strip().lower(): v for k, v in raw.items()}
+                if not str(row.get("title") or "").strip():
+                    counts["skipped"] += 1
+                    continue
+                def number(name, cast):
+                    value = str(row.get(name) or "").strip()
+                    return cast(value) if value else None
+                self.record_published_title(
+                    row["title"], platform=row.get("platform") or "twitch",
+                    content_type=row.get("content_type") or "clip", game=row.get("game") or None,
+                    published_at=row.get("published_at") or None, views=number("views", int),
+                    likes=number("likes", int), comments=number("comments", int),
+                    watch_time=number("watch_time", float),
+                    example_type=row.get("example_type") or "published",
+                    source_video_id=row.get("source_video_id") or None,
+                )
+                counts["imported"] += 1
+        return counts
+
+    def published_titles(self):
+        return self.db.frame("SELECT * FROM creator_published_titles ORDER BY COALESCE(published_at,created_at) DESC,id DESC")
+
+    def title_style_profile(self) -> dict[str, Any]:
+        frame = self.published_titles()
+        weights = {"published": 3.0, "approved": 1.5, "rejected": -2.5}
+        positives = []
+        negatives = []
+        for _, row in frame.iterrows():
+            weight = weights.get(str(row["example_type"]), 0.0)
+            if weight > 0 and str(row["example_type"]) == "published":
+                views = float(row.get("views") or 0)
+                interactions = float(row.get("likes") or 0) + float(row.get("comments") or 0)
+                performance = min(2.0, math.log10(views + 1) / 3.0)
+                if views:
+                    performance += min(1.0, interactions / views * 10.0)
+                weight *= 1.0 + performance
+            item = (str(row["title"]), weight)
+            (positives if item[1] > 0 else negatives).append(item)
+        total = sum(weight for _, weight in positives) or 1.0
+        def avg(fn): return sum(fn(title) * weight for title, weight in positives) / total
+        token_scores: dict[str, float] = {}
+        for title, weight in positives + negatives:
+            for token in set(re.findall(r"[a-z0-9']+", title.lower())):
+                token_scores[token] = token_scores.get(token, 0.0) + weight
+        preferred = [k for k, v in sorted(token_scores.items(), key=lambda x: (-x[1], x[0])) if v > 0][:12]
+        avoided = [k for k, v in sorted(token_scores.items(), key=lambda x: (x[1], x[0])) if v < 0][:12]
+        return {
+            "example_count": len(frame), "positive_count": len(positives),
+            "negative_count": len(negatives), "average_words": round(avg(lambda t: len(t.split())), 1),
+            "question_rate": round(avg(lambda t: t.rstrip().endswith("?")), 2),
+            "first_person_rate": round(avg(lambda t: bool(re.search(r"\b(i|we|my|our)\b", t, re.I))), 2),
+            "exclamation_rate": round(avg(lambda t: "!" in t), 2),
+            "preferred_words": preferred, "avoided_words": avoided,
+        }
 
     def analyze_clip_candidate(self, clip_id: int) -> dict[str, Any]:
         frame = self.db.frame(
@@ -101,7 +221,7 @@ class CreatorPackagingIntelligenceMixin:
                 analysis["retention_estimate"], analysis["performance_prediction"],
                 json.dumps(analysis["platform_packages"]), analysis["clip_type"],
                 json.dumps(analysis["packaging_context"]),
-                "creator-packaging-v3", now, now, int(clip_id),
+                "creator-packaging-v4", now, now, int(clip_id),
             ),
         )
         self.db.execute(
@@ -129,7 +249,7 @@ class CreatorPackagingIntelligenceMixin:
         clip_id: int,
     ) -> dict[str, Any]:
         titles = self._title_options(context)
-        titles = self._deduplicate_titles(titles, clip_id)
+        titles = self._rank_titles_for_creator(titles, clip_id)
         title = titles[0]
         caption, style = self._social_caption(context)
         hook = self._hook_line(context)
@@ -165,6 +285,29 @@ class CreatorPackagingIntelligenceMixin:
             "clip_type": context["clip_type"],
             "packaging_context": context,
         }
+
+    def _rank_titles_for_creator(self, candidates: list[str], clip_id: int) -> list[str]:
+        profile = self.title_style_profile()
+        history = self.published_titles()
+        old_titles = [str(value) for value in history.get("title", [])]
+        package_history = self.db.frame(
+            "SELECT title FROM creator_package_history WHERE clip_candidate_id<>?", (int(clip_id),)
+        )
+        old_titles += [str(value) for value in package_history.get("title", [])]
+        preferred, avoided = set(profile["preferred_words"]), set(profile["avoided_words"])
+        target_words = float(profile["average_words"] or 8)
+        scored = []
+        for index, candidate in enumerate(candidates):
+            tokens = set(re.findall(r"[a-z0-9']+", candidate.lower()))
+            style = 20 - abs(len(candidate.split()) - target_words) * 2
+            style += len(tokens & preferred) * 3 - len(tokens & avoided) * 6
+            style += 8 if candidate.endswith("?") == (profile["question_rate"] >= .5) else 0
+            first_person = bool(re.search(r"\b(i|we|my|our)\b", candidate, re.I))
+            style += 6 if first_person == (profile["first_person_rate"] >= .5) else 0
+            similarity = max((self._similarity(candidate, old) for old in old_titles), default=0.0)
+            duplicate_penalty = 100 if similarity >= .92 else 45 * max(0.0, similarity - .62)
+            scored.append((style - duplicate_penalty - index * .01, candidate))
+        return [title for _, title in sorted(scored, reverse=True)]
 
     @classmethod
     def _extract_context(cls, text: str, metadata: str, analysis: dict[str, Any]) -> dict[str, Any]:

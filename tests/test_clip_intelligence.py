@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import csv
 
 import pandas as pd
 
@@ -87,7 +88,7 @@ def test_analyze_clip_candidate_builds_creator_package(tmp_path):
     assert "#RimWorld" in result["suggested_hashtags"]
 
     row = service.clip_packaging(clip_id)
-    assert row["intelligence_version"] == "creator-packaging-v3"
+    assert row["intelligence_version"] == "creator-packaging-v4"
     assert row["clip_type"] == "DISCOVERY"
     assert json.loads(row["packaging_context_json"])["subject"] == "tunnel"
     assert json.loads(row["title_alternatives_json"])
@@ -170,3 +171,62 @@ def test_batch_analysis_and_production_use_packaged_title_and_trim(tmp_path):
     assert job["title"] == clip["suggested_title"]
     assert float(job["start_seconds"]) == float(clip["suggested_start_seconds"])
     assert float(job["end_seconds"]) == float(clip["suggested_end_seconds"])
+
+
+def test_historical_titles_persist_metadata_and_build_weighted_profile(tmp_path):
+    service, _, _ = make_service(tmp_path)
+    service.record_published_title(
+        "Can We Actually Survive This?", platform="youtube", game="RimWorld",
+        views=12000, likes=900, comments=45, watch_time=1234.5,
+        published_at="2026-07-01T12:00:00", source_video_id="abc",
+    )
+    service.record_published_title("We Somehow Made This Worse", example_type="approved")
+    service.record_published_title("EPIC GAMING MOMENT!!!", example_type="rejected")
+
+    rows = service.published_titles()
+    profile = service.title_style_profile()
+
+    assert len(rows) == 3
+    published = rows[rows["source_video_id"] == "abc"].iloc[0]
+    assert int(published["views"]) == 12000
+    assert float(published["watch_time"]) == 1234.5
+    assert profile["positive_count"] == 2
+    assert profile["negative_count"] == 1
+    assert profile["first_person_rate"] >= .5
+    assert "epic" in profile["avoided_words"]
+
+
+def test_csv_import_records_titles_and_performance_metadata(tmp_path):
+    service, _, _ = make_service(tmp_path)
+    path = tmp_path / "titles.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=[
+            "title", "platform", "game", "views", "likes", "comments",
+            "watch_time", "example_type", "published_at", "source_video_id",
+        ])
+        writer.writeheader()
+        writer.writerow({"title": "Did Chat Really Say That?", "platform": "twitch",
+                         "game": "RimWorld", "views": "5000", "likes": "200",
+                         "comments": "15", "watch_time": "812.5",
+                         "example_type": "published", "published_at": "2026-06-01",
+                         "source_video_id": "clip-1"})
+
+    result = service.import_published_titles(str(path))
+    row = service.published_titles().iloc[0]
+    assert result == {"imported": 1, "skipped": 0}
+    assert row["title"] == "Did Chat Really Say That?"
+    assert int(row["views"]) == 5000
+    assert row["game"] == "RimWorld"
+
+
+def test_learned_style_ranks_candidates_and_penalizes_near_duplicates(tmp_path):
+    service, transcript_id, clip_id = make_service(tmp_path)
+    service.record_published_title("I Finally Found the Tunnel")
+    service.record_published_title("Can We Actually Survive This?")
+    service.record_published_title("Nobody Warned Me About This Tunnel", example_type="rejected")
+
+    result = service.analyze_clip_candidate(clip_id)
+
+    assert result["suggested_title"] != "I Finally Found the Tunnel"
+    assert service._similarity(result["suggested_title"], "I Finally Found the Tunnel") < .92
+    assert "Nobody Warned Me About This Tunnel" not in result["title_alternatives"][:2]
