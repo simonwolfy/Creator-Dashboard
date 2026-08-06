@@ -10,7 +10,7 @@ def prepare(tmp_path):
     service.create_manual_chapter(transcript_id, 0, 25, "Opening")
     service.create_manual_chapter(transcript_id, 25, 50, "Finale")
     first_id = int(service.segments(transcript_id).iloc[0]["id"])
-    service.update_segment(first_id, speaker="SimonWolfy")
+    service.update_segment(first_id, speaker="Streamer")
     return service, transcript_id
 
 
@@ -20,7 +20,7 @@ def test_markdown_and_csv_exports(tmp_path):
     csv_path = service.export_csv(transcript_id, tmp_path / "transcript.csv")
 
     assert "# Test stream" in markdown.read_text(encoding="utf-8")
-    assert "**SimonWolfy:**" in markdown.read_text(encoding="utf-8")
+    assert "**Streamer:**" in markdown.read_text(encoding="utf-8")
     assert "segment_index,start_seconds" in csv_path.read_text(encoding="utf-8-sig")
 
 

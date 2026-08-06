@@ -11,7 +11,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Creator Intelligence")
     app.setApplicationVersion(CreatorIntelligenceApplication.VERSION)
-    app.setOrganizationName("SimonWolfy")
+    app.setOrganizationName("Creator Intelligence")
 
     core = CreatorIntelligenceApplication()
     log = logging.getLogger(__name__)

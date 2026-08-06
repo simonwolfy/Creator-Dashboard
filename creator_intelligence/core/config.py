@@ -9,7 +9,7 @@ from creator_intelligence.utils.paths import CONFIG_DIR
 
 @dataclass
 class AppConfig:
-    channel_name: str = "SimonWolfy"
+    channel_name: str = "My Channel"
     timezone: str = "America/Chicago"
     currency: str = "USD"
     theme: str = "dark"

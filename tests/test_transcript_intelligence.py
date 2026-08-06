@@ -63,13 +63,13 @@ def test_edit_review_and_speaker_foundation(tmp_path):
     updated = service.update_segment(
         segment_id,
         text="Corrected transcript text",
-        speaker="SimonWolfy",
+        speaker="Streamer",
         review_status="Reviewed",
     )
 
     assert updated["text"] == "Corrected transcript text"
-    assert updated["speaker"] == "SimonWolfy"
-    assert service.speakers(transcript_id).iloc[0]["display_name"] == "SimonWolfy"
+    assert updated["speaker"] == "Streamer"
+    assert service.speakers(transcript_id).iloc[0]["display_name"] == "Streamer"
     review = service.db.frame(
         "SELECT review_status FROM transcript_segment_reviews WHERE segment_id=?",
         (segment_id,),

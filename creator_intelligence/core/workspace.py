@@ -31,7 +31,7 @@ class WorkspaceManager:
 
     METADATA_VERSION = 1
 
-    def __init__(self, root: Path, name: str = "Hunter Creator Workspace"):
+    def __init__(self, root: Path, name: str = "My Workspace"):
         root = Path(root).expanduser().resolve()
         self.name = name
         self.paths = WorkspacePaths(

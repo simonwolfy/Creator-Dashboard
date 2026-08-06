@@ -62,7 +62,7 @@ class SettingsPage(QWidget):
         self.run_health()
 
     def save_settings(self):
-        self.config.channel_name = self.channel.text().strip() or "SimonWolfy"
+        self.config.channel_name = self.channel.text().strip() or "My Channel"
         self.config.timezone = self.timezone.text().strip() or "America/Chicago"
         self.config.currency = self.currency.currentText()
         self.config.auto_backup_on_start = self.auto_start.isChecked()

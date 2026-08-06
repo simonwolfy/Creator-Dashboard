@@ -1,0 +1,12 @@
+{
+  "channel_name": "My Channel",
+  "timezone": "America/Chicago",
+  "currency": "USD",
+  "theme": "dark",
+  "auto_backup_on_start": true,
+  "auto_backup_before_write": true,
+  "backup_retention": 30,
+  "prediction_training_window_days": 0,
+  "exclude_outliers": false,
+  "short_duration_threshold_seconds": 180
+}

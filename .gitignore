@@ -17,6 +17,11 @@ logs/
 cache/
 temp/
 exports/
+imports/
+assets/
+clips/
+reports/
+thumbnails/
 models/
 data/
 workspaces/
@@ -53,6 +58,11 @@ config/*.local.json
 *.parquet
 *.feather
 *.arrow
+*.csv
+*.tsv
+*.jsonl
+*.log
+*.bak
 
 # OAuth, API credentials, and environment secrets
 .env
@@ -67,6 +77,9 @@ token*.json
 *oauth*.json
 *.pem
 *.key
+*.p12
+*.pfx
+*.keystore
 
 # Build artifacts
 build/

@@ -38,3 +38,24 @@ onboarding.
 release file set for media, databases, credential-like filenames, and creator
 identity hard-coding. The regression tests also verify the required ignore
 boundaries.
+
+Run the tracked-file audit before every release:
+
+```powershell
+python -m creator_intelligence.core.privacy_audit
+```
+
+To audit filenames across all local Git history as well:
+
+```powershell
+python -m creator_intelligence.core.privacy_audit --history
+```
+
+The history audit intentionally fails while an older populated workspace
+database remains reachable from the repository's history. Deleting the current
+file is not sufficient. Before making the repository public, coordinate a
+history rewrite with every collaborator, remove both historical database paths
+with `git filter-repo`, force-push all affected branches and tags, and require
+fresh clones. Treat any local paths and creator analytics in those databases as
+previously disclosed. The audit prints paths and finding categories only, never
+stored values.
