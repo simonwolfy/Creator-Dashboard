@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+
 import pandas as pd
 import pytest
 
@@ -93,3 +94,26 @@ def test_bulk_review_export_and_regeneration(tmp_path):
     assert fresh["fresh"] is True
     assert transcripts.regenerated==[5]
     assert planner.outcomes.package(package_id)["decision_status"]=="Rejected"
+
+
+def test_applying_alternative_requires_separate_explicit_approval(tmp_path):
+    _,planner,service,_,package_id=setup(tmp_path)
+    experiment_id=planner.experiments.ensure_for_package(
+        package_id,{"title":"Can They Wear Pants?"},
+        ["Can They Wear Pants?","We Somehow Debated Pants"])
+    variants=planner.experiments.variants(experiment_id)
+    variant_id=str(variants[variants["title"]=="We Somehow Debated Pants"].iloc[0]["id"])
+
+    service.apply_variant(package_id,variant_id)
+    applied=planner.outcomes.package(package_id)
+    assert applied["used_title"]=="We Somehow Debated Pants"
+    assert applied["decision_status"]=="Generated"
+
+    service.approve(package_id)
+    assert planner.outcomes.package(package_id)["decision_status"]=="Approved"
+
+    service.save_edits(package_id,{"title":"A Final Manual Edit"})
+    edited=planner.outcomes.package(package_id)
+    assert edited["used_title"]=="A Final Manual Edit"
+    assert edited["decision_status"]=="Generated"
+    with pytest.raises(ValueError):service.send_to_publishing(package_id)

@@ -6,9 +6,21 @@ from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QApplication,QAbstractItemView,QComboBox,QFileDialog,QFormLayout,QHBoxLayout,
-    QLabel,QLineEdit,QMessageBox,QPlainTextEdit,QPushButton,QSplitter,QTableView,
-    QVBoxLayout,QWidget
+    QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSplitter,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
 )
 
 from creator_intelligence.ui.pages.twitch import FrameModel
@@ -58,7 +70,7 @@ class PackagingReviewPage(QWidget):
         right_layout.addWidget(QLabel("Experiment variants — recommended option is marked Yes"))
         self.variants=QTableView(); self.variants.setSelectionBehavior(QAbstractItemView.SelectRows); right_layout.addWidget(self.variants,1)
         variant_actions=QHBoxLayout()
-        use_variant=QPushButton("Use selected variant"); use_variant.clicked.connect(self.use_variant); variant_actions.addWidget(use_variant)
+        use_variant=QPushButton("Apply selected variant"); use_variant.clicked.connect(self.use_variant); variant_actions.addWidget(use_variant)
         variant_actions.addStretch(); right_layout.addLayout(variant_actions)
         split.addWidget(right); split.setSizes([520,700])
         self.status.currentTextChanged.connect(self.refresh); self.platform.currentTextChanged.connect(self.refresh)
@@ -134,7 +146,9 @@ class PackagingReviewPage(QWidget):
     def use_variant(self):
         index=self.variants.currentIndex()
         if not index.isValid():return
-        variant_id=str(self.variants.model().frame.iloc[index.row()]["id"]);self.service.experiments.select(variant_id);self.load_selected();self.refresh()
+        variant_id=str(self.variants.model().frame.iloc[index.row()]["id"])
+        self.service.apply_variant(self.current_package_id,variant_id)
+        self.load_selected();self.refresh()
 
     def open_source(self):
         if self.source_path and Path(str(self.source_path)).exists():QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.source_path)))

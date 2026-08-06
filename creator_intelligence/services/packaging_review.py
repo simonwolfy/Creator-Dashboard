@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import UTC, datetime
 
 import pandas as pd
-
 
 LIMITS = {
     "youtube": {"title": 100, "description": 5000},
@@ -90,8 +89,35 @@ class PackagingReviewService:
 
     def save_edits(self, package_id, edits):
         package = self.outcomes.package(package_id)
-        status = package["decision_status"] if package["decision_status"] in {"Approved", "Published"} else "Generated"
-        return self.outcomes.record_decision(package_id, status, edits)
+        if package["decision_status"] == "Published":
+            raise ValueError("Published package copy cannot be edited.")
+        return self.outcomes.record_decision(package_id, "Generated", edits)
+
+    def apply_variant(self, package_id, variant_id):
+        """Apply an alternative as editable copy without implicitly approving it."""
+        variant = self.experiments.variant(variant_id)
+        experiment = self.experiments.experiment(variant["experiment_id"])
+        if str(experiment["package_id"]) != str(package_id):
+            raise ValueError("The selected alternative does not belong to this package.")
+        edits = {
+            key: variant.get(key)
+            for key in ("title", "description", "caption", "hook")
+            if variant.get(key) is not None
+        }
+        edits["hashtags"] = self._json(variant.get("hashtags_json"), [])
+        self.save_edits(package_id, edits)
+        now = datetime.now(UTC).isoformat()
+        self.db.execute(
+            """UPDATE packaging_experiment_variants SET decision_status='Candidate',updated_at=?
+               WHERE experiment_id=? AND decision_status='Selected'""",
+            (now, experiment["id"]),
+        )
+        self.db.execute(
+            """UPDATE packaging_experiment_variants SET decision_status='Selected',updated_at=?
+               WHERE id=?""",
+            (now, variant_id),
+        )
+        return self.outcomes.package(package_id)
 
     def approve(self, package_id, edits=None):
         validation = self.validate(package_id, edits)

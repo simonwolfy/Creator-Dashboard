@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import csv
+import json
+import math
+import re
 from datetime import datetime
 from difflib import SequenceMatcher
-import csv
-import math
-import json
-import re
-import pandas as pd
-from creator_intelligence.core.credential_vault import CredentialVault
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+import pandas as pd
+
+from creator_intelligence.core.credential_vault import CredentialVault
 
 
 class CreatorPackagingIntelligenceMixin:
@@ -151,7 +153,7 @@ class CreatorPackagingIntelligenceMixin:
 
     def import_published_titles(self, path: str) -> dict[str, int]:
         counts = {"imported": 0, "skipped": 0}
-        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+        with open(path, encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             if not reader.fieldnames or "title" not in {n.strip().lower() for n in reader.fieldnames}:
                 raise ValueError("CSV must include a title column.")
@@ -427,11 +429,19 @@ class CreatorPackagingIntelligenceMixin:
         start = float(clip["start_seconds"])
         end = float(clip["end_seconds"])
         segments = self.segments(transcript_id, start=start, end=end)
+        if not segments.empty:
+            strict_overlap = (
+                pd.to_numeric(segments["end_seconds"], errors="coerce") > start
+            ) & (
+                pd.to_numeric(segments["start_seconds"], errors="coerce") < end
+            )
+            if strict_overlap.any():
+                segments = segments[strict_overlap].copy()
         text = " ".join(
             str(value).strip() for value in segments.get("text", []) if str(value).strip()
         ).strip() or str(clip.get("title") or "").strip()
-        context_segments = self.segments(
-            transcript_id, start=max(0.0, start - 30.0), end=end + 30.0
+        context_segments = self._neighboring_segments(
+            transcript_id, segments, before=2, after=2
         )
         context_text = " ".join(
             str(value).strip()
@@ -444,6 +454,9 @@ class CreatorPackagingIntelligenceMixin:
         context = self._extract_context(
             context_text, metadata, analysis, focus_text=text,
             context_segment_count=len(context_segments),
+        )
+        context["segments"] = self._packaging_segment_evidence(
+            context_segments, start, end, context
         )
         package = self._build_creator_package(text, analysis, context, int(clip_id))
         analysis.update(package)
@@ -473,25 +486,66 @@ class CreatorPackagingIntelligenceMixin:
                 analysis["retention_estimate"], analysis["performance_prediction"],
                 json.dumps(analysis["platform_packages"]), analysis["clip_type"],
                 json.dumps(analysis["packaging_context"]),
-                "creator-packaging-v5", now, now, int(clip_id),
+                "creator-packaging-v6", now, now, int(clip_id),
             ),
         )
-        self.db.execute(
-            """INSERT OR REPLACE INTO creator_package_history(
+        if analysis.get("packaging_status") != "insufficient_context":
+            self.db.execute(
+                """INSERT OR REPLACE INTO creator_package_history(
                clip_candidate_id,title,hook,caption,hashtags_json,clip_type,
                approved,published,views,ctr,created_at,updated_at)
                VALUES(?,?,?,?,?,?,COALESCE((SELECT approved FROM creator_package_history
                WHERE clip_candidate_id=? AND title=?),0),
                COALESCE((SELECT published FROM creator_package_history
                WHERE clip_candidate_id=? AND title=?),0),NULL,NULL,?,?)""",
-            (
-                int(clip_id), analysis["suggested_title"], analysis["hook_line"],
-                analysis["suggested_caption"], json.dumps(analysis["suggested_hashtags"]),
-                analysis["clip_type"], int(clip_id), analysis["suggested_title"],
-                int(clip_id), analysis["suggested_title"], now, now,
-            ),
-        )
+                (
+                    int(clip_id), analysis["suggested_title"], analysis["hook_line"],
+                    analysis["suggested_caption"], json.dumps(analysis["suggested_hashtags"]),
+                    analysis["clip_type"], int(clip_id), analysis["suggested_title"],
+                    int(clip_id), analysis["suggested_title"], now, now,
+                ),
+            )
         return {"id": int(clip_id), **analysis}
+
+    def _neighboring_segments(self, transcript_id, focus_segments, *, before=2, after=2):
+        """Return exact neighboring segments without using an arbitrary time window."""
+        if focus_segments.empty or "segment_index" not in focus_segments:
+            return focus_segments
+        first = int(focus_segments["segment_index"].min()) - max(0, int(before))
+        last = int(focus_segments["segment_index"].max()) + max(0, int(after))
+        return self.db.frame(
+            """SELECT id,segment_index,start_seconds,end_seconds,text,
+               speaker,confidence,tags_json FROM transcript_segments
+               WHERE transcript_id=? AND segment_index BETWEEN ? AND ?
+               ORDER BY segment_index""",
+            (int(transcript_id), first, last),
+        )
+
+    @staticmethod
+    def _packaging_segment_evidence(segments, focus_start, focus_end, context):
+        action_terms = {
+            "destroy": ("destroy", "kill"), "discover": ("find", "found", "discover", "secret"),
+            "fail": ("fail", "failed", "died", "lost"), "win": ("win", "won", "saved", "survived"),
+            "fight": ("attack", "fight", "shot", "shoot"), "build": ("build", "built"),
+            "catch": ("catch", "caught"), "discuss": ("debate", "discuss", "wear"),
+        }
+        subject = str(context.get("subject") or "").lower()
+        action = str(context.get("action") or "").lower()
+        result = []
+        for _, row in segments.iterrows():
+            start, end = float(row["start_seconds"]), float(row["end_seconds"])
+            role = "focus" if end > focus_start and start < focus_end else "previous" if end <= focus_start else "next"
+            lowered = str(row["text"]).lower()
+            result.append({
+                "segment_index": int(row["segment_index"]),
+                "role": role,
+                "start_seconds": start,
+                "end_seconds": end,
+                "text": str(row["text"]),
+                "supports_subject": bool(subject and re.search(rf"\b{re.escape(subject)}s?\b", lowered)),
+                "supports_action": any(term in lowered for term in action_terms.get(action, (action,))),
+            })
+        return result
 
     def _build_creator_package(
         self,
@@ -500,6 +554,27 @@ class CreatorPackagingIntelligenceMixin:
         context: dict[str, Any],
         clip_id: int,
     ) -> dict[str, Any]:
+        if context.get("fallback_mode") == "insufficient_context":
+            reasoning = self._packaging_reasoning(text, analysis, context)
+            return {
+                "suggested_title": "",
+                "title_alternatives": [],
+                "title_score": 0.0,
+                "suggested_caption": "",
+                "caption_style": "insufficient-context",
+                "hook_line": "",
+                "suggested_hashtags": [],
+                "packaging_reasoning": reasoning,
+                "likely_audience": "Unknown",
+                "replayability_score": 0.0,
+                "shareability_score": 0.0,
+                "retention_estimate": 0.0,
+                "performance_prediction": "Insufficient context",
+                "platform_packages": {},
+                "clip_type": "INSUFFICIENT_CONTEXT",
+                "packaging_context": context,
+                "packaging_status": "insufficient_context",
+            }
         titles = (
             self._quote_title_options(context)
             if context.get("fallback_mode") == "quote"
@@ -512,7 +587,10 @@ class CreatorPackagingIntelligenceMixin:
             for platform in ("youtube", "tiktok", "instagram", "twitch")
         }
         context["platform_profiles"] = platform_profiles
-        titles = self._rank_titles_for_creator(titles, clip_id, youtube_evidence)
+        titles, ranking = self._rank_titles_for_creator(
+            titles, clip_id, youtube_evidence, include_scores=True
+        )
+        context["title_ranking"] = ranking
         title = titles[0]
         caption, style = self._social_caption(context)
         hook = self._hook_line(context)
@@ -573,10 +651,12 @@ class CreatorPackagingIntelligenceMixin:
             "platform_packages": packages,
             "clip_type": context["clip_type"],
             "packaging_context": context,
+            "packaging_status": "ready_for_review",
         }
 
     def _rank_titles_for_creator(self, candidates: list[str], clip_id: int,
-                                 youtube_evidence: dict[str, Any] | None = None) -> list[str]:
+                                 youtube_evidence: dict[str, Any] | None = None,
+                                 *, include_scores: bool = False):
         profile = self.title_style_profile()
         history = self.published_titles()
         old_titles = [str(value) for value in history.get("title", [])]
@@ -587,7 +667,11 @@ class CreatorPackagingIntelligenceMixin:
         preferred, avoided = set(profile["preferred_words"]), set(profile["avoided_words"])
         target_words = float(profile["average_words"] or 8)
         scored = []
-        for index, candidate in enumerate(candidates):
+        unique_candidates = list(dict.fromkeys(
+            " ".join(str(candidate).split()).strip()
+            for candidate in candidates if str(candidate).strip()
+        ))
+        for index, candidate in enumerate(unique_candidates):
             tokens = set(re.findall(r"[a-z0-9']+", candidate.lower()))
             style = 0.0
             if profile["example_count"]:
@@ -601,10 +685,26 @@ class CreatorPackagingIntelligenceMixin:
                 style += len(tokens & set(youtube["preferred_words"])) * 4
                 style -= abs(len(candidate.split()) - youtube["average_words"]) * 1.5
                 style += 5 if candidate.endswith("?") == (youtube["question_rate"] >= .5) else 0
-            similarity = max((self._similarity(candidate, old) for old in old_titles), default=0.0)
+            closest = max(old_titles, key=lambda old: self._similarity(candidate, old), default="")
+            similarity = self._similarity(candidate, closest) if closest else 0.0
             duplicate_penalty = 100 if similarity >= .92 else 45 * max(0.0, similarity - .62)
-            scored.append((style - duplicate_penalty - index * .01, candidate))
-        return [title for _, title in sorted(scored, reverse=True)]
+            score = style - duplicate_penalty - index * .01
+            scored.append({
+                "title": candidate,
+                "score": round(score, 2),
+                "style_score": round(style, 2),
+                "duplicate_similarity": round(similarity, 3),
+                "duplicate_of": closest or None,
+                "duplicate_risk": "duplicate" if similarity >= .92 else "near" if similarity >= .78 else "low",
+            })
+        ranked = sorted(
+            scored,
+            key=lambda item: (item["duplicate_risk"] == "duplicate", -item["score"]),
+        )
+        titles = [item["title"] for item in ranked if item["duplicate_risk"] != "duplicate"]
+        if not titles and ranked:
+            titles = [ranked[0]["title"]]
+        return (titles, ranked) if include_scores else titles
 
     def _youtube_packaging_evidence(self, context: dict[str, Any]) -> dict[str, Any]:
         tables = self.db.frame("SELECT name FROM sqlite_master WHERE type='table' AND name='youtube_content'")
@@ -787,15 +887,56 @@ class CreatorPackagingIntelligenceMixin:
         subject_confidence = min(0.95, 0.42 + subject_occurrences * 0.16)
         if subject == "moment":
             subject_confidence = 0.2
+        known_subjects = {
+            "colonist", "sheep", "coffee", "tunnel", "colony", "raid", "boss",
+            "wolf", "zombie", "pokemon", "pokÃ©mon", "village", "base", "cave",
+            "dragon", "enemy", "chat",
+        }
+        subject_source = (
+            "recognized_entity" if subject in known_subjects
+            else "repeated_term" if subject_occurrences >= 2
+            else "inferred_term"
+        )
+        if subject_source == "inferred_term":
+            subject_confidence = min(subject_confidence, 0.50)
         action_confidence = 0.82 if action != "react" else 0.42
         outcome_confidence = 0.78 if clip_type not in {"REACTION", "SURPRISE"} else 0.52
+        quote_words = re.findall(r"[a-z0-9']+", quote.lower())
+        filler = {
+            "yeah", "okay", "ok", "um", "uh", "like", "well", "so", "just",
+            "you", "know", "this", "that", "it", "they", "them", "there",
+        }
+        meaningful_quote_words = [word for word in quote_words if word not in filler]
+        quote_confidence = min(
+            0.95,
+            0.20 + min(len(quote_words), 10) * 0.055
+            + min(len(meaningful_quote_words), 6) * 0.06
+            + (0.12 if quote.rstrip().endswith("?") else 0.0),
+        )
         event_confidence = round(
             subject_confidence * 0.45 + action_confidence * 0.30
             + outcome_confidence * 0.25, 2
         )
-        fallback_mode = "quote" if event_confidence < 0.60 else "event"
+        validation = {
+            "subject": subject != "moment" and subject_confidence >= 0.58,
+            "action": action != "react" and action_confidence >= 0.60,
+            "outcome": clip_type not in {"REACTION", "SURPRISE"} and outcome_confidence >= 0.60,
+            "quote": len(meaningful_quote_words) >= 2 and quote_confidence >= 0.60,
+        }
+        event_valid = all(validation[key] for key in ("subject", "action", "outcome"))
+        if event_valid and event_confidence >= 0.60:
+            fallback_mode = "event"
+        elif validation["quote"]:
+            fallback_mode = "quote"
+            outcome = "event details were not reliable enough to claim"
+        else:
+            fallback_mode = "insufficient_context"
+            outcome = "Insufficient context"
+            clip_type, emotion = "INSUFFICIENT_CONTEXT", "unknown"
+        validation_issues = [key for key, valid in validation.items() if not valid]
         return {
             "subject": subject,
+            "subject_source": subject_source,
             "action": action,
             "outcome": outcome,
             "quote": quote,
@@ -807,7 +948,10 @@ class CreatorPackagingIntelligenceMixin:
                 "action": round(action_confidence, 2),
                 "outcome": round(outcome_confidence, 2),
                 "event": event_confidence,
+                "quote": round(quote_confidence, 2),
             },
+            "validation": validation,
+            "validation_issues": validation_issues,
             "fallback_mode": fallback_mode,
             "context_segment_count": int(context_segment_count),
         }
@@ -870,6 +1014,8 @@ class CreatorPackagingIntelligenceMixin:
             return "VICTORY", "excitement"
         if action == "discover":
             return "DISCOVERY", "surprise"
+        if action == "discuss":
+            return "DISCUSSION", "curiosity"
         if action in {"destroy", "fight"}:
             return "CHAOS", "anticipation"
         if "accident" in lowered or "mistake" in lowered:
@@ -902,13 +1048,12 @@ class CreatorPackagingIntelligenceMixin:
         standalone = quote[:80]
         if standalone[-1:] not in "?!":
             standalone += "?" if standalone.lower().startswith(("can ", "could ", "do ", "did ", "is ", "are ", "what ", "why ", "how ")) else ""
-        subject = cls._title_case_subject(context.get("subject") or "moment")
         return [
             standalone,
-            f"We Somehow Ended Up Debating {subject}",
-            f"This Conversation About {subject} Got Weird",
-            f"I Was Not Ready for the {subject} Question",
-            f"Chat Had Questions About {subject}",
+            "That Question Derailed the Whole Conversation",
+            "We Somehow Ended Up Here",
+            "This Conversation Took a Very Strange Turn",
+            "Chat Was Not Ready for That Question",
         ]
 
     @staticmethod
@@ -923,6 +1068,7 @@ class CreatorPackagingIntelligenceMixin:
             "CHAOS": f"the {subject} became the target",
             "ACCIDENT": "an unintended choice created the payoff",
             "FUNNY_QUOTE": "the dialogue delivered the punchline",
+            "DISCUSSION": f"the conversation clarified what the {subject} could do",
             "SURPRISE": "the outcome was unexpected",
             "REACTION": "the reaction became the payoff",
         }.get(clip_type, "the moment produced a payoff")
@@ -967,15 +1113,22 @@ class CreatorPackagingIntelligenceMixin:
                 f"We Finally Beat the {subject}",
                 f"The {subject} Victory We Actually Earned",
                 f"This Changed the Entire {topic} Run",
-                f"I Cannot Believe We Pulled This Off",
-                f"The Exact Moment the Run Turned Around",
+                "I Cannot Believe We Pulled This Off",
+                "The Exact Moment the Run Turned Around",
             ],
             "FUNNY_QUOTE": [
                 f"The Funniest Thing Said About {subject}",
                 f"Chat Lost It Over the {subject}",
                 f"This {subject} Joke Got Better Every Second",
                 f"The Timing on This {subject} Moment Was Perfect",
-                f"I Could Not Stop Laughing at This",
+                "I Could Not Stop Laughing at This",
+            ],
+            "DISCUSSION": [
+                f"Can the {subject} Actually Do That?",
+                f"We Somehow Started Debating the {subject}",
+                f"This {subject} Question Took Over the Conversation",
+                f"Nobody Had an Answer About the {subject}",
+                f"The {subject} Debate Got Surprisingly Complicated",
             ],
             "SURPRISE": [
                 f"The {subject} Caught Everyone Off Guard",
@@ -1002,7 +1155,7 @@ class CreatorPackagingIntelligenceMixin:
                 f"The {subject} Accident That Changed Everything",
                 f"I Did Not Mean to Do This to the {subject}",
                 f"One Mistake Created Total {subject} Chaos",
-                f"This Was Definitely Not the Plan",
+                "This Was Definitely Not the Plan",
                 f"The Accidental {subject} Moment I Cannot Explain",
             ],
         }
@@ -1038,6 +1191,7 @@ class CreatorPackagingIntelligenceMixin:
             "FAIL": f"The {subject} plan failed exactly how you would expect. Would you have tried it anyway?",
             "VICTORY": f"We finally pulled off the {subject} win. Was the payoff worth it?",
             "FUNNY_QUOTE": f"The {subject} timing absolutely destroyed me 😂 Who else would have lost it?",
+            "DISCUSSION": f"We somehow turned the {subject} into a full debate. What do you think?",
             "SURPRISE": f"The {subject} escalated much faster than expected. Did you see that coming?",
             "ACCIDENT": f"The {subject} accident was definitely not part of the plan. What would you have done?",
             "REACTION": f"My reaction to the {subject} says everything. How would you have reacted?",
@@ -1054,6 +1208,7 @@ class CreatorPackagingIntelligenceMixin:
             "FAIL": f"The {subject} plan gets worse every second.",
             "VICTORY": f"This was the moment the {subject} run finally paid off.",
             "FUNNY_QUOTE": f"One line about the {subject} broke the entire stream.",
+            "DISCUSSION": f"One question about the {subject} took over the whole conversation.",
             "SURPRISE": f"Nobody expected the {subject} to become the problem.",
             "ACCIDENT": f"One accidental {subject} decision changed everything.",
             "REACTION": f"Watch the exact moment I realize what the {subject} means.",
@@ -1072,6 +1227,7 @@ class CreatorPackagingIntelligenceMixin:
             "CHAOS": "#GamingChaos", "CONFUSION": "#FunnyMoments",
             "DISCOVERY": "#HiddenDetails", "FAIL": "#GamingFails",
             "VICTORY": "#GamingWins", "FUNNY_QUOTE": "#GamingComedy",
+            "DISCUSSION": "#GamingDiscussion",
             "SURPRISE": "#Unexpected", "ACCIDENT": "#GamingMistakes",
             "REACTION": "#StreamerReaction",
         }
@@ -1092,6 +1248,11 @@ class CreatorPackagingIntelligenceMixin:
         )
         if context.get("fallback_mode") == "quote":
             reasons.append("Event confidence was below 60%, so titles use the strongest standalone quote.")
+        elif context.get("fallback_mode") == "insufficient_context":
+            issues = ", ".join(context.get("validation_issues") or ["event and quote"])
+            reasons.append(
+                f"Insufficient context: {issues} validation failed, so no package was invented."
+            )
         evidence = context.get("youtube_evidence") or {}
         if evidence.get("count"):
             names = "; ".join(str(item["title"]) for item in evidence.get("examples", []))

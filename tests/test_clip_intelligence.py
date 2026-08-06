@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import csv
 import json
 import sqlite3
-import csv
 
 import pandas as pd
-from creator_intelligence.core.credential_vault import MemoryCredentialBackend
 
+from creator_intelligence.core.credential_vault import MemoryCredentialBackend
 from creator_intelligence.services.local_whisper_production import (
     LocalWhisperProductionService,
 )
@@ -91,7 +91,7 @@ def test_analyze_clip_candidate_builds_creator_package(tmp_path):
     assert "#RimWorld" in result["suggested_hashtags"]
 
     row = service.clip_packaging(clip_id)
-    assert row["intelligence_version"] == "creator-packaging-v5"
+    assert row["intelligence_version"] == "creator-packaging-v6"
     assert row["clip_type"] == "DISCOVERY"
     assert json.loads(row["packaging_context_json"])["subject"] == "tunnel"
     assert json.loads(row["title_alternatives_json"])
@@ -269,6 +269,53 @@ def test_low_confidence_event_uses_quote_driven_titles(tmp_path):
     assert result["packaging_context"]["confidence"]["event"] < .60
     assert result["suggested_title"] == "Can they even do that?"
     assert any("below 60%" in reason for reason in result["packaging_reasoning"])
+
+
+def test_neighbor_context_uses_segment_order_not_arbitrary_seconds(tmp_path):
+    service, transcript_id, _ = make_service(tmp_path)
+    service.add_segments(transcript_id, [
+        {"start": 0, "end": 5, "text": "The colonists have strict clothing rules.", "confidence": .9},
+        {"start": 120, "end": 125, "text": "Can they wear pants?", "confidence": .9},
+        {"start": 240, "end": 245, "text": "We are debating what colonists can wear.", "confidence": .9},
+    ])
+    clip_id = service.add_clip_candidate(transcript_id, 120, 125, "Question", "Context", 60)
+
+    result = service.analyze_clip_candidate(clip_id)
+
+    assert result["packaging_context"]["context_segment_count"] == 3
+    assert result["packaging_context"]["subject"] == "colonist"
+    assert result["packaging_context"]["validation"]["subject"] is True
+
+
+def test_unreliable_event_and_quote_return_insufficient_context(tmp_path):
+    service, transcript_id, _ = make_service(tmp_path)
+    service.add_segments(transcript_id, [
+        {"start": 300, "end": 304, "text": "Yeah, um, okay, you know.", "confidence": .7},
+    ])
+    clip_id = service.add_clip_candidate(transcript_id, 300, 304, "Filler", "No event", 20)
+
+    result = service.analyze_clip_candidate(clip_id)
+
+    assert result["packaging_status"] == "insufficient_context"
+    assert result["packaging_context"]["fallback_mode"] == "insufficient_context"
+    assert result["packaging_context"]["outcome"] == "Insufficient context"
+    assert result["suggested_title"] == ""
+    assert result["platform_packages"] == {}
+    assert any("no package was invented" in reason for reason in result["packaging_reasoning"])
+
+
+def test_title_ranking_explains_style_and_duplicate_penalties(tmp_path):
+    service, _, clip_id = make_service(tmp_path)
+    service.record_published_title("I Finally Found the Tunnel")
+
+    result = service.analyze_clip_candidate(clip_id)
+    ranking = result["packaging_context"]["title_ranking"]
+
+    assert ranking
+    assert {"style_score", "duplicate_similarity", "duplicate_risk"} <= set(ranking[0])
+    duplicate = next(item for item in ranking if item["title"] == "I Finally Found the Tunnel")
+    assert duplicate["duplicate_risk"] == "duplicate"
+    assert result["suggested_title"] != duplicate["title"]
 
 
 def test_twitch_title_sync_is_incremental_and_idempotent(tmp_path):
