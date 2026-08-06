@@ -1,5 +1,6 @@
 from creator_intelligence.core.contracts import ModuleMetadata, NavigationItem, ServiceBinding
 from creator_intelligence.services.ffmpeg_manager import FFmpegManagerService
+from creator_intelligence.services.processing_scheduler import ProcessingSchedulerService
 from creator_intelligence.services.proxy_engine import ProxyEngineService
 from creator_intelligence.services.thumbnail_engine import ThumbnailEngineService
 from creator_intelligence.services.video_metadata import VideoMetadataService
@@ -31,6 +32,11 @@ def _thumbnail_page(registry):
     return ThumbnailEnginePage(registry.resolve("thumbnail_engine"))
 
 
+def _scheduler_page(registry):
+    from creator_intelligence.ui.pages.processing_scheduler import ProcessingSchedulerPage
+    return ProcessingSchedulerPage(registry.resolve("processing_scheduler"))
+
+
 def _tool_paths(registry):
     status = registry.resolve("ffmpeg_manager").status()
     return status.ffmpeg_path, status.ffprobe_path
@@ -40,9 +46,9 @@ class VideoProcessingModule:
     metadata = ModuleMetadata(
         "video_processing",
         "Video Processing Engine",
-        "1.4.0",
+        "1.5.0",
         "media",
-        "FFmpeg management, metadata extraction, disposable proxies, and thumbnail generation.",
+        "FFmpeg management, metadata extraction, proxies, thumbnails, and adaptive job scheduling.",
         ("storage", "creator_planner"),
     )
 
@@ -70,6 +76,7 @@ class VideoProcessingModule:
         )
         registry.register_service(ServiceBinding("proxy_engine", lambda ctx: ProxyEngineService(registry.resolve("video_processing")), module_id="video_processing"))
         registry.register_service(ServiceBinding("thumbnail_engine", lambda ctx: ThumbnailEngineService(registry.resolve("video_processing")), module_id="video_processing"))
+        registry.register_service(ServiceBinding("processing_scheduler", lambda ctx: ProcessingSchedulerService(registry.resolve("video_processing")), module_id="video_processing"))
 
         for label, factory, order, key in (
             ("FFmpeg Manager", lambda: _ffmpeg_page(registry), 12, "video_processing:ffmpeg-manager"),
@@ -77,6 +84,7 @@ class VideoProcessingModule:
             ("Video Metadata", lambda: _metadata_page(registry), 14, "video_processing:metadata"),
             ("Proxy Engine", lambda: _proxy_page(registry), 15, "video_processing:proxy-engine"),
             ("Thumbnail Engine", lambda: _thumbnail_page(registry), 16, "video_processing:thumbnail-engine"),
+            ("Processing Scheduler", lambda: _scheduler_page(registry), 17, "video_processing:processing-scheduler"),
         ):
             registry.register_navigation(NavigationItem(label, factory, order=order, module_id=key))
 
