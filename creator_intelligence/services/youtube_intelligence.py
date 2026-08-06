@@ -2,10 +2,12 @@ from __future__ import annotations
 import json
 import pandas as pd
 import numpy as np
+from creator_intelligence.services.social_platforms import SocialPlatformService
 
 class YouTubeIntelligenceService:
     def __init__(self, db):
         self.db = db
+        self.social = SocialPlatformService(db)
 
     def content(self, format_filter=None):
         df = self.db.frame("""

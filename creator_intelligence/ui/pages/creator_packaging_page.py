@@ -71,20 +71,13 @@ class CreatorPackagingPage(TranscriptProductionPage):
         QMessageBox.information(self, "Learned title profile", text)
 
     def sync_titles(self, platform: str) -> None:
-        if platform == "youtube" and not self.service._title_sync_configuration("youtube"):
-            api_key, ok = QInputDialog.getText(self, "YouTube title sync", "YouTube Data API key:")
-            if not ok or not api_key.strip():
-                return
-            channel_id, ok = QInputDialog.getText(self, "YouTube title sync", "YouTube channel ID:")
-            if not ok or not channel_id.strip():
-                return
-            self.service.save_title_sync_configuration(
-                "youtube", {"api_key": api_key.strip(), "channel_id": channel_id.strip()}
-            )
         try:
             result = self.service.sync_title_history(platform)
         except Exception as exc:
-            QMessageBox.critical(self, f"{platform.title()} title sync", str(exc))
+            message = str(exc)
+            if platform == "youtube" and "required" in message.lower():
+                message += " Configure these in YouTube > API setup."
+            QMessageBox.critical(self, f"{platform.title()} title sync", message)
             return
         QMessageBox.information(
             self, f"{platform.title()} title sync",
