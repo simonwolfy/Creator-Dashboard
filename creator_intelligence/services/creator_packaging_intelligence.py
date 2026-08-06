@@ -260,9 +260,13 @@ class CreatorPackagingIntelligenceMixin:
                    records_changed=excluded.records_changed,updated_at=excluded.updated_at""",
                 (platform, "Completed", newest, now, None, len(records), changed, now),
             )
+            from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+            outcomes = PublishingOutcomeService(self.db).process_sync(platform)
             return {"platform": platform, "seen": len(records), "changed": changed,
                     "unchanged": len(records) - changed, "last_cursor": newest,
-                    "profile": self.title_style_profile()}
+                    "profile": self.title_style_profile(),
+                    "outcomes_matched": outcomes["matched"],
+                    "outcome_snapshots": outcomes["snapshots"]}
         except Exception as exc:
             self.db.execute(
                 """INSERT INTO creator_title_sync_state(platform,status,last_error,updated_at)
@@ -532,6 +536,12 @@ class CreatorPackagingIntelligenceMixin:
                        "historical_evidence": platform_profiles["twitch"]["examples"],
                        "profile_confidence": platform_profiles["twitch"]["confidence"]},
         }
+        from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+        package_ids = PublishingOutcomeService(self.db).snapshot_packages(
+            clip_id, packages, context, performance, round(analysis["viral_score"], 1)
+        )
+        for platform, package_id in package_ids.items():
+            packages[platform]["package_id"] = package_id
         return {
             "suggested_title": title,
             "title_alternatives": titles[:5],
@@ -688,6 +698,9 @@ class CreatorPackagingIntelligenceMixin:
         for (_, row), weight in zip(frame.iterrows(), weights):
             for token in set(re.findall(r"[a-z0-9']+", str(row["title"]).lower())):
                 token_scores[token] = token_scores.get(token, 0.0) + float(weight)
+        from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+        for token, weight in PublishingOutcomeService(self.db).learning_adjustments(platform).items():
+            token_scores[token] = token_scores.get(token, 0.0) + weight
         count = len(frame)
         confidence = "High" if count >= 20 else "Medium" if count >= 8 else "Low" if count >= 3 else "Insufficient"
         examples = [{"source_video_id": row.get("source_video_id"), "title": row.get("title"),

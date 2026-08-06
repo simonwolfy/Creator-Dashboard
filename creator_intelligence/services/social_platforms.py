@@ -205,9 +205,13 @@ class SocialPlatformService:
             for record in records:
                 changed += self._upsert_record(platform, record)
                 newest = max(filter(None, [newest, str(record.get("published_at") or "")]), default=newest)
+            from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+            outcomes = PublishingOutcomeService(self.db).process_sync(platform)
             self._record_sync(platform, "Completed", newest, len(records), changed, None, now)
             return {"platform": platform, "seen": len(records), "changed": changed,
-                    "unchanged": len(records) - changed, "last_cursor": newest}
+                    "unchanged": len(records) - changed, "last_cursor": newest,
+                    "outcomes_matched": outcomes["matched"],
+                    "outcome_snapshots": outcomes["snapshots"]}
         except Exception as exc:
             self._record_sync(platform, "Failed", cursor, 0, 0, str(exc), now)
             raise

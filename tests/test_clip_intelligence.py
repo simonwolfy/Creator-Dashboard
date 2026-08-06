@@ -226,6 +226,7 @@ def test_learned_style_ranks_candidates_and_penalizes_near_duplicates(tmp_path):
     service.record_published_title("Nobody Warned Me About This Tunnel", example_type="rejected")
 
     result = service.analyze_clip_candidate(clip_id)
+    assert all(package.get("package_id") for package in result["platform_packages"].values())
 
     assert result["suggested_title"] != "I Finally Found the Tunnel"
     assert service._similarity(result["suggested_title"], "I Finally Found the Tunnel") < .92

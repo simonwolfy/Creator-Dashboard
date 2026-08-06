@@ -12,6 +12,23 @@ class PublishingPlannerService:
         self.production_service = production_service
         self.notifications = notifications
         self._ensure_schema()
+        from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+        self.outcomes = PublishingOutcomeService(db)
+
+    def outcome_dashboard(self):
+        return self.outcomes.dashboard()
+
+    def outcome_summary(self):
+        return self.outcomes.summary()
+
+    def refresh_outcomes(self):
+        return self.outcomes.process_sync()
+
+    def set_package_decision(self, package_id, status, used=None):
+        return self.outcomes.record_decision(package_id, status, used)
+
+    def link_package(self, package_id, source_video_id):
+        return self.outcomes.link(package_id, source_video_id)
 
     def _ensure_schema(self):
         statements = [

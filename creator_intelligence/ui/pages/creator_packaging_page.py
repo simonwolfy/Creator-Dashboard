@@ -108,6 +108,8 @@ class CreatorPackagingPage(TranscriptProductionPage):
         hashtags = load_json("suggested_hashtags_json", [])
         reasons = load_json("packaging_reasoning_json", [])
         packages = load_json("platform_packages_json", {})
+        from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+        outcome_frame = PublishingOutcomeService(self.service.db).dashboard()
         event = load_json("packaging_context_json", {})
         confidence = event.get("confidence", {})
         trim_start = row.get("suggested_start_seconds") or row["start_seconds"]
@@ -118,6 +120,7 @@ class CreatorPackagingPage(TranscriptProductionPage):
         )
         reason_lines = "\n".join(f"  • {reason}" for reason in reasons)
         package_lines = []
+        outcome_lines = []
         for platform, package in packages.items():
             label = platform.replace("_", " ").title()
             evidence = package.get("historical_evidence") or []
@@ -127,6 +130,7 @@ class CreatorPackagingPage(TranscriptProductionPage):
             )
             package_lines.extend([
                 f"{label}:",
+                f"  Outcome package ID: {package.get('package_id', 'Not recorded')}",
                 f"  Profile confidence: {package.get('profile_confidence', 'Unknown')}",
                 f"  Title: {package.get('title', '')}" if package.get("title") else "",
                 f"  Caption: {package.get('caption') or package.get('description', '')}",
@@ -135,6 +139,18 @@ class CreatorPackagingPage(TranscriptProductionPage):
                 f"  Historical evidence: {evidence_text}" if evidence_text else "  Historical evidence: Not enough platform data",
                 "",
             ])
+            package_id = package.get("package_id")
+            matched = outcome_frame[outcome_frame["id"] == package_id] if package_id and not outcome_frame.empty else outcome_frame.iloc[0:0]
+            if not matched.empty:
+                outcome = matched.iloc[0]
+                actual = outcome.get("actual_score")
+                outcome_lines.append(
+                    f"{label}: {outcome.get('decision_status')} | "
+                    f"match {float(outcome.get('match_confidence') or 0):.0%} | "
+                    f"checkpoint {int(outcome.get('milestone_hours') or 0)}h | "
+                    f"actual score {float(actual):.1f}" if actual == actual else
+                    f"{label}: {outcome.get('decision_status')} | waiting for measured results"
+                )
 
         message = (
             f"PACKAGING SCORES\n"
@@ -167,7 +183,9 @@ class CreatorPackagingPage(TranscriptProductionPage):
             f"HASHTAGS\n{' '.join(hashtags)}\n\n"
             f"WHY THIS CLIP WORKS\n{reason_lines}\n\n"
             f"PLATFORM PACKAGES\n"
-            f"{chr(10).join(line for line in package_lines if line is not None)}"
+            f"{chr(10).join(line for line in package_lines if line is not None)}\n"
+            f"OUTCOME FEEDBACK\n"
+            f"{chr(10).join(outcome_lines) or 'Publish and sync these packages to compare predictions with real results.'}"
         )
 
         dialog = QDialog(self)
