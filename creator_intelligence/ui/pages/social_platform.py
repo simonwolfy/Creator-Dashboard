@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QCheckBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,QInputDialog,
     QMessageBox, QPushButton, QTableView, QVBoxLayout, QWidget,
 )
 
@@ -12,9 +12,11 @@ from creator_intelligence.ui.widgets import MetricCard
 LABELS = {
     "youtube": {"api_key": "YouTube Data API key", "channel_id": "Channel ID"},
     "instagram": {"app_id": "Meta app ID", "app_secret": "App secret",
-                  "access_token": "Long-lived access token", "account_id": "Instagram business account ID"},
+                  "access_token": "Long-lived access token", "account_id": "Instagram business account ID",
+                  "redirect_uri": "OAuth redirect URI"},
     "tiktok": {"client_key": "TikTok client key", "client_secret": "Client secret",
-               "access_token": "Access token", "user_id": "TikTok user/open ID"},
+               "access_token": "Access token", "refresh_token": "Refresh token",
+               "user_id": "TikTok user/open ID", "redirect_uri": "OAuth redirect URI"},
 }
 
 
@@ -31,7 +33,7 @@ class SocialPlatformPage(QWidget):
         cards = QHBoxLayout()
         self.cards = {}
         for key, label in (("posts", "Posts"), ("views", "Views"), ("likes", "Likes"),
-                           ("comments", "Comments"), ("watch_time", "Watch time"),
+                           ("comments", "Comments"), ("shares", "Shares"),
                            ("engagement_rate", "Engagement rate")):
             self.cards[key] = MetricCard(label)
             cards.addWidget(self.cards[key])
@@ -51,9 +53,21 @@ class SocialPlatformPage(QWidget):
         buttons = QHBoxLayout()
         save = QPushButton("Save API setup")
         save.clicked.connect(self.save)
+        authorize = QPushButton("Copy OAuth authorization URL")
+        authorize.clicked.connect(self.copy_authorization_url)
+        exchange = QPushButton("Exchange authorization code")
+        exchange.clicked.connect(self.exchange_code)
+        token_refresh = QPushButton("Refresh access token")
+        token_refresh.clicked.connect(self.refresh_token)
+        sync = QPushButton("Sync now")
+        sync.clicked.connect(self.sync_now)
         refresh = QPushButton("Refresh stats")
         refresh.clicked.connect(self.refresh)
         buttons.addWidget(save)
+        buttons.addWidget(authorize)
+        buttons.addWidget(exchange)
+        buttons.addWidget(token_refresh)
+        buttons.addWidget(sync)
         buttons.addWidget(refresh)
         buttons.addStretch()
         form.addRow(buttons)
@@ -74,13 +88,14 @@ class SocialPlatformPage(QWidget):
         for key, field in self.fields.items():
             field.setText(str(config.get(key) or ""))
 
-    def save(self):
+    def save(self, silent=False):
         self.service.save_configuration(
             self.platform, {key: field.text() for key, field in self.fields.items()},
             self.enabled.isChecked(),
         )
         self.refresh()
-        QMessageBox.information(self, "API setup", f"{self.platform.title()} API settings saved.")
+        if not silent:
+            QMessageBox.information(self, "API setup", f"{self.platform.title()} API settings saved.")
 
     def refresh(self):
         summary = self.service.summary(self.platform)
@@ -105,3 +120,41 @@ class SocialPlatformPage(QWidget):
             message += f" · Error: {status['last_error']}"
         self.status.setText(message)
         self.table.setModel(FrameModel(self.service.content(self.platform)))
+
+    def copy_authorization_url(self):
+        self.save(silent=True)
+        try:
+            url = self.service.authorization_url(self.platform)
+        except Exception as exc:
+            QMessageBox.critical(self, "OAuth setup", str(exc)); return
+        QApplication.clipboard().setText(url)
+        QMessageBox.information(self, "OAuth setup", "Authorization URL copied. Open it in your browser, approve access, then paste the returned code here.")
+
+    def exchange_code(self):
+        code, ok = QInputDialog.getText(self, "OAuth authorization", "Authorization code:")
+        if not ok or not code.strip(): return
+        try:
+            self.service.exchange_authorization_code(self.platform, code.strip())
+        except Exception as exc:
+            QMessageBox.critical(self, "OAuth authorization", str(exc)); return
+        self.load(); self.refresh()
+        QMessageBox.information(self, "OAuth authorization", "Access token saved.")
+
+    def sync_now(self):
+        self.save(silent=True)
+        try:
+            result = self.service.sync(self.platform)
+        except Exception as exc:
+            QMessageBox.critical(self, f"{self.platform.title()} sync", str(exc)); self.refresh(); return
+        self.refresh()
+        QMessageBox.information(self, f"{self.platform.title()} sync",
+                                f"Found {result['seen']} post(s); updated {result['changed']}.")
+
+    def refresh_token(self):
+        self.save(silent=True)
+        try:
+            self.service.refresh_access_token(self.platform)
+        except Exception as exc:
+            QMessageBox.critical(self, "Token refresh", str(exc)); return
+        self.load(); self.refresh()
+        QMessageBox.information(self, "Token refresh", "Access token refreshed and saved.")

@@ -117,6 +117,8 @@ class YouTubePage(QWidget):
         form.addRow(self.youtube_sync_enabled)
         save=QPushButton("Save YouTube API setup"); save.clicked.connect(self.save_api_setup)
         form.addRow(save)
+        sync=QPushButton("Sync YouTube now"); sync.clicked.connect(self.sync_youtube_now)
+        form.addRow(sync)
         self.youtube_api_status=QLabel(); self.youtube_api_status.setWordWrap(True)
         form.addRow("Status",self.youtube_api_status)
         config=self.service.social.configuration("youtube")
@@ -139,6 +141,17 @@ class YouTubePage(QWidget):
             f"Configured · Sync: {status['sync_status']}" if status["configured"]
             else "Missing YouTube Data API key or channel ID"
         )
+
+    def sync_youtube_now(self):
+        self.service.social.save_configuration("youtube",{
+            "api_key":self.youtube_api_key.text(),"channel_id":self.youtube_channel_id.text()
+        },self.youtube_sync_enabled.isChecked())
+        try:
+            result=self.service.social.sync("youtube")
+        except Exception as exc:
+            QMessageBox.critical(self,"YouTube sync",str(exc)); self.refresh_api_status(); return
+        self.refresh_api_status(); self.refresh_all()
+        QMessageBox.information(self,"YouTube sync",f"Found {result['seen']} video(s); updated {result['changed']}.")
 
     def refresh_all(self):
         fmt=self.current_format()
