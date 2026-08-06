@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from creator_intelligence.core.logging import SensitiveDataFilter
+from creator_intelligence.core.credential_vault import CredentialVault
 
 SCOPES = ("https://www.googleapis.com/auth/drive.metadata.readonly",)
 KEYRING_SERVICE = "Creator Intelligence"
@@ -39,7 +41,7 @@ class GoogleDriveService:
         drive_factory: Callable[[Any], Any] | None = None,
     ):
         self.db = db
-        self.credential_store = credential_store or _KeyringCredentialStore()
+        self.credential_store = credential_store or _VaultCredentialStore(CredentialVault.for_database(db))
         self.oauth_factory = oauth_factory or _default_oauth_factory
         self.drive_factory = drive_factory or _default_drive_factory
 
@@ -182,7 +184,7 @@ class GoogleDriveService:
             SET status='Error', last_error=?, last_tested_at=?, updated_at=?
             WHERE id=1
             """,
-            (str(exc), now, now),
+            (SensitiveDataFilter.redact(exc), now, now),
         )
 
 
@@ -212,6 +214,14 @@ class _KeyringCredentialStore:
             keyring.delete_password(KEYRING_SERVICE, KEYRING_USERNAME)
         except keyring.errors.PasswordDeleteError:
             pass
+
+
+class _VaultCredentialStore:
+    def __init__(self,vault):self.vault=vault
+    def save(self,value):self.vault.replace("google-drive",{"oauth_credentials":value})
+    def load(self):return self.vault.load("google-drive").get("oauth_credentials")
+    def exists(self):return bool(self.load())
+    def delete(self):self.vault.delete("google-drive")
 
 
 def _default_oauth_factory(client_secrets_path: str, scopes: tuple[str, ...]):

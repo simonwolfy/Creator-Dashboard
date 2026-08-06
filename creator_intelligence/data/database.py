@@ -36,6 +36,7 @@ class Database:
 
     def _configure(self, con):
         con.execute("PRAGMA foreign_keys=ON")
+        con.execute("PRAGMA secure_delete=ON")
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA synchronous=NORMAL")
         con.execute("PRAGMA busy_timeout=5000")

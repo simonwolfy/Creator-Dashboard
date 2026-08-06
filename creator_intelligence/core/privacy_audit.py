@@ -78,7 +78,8 @@ def audit_repository(root: str | Path, paths: Iterable[str | Path] | None = None
             continue
 
         safe_example = name == ".env.example" or ".example." in name
-        if not safe_example and any(pattern.search(name) for pattern in SECRET_NAME_PATTERNS):
+        descriptive_source = relative.suffix.lower() in {".py", ".md", ".rst"}
+        if not safe_example and not descriptive_source and any(pattern.search(name) for pattern in SECRET_NAME_PATTERNS):
             findings.append(PrivacyFinding(normalized, "credential or OAuth material"))
             continue
 

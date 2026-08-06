@@ -1,10 +1,30 @@
 from __future__ import annotations
 
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from creator_intelligence.utils.paths import LOG_DIR
+
+
+class SensitiveDataFilter(logging.Filter):
+    PATTERNS=(
+        (re.compile(r"(?i)(authorization:\s*bearer\s+)[^\s]+"),r"\1[REDACTED]"),
+        (re.compile(r"(?i)(access_token|refresh_token|api_key|client_secret|password|authorization_code)(\s*[=:]\s*)[^\s,;]+"),r"\1\2[REDACTED]"),
+        (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),"[REDACTED]"),
+        (re.compile(r"\bAIza[0-9A-Za-z_-]{30,}\b"),"[REDACTED]"),
+    )
+    @classmethod
+    def redact(cls,value):
+        text=str(value)
+        for pattern,replacement in cls.PATTERNS:text=pattern.sub(replacement,text)
+        return text
+    def filter(self,record):
+        record.msg=self.redact(record.msg)
+        if record.args:
+            record.args=tuple(self.redact(value) for value in record.args) if isinstance(record.args,tuple) else self.redact(record.args)
+        return True
 
 
 def configure_logging(log_dir: Path | None = None, level: int = logging.INFO) -> None:
@@ -28,6 +48,7 @@ def configure_logging(log_dir: Path | None = None, level: int = logging.INFO) ->
         for handler in (file_handler, console_handler):
             setattr(handler, marker, True)
             handler.setFormatter(formatter)
+            handler.addFilter(SensitiveDataFilter())
             root.addHandler(handler)
 
     # Third-party libraries can emit thousands of informational lines while

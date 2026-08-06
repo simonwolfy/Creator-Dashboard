@@ -5,6 +5,7 @@ import json
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from creator_intelligence.core.credential_vault import CredentialVault
 
 
 class SocialPlatformService:
@@ -16,9 +17,11 @@ class SocialPlatformService:
         "tiktok": ("client_key", "client_secret", "access_token", "refresh_token", "user_id", "redirect_uri"),
     }
 
-    def __init__(self, db):
+    def __init__(self, db, credential_vault=None):
         self.db = db
+        self.vault = credential_vault or CredentialVault.for_database(db)
         self._ensure_schema()
+        self._migrate_legacy_credentials()
 
     def _ensure_schema(self) -> None:
         self.db.execute(
@@ -53,30 +56,76 @@ class SocialPlatformService:
                 records_changed INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"""
         )
 
-    def configuration(self, platform: str) -> dict[str, Any]:
+    def _migrate_legacy_credentials(self) -> None:
+        self.db.execute("PRAGMA secure_delete=ON")
+        rows=self.db.frame("SELECT integration_id,config_json FROM integration_settings")
+        changed=False
+        for _,row in rows.iterrows():
+            integration_id=str(row["integration_id"])
+            platform=integration_id.removesuffix("_title_sync")
+            if platform not in self.FIELDS:continue
+            try:config=json.loads(row["config_json"] or "{}")
+            except (TypeError,ValueError):config={}
+            public=self.vault.protect(platform,config)
+            if public!=config:
+                self.db.execute("UPDATE integration_settings SET config_json=?,updated_at=? WHERE integration_id=?",
+                                (json.dumps(public),datetime.now().isoformat(),integration_id))
+                changed=True
+        if changed:
+            self.db.execute("VACUUM")
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def configuration(self, platform: str, reveal: bool = True) -> dict[str, Any]:
         platform = self._platform(platform)
         frame = self.db.frame(
             "SELECT enabled,config_json,last_connected_at,last_error FROM integration_settings WHERE integration_id=?",
             (f"{platform}_title_sync",),
         )
         if frame.empty:
-            return {"enabled": False, **{field: "" for field in self.FIELDS[platform]}}
+            public = {"enabled": False, **{field: "" for field in self.FIELDS[platform]}}
+            return self.vault.reveal(platform,public) if reveal else self.vault.masked(platform,public)
         row = frame.iloc[0]
         result = json.loads(row["config_json"] or "{}")
         result.update(enabled=bool(row["enabled"]), last_connected_at=row["last_connected_at"],
                       last_error=row["last_error"])
-        return result
+        return self.vault.reveal(platform,result) if reveal else self.vault.masked(platform,result)
+
+    def display_configuration(self, platform: str) -> dict[str, Any]:
+        return self.configuration(platform,reveal=False)
 
     def save_configuration(self, platform: str, values: dict[str, Any], enabled: bool = True) -> None:
         platform = self._platform(platform)
         clean = {field: str(values.get(field) or "").strip() for field in self.FIELDS[platform]}
+        public = self.vault.protect(platform,clean)
         now = datetime.now().isoformat()
         self.db.execute(
             """INSERT INTO integration_settings(integration_id,enabled,config_json,updated_at)
                VALUES(?,?,?,?) ON CONFLICT(integration_id) DO UPDATE SET
                enabled=excluded.enabled,config_json=excluded.config_json,updated_at=excluded.updated_at""",
-            (f"{platform}_title_sync", int(enabled), json.dumps(clean), now),
+            (f"{platform}_title_sync", int(enabled), json.dumps(public), now),
         )
+
+    def disconnect(self, platform: str, revoke=None) -> dict[str, Any]:
+        platform=self._platform(platform); config=self.configuration(platform)
+        if revoke:
+            try:revoke(config)
+            except Exception as exc:raise RuntimeError(self.vault.redact(exc)) from None
+        self.vault.delete(platform)
+        self.db.execute("UPDATE integration_settings SET enabled=0,last_connected_at=NULL,last_error=NULL,updated_at=? WHERE integration_id=?",
+                        (datetime.now().isoformat(),f"{platform}_title_sync"))
+        return self.connection_status(platform)
+
+    def revoke_and_disconnect(self, platform: str) -> dict[str, Any]:
+        platform=self._platform(platform)
+        if platform=="tiktok":
+            config=self.configuration(platform)
+            try:
+                self._post_form("https://open.tiktokapis.com/v2/oauth/revoke/",{
+                    "client_key":config.get("client_key"),"client_secret":config.get("client_secret"),
+                    "token":config.get("access_token")})
+            except Exception as exc:
+                raise RuntimeError(self.vault.redact(exc)) from None
+        return self.disconnect(platform)
 
     def connection_status(self, platform: str) -> dict[str, Any]:
         platform = self._platform(platform)
@@ -93,6 +142,7 @@ class SocialPlatformService:
             "sync_status": sync_row.get("status") or "Never synced",
             "last_synced_at": sync_row.get("last_synced_at"),
             "last_error": sync_row.get("last_error") or config.get("last_error"),
+            "credential_storage": "Operating-system credential vault",
         }
 
     def content(self, platform: str):
@@ -159,7 +209,7 @@ class SocialPlatformService:
         else:
             raise ValueError("Authorization-code exchange is not used for this YouTube setup.")
         self.save_configuration(platform, config, True)
-        return payload
+        return {"connected": True, "expires_in": payload.get("expires_in")}
 
     def refresh_access_token(self, platform: str) -> dict[str, Any]:
         platform = self._platform(platform)
@@ -181,7 +231,7 @@ class SocialPlatformService:
         if payload.get("refresh_token"):
             config["refresh_token"] = payload["refresh_token"]
         self.save_configuration(platform, config, True)
-        return payload
+        return {"refreshed": True, "expires_in": payload.get("expires_in")}
 
     def sync(self, platform: str, fetcher=None) -> dict[str, Any]:
         platform = self._platform(platform)
@@ -213,8 +263,9 @@ class SocialPlatformService:
                     "outcomes_matched": outcomes["matched"],
                     "outcome_snapshots": outcomes["snapshots"]}
         except Exception as exc:
-            self._record_sync(platform, "Failed", cursor, 0, 0, str(exc), now)
-            raise
+            safe=self.vault.redact(exc)
+            self._record_sync(platform, "Failed", cursor, 0, 0, safe, now)
+            raise RuntimeError(safe) from None
 
     def _upsert_record(self, platform: str, record: dict[str, Any]) -> int:
         source_id = str(record.get("source_video_id") or record.get("id") or "").strip()

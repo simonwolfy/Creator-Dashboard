@@ -119,9 +119,11 @@ class YouTubePage(QWidget):
         form.addRow(save)
         sync=QPushButton("Sync YouTube now"); sync.clicked.connect(self.sync_youtube_now)
         form.addRow(sync)
+        disconnect=QPushButton("Disconnect and clear credentials"); disconnect.clicked.connect(self.disconnect_youtube)
+        form.addRow(disconnect)
         self.youtube_api_status=QLabel(); self.youtube_api_status.setWordWrap(True)
         form.addRow("Status",self.youtube_api_status)
-        config=self.service.social.configuration("youtube")
+        config=self.service.social.display_configuration("youtube")
         self.youtube_api_key.setText(config.get("api_key") or "")
         self.youtube_channel_id.setText(config.get("channel_id") or "")
         self.youtube_sync_enabled.setChecked(bool(config.get("enabled")))
@@ -152,6 +154,10 @@ class YouTubePage(QWidget):
             QMessageBox.critical(self,"YouTube sync",str(exc)); self.refresh_api_status(); return
         self.refresh_api_status(); self.refresh_all()
         QMessageBox.information(self,"YouTube sync",f"Found {result['seen']} video(s); updated {result['changed']}.")
+
+    def disconnect_youtube(self):
+        if QMessageBox.question(self,"Disconnect YouTube","Clear the API key from the operating-system vault?")!=QMessageBox.StandardButton.Yes:return
+        self.service.social.disconnect("youtube");self.youtube_api_key.clear();self.youtube_sync_enabled.setChecked(False);self.refresh_api_status()
 
     def refresh_all(self):
         fmt=self.current_format()

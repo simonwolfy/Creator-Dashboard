@@ -7,6 +7,7 @@ import math
 import json
 import re
 import pandas as pd
+from creator_intelligence.core.credential_vault import CredentialVault
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -192,6 +193,7 @@ class CreatorPackagingIntelligenceMixin:
 
     def save_title_sync_configuration(self, platform: str, config: dict[str, str]) -> None:
         now = datetime.now().isoformat()
+        public=CredentialVault.for_database(self.db).protect(platform,config)
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS integration_settings(
                 integration_id TEXT PRIMARY KEY, enabled INTEGER DEFAULT 0,
@@ -202,7 +204,7 @@ class CreatorPackagingIntelligenceMixin:
             """INSERT INTO integration_settings(integration_id,enabled,config_json,updated_at)
                VALUES(?,1,?,?) ON CONFLICT(integration_id) DO UPDATE SET
                enabled=1,config_json=excluded.config_json,updated_at=excluded.updated_at""",
-            (f"{platform.strip().lower()}_title_sync", json.dumps(config), now),
+            (f"{platform.strip().lower()}_title_sync", json.dumps(public), now),
         )
 
     def sync_title_history(self, platform: str, fetcher=None) -> dict[str, Any]:
@@ -369,7 +371,12 @@ class CreatorPackagingIntelligenceMixin:
             "SELECT config_json FROM integration_settings WHERE integration_id=?",
             (f"{platform}_title_sync",),
         )
-        return json.loads(frame.iloc[0]["config_json"] or "{}") if not frame.empty else {}
+        public=json.loads(frame.iloc[0]["config_json"] or "{}") if not frame.empty else {}
+        vault=CredentialVault.for_database(self.db);clean=vault.protect(platform,public)
+        if clean!=public:
+            self.db.execute("UPDATE integration_settings SET config_json=?,updated_at=? WHERE integration_id=?",
+                            (json.dumps(clean),datetime.now().isoformat(),f"{platform}_title_sync"))
+        return vault.reveal(platform,clean)
 
     @staticmethod
     def _json_request(request: Request) -> dict[str, Any]:

@@ -130,6 +130,10 @@ class LiveStreamPage(QWidget):
         save=QPushButton("Save connection and marker settings")
         save.clicked.connect(self.save_settings)
         layout.addWidget(save)
+        disconnect_twitch=QPushButton("Disconnect Twitch and clear credentials")
+        disconnect_twitch.clicked.connect(lambda:self.disconnect_integration("twitch"));layout.addWidget(disconnect_twitch)
+        disconnect_obs=QPushButton("Disconnect OBS and clear password")
+        disconnect_obs.clicked.connect(lambda:self.disconnect_integration("obs"));layout.addWidget(disconnect_obs)
         return page
 
     def start_simulation(self):
@@ -223,7 +227,7 @@ class LiveStreamPage(QWidget):
         self.load_settings()
 
     def load_settings(self):
-        settings=self.service.settings()
+        settings=self.service.display_settings()
         self.simulation_mode.setChecked(bool(settings["simulation_mode"]))
         self.twitch_enabled.setChecked(bool(settings["twitch_enabled"]))
         self.twitch_client_id.setText(settings["twitch_client_id"] or "")
@@ -257,3 +261,7 @@ class LiveStreamPage(QWidget):
             raid_marker_min_viewers=self.raid_threshold.value()
         )
         QMessageBox.information(self,"Settings saved","Live integration settings were saved.")
+
+    def disconnect_integration(self,provider):
+        if QMessageBox.question(self,"Disconnect",f"Clear {provider.title()} credentials from the operating-system vault?")!=QMessageBox.StandardButton.Yes:return
+        self.service.disconnect_integration(provider);self.load_settings()

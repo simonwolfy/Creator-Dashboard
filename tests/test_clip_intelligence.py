@@ -5,6 +5,7 @@ import sqlite3
 import csv
 
 import pandas as pd
+from creator_intelligence.core.credential_vault import MemoryCredentialBackend
 
 from creator_intelligence.services.local_whisper_production import (
     LocalWhisperProductionService,
@@ -14,6 +15,8 @@ from creator_intelligence.services.local_whisper_production import (
 class SQLiteDB:
     def __init__(self, path):
         self.connection = sqlite3.connect(str(path))
+        self.path = path
+        self.credential_backend = MemoryCredentialBackend()
 
     def execute(self, sql, params=()):
         cursor = self.connection.execute(sql, tuple(params))

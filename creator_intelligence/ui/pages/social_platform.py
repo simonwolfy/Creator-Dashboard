@@ -63,12 +63,15 @@ class SocialPlatformPage(QWidget):
         sync.clicked.connect(self.sync_now)
         refresh = QPushButton("Refresh stats")
         refresh.clicked.connect(self.refresh)
+        disconnect = QPushButton("Disconnect / revoke and clear credentials")
+        disconnect.clicked.connect(self.disconnect)
         buttons.addWidget(save)
         buttons.addWidget(authorize)
         buttons.addWidget(exchange)
         buttons.addWidget(token_refresh)
         buttons.addWidget(sync)
         buttons.addWidget(refresh)
+        buttons.addWidget(disconnect)
         buttons.addStretch()
         form.addRow(buttons)
         self.status = QLabel()
@@ -83,7 +86,7 @@ class SocialPlatformPage(QWidget):
         self.refresh()
 
     def load(self):
-        config = self.service.configuration(self.platform)
+        config = self.service.display_configuration(self.platform)
         self.enabled.setChecked(bool(config.get("enabled")))
         for key, field in self.fields.items():
             field.setText(str(config.get(key) or ""))
@@ -158,3 +161,10 @@ class SocialPlatformPage(QWidget):
             QMessageBox.critical(self, "Token refresh", str(exc)); return
         self.load(); self.refresh()
         QMessageBox.information(self, "Token refresh", "Access token refreshed and saved.")
+
+    def disconnect(self):
+        if QMessageBox.question(self,"Disconnect account","Clear this platform's credentials from the operating-system vault?")!=QMessageBox.StandardButton.Yes:
+            return
+        try:self.service.revoke_and_disconnect(self.platform)
+        except Exception as exc:QMessageBox.warning(self,"Could not revoke access",str(exc));return
+        self.load();self.refresh()

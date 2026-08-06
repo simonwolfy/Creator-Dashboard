@@ -4,11 +4,14 @@ import sqlite3
 import pandas as pd
 
 from creator_intelligence.services.social_platforms import SocialPlatformService
+from creator_intelligence.core.credential_vault import MemoryCredentialBackend
 
 
 class DB:
     def __init__(self, path):
         self.connection = sqlite3.connect(path)
+        self.path = path
+        self.credential_backend = MemoryCredentialBackend()
     def execute(self, sql, params=()):
         cursor = self.connection.execute(sql, tuple(params)); self.connection.commit(); return cursor.lastrowid
     def frame(self, sql, params=()):

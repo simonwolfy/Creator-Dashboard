@@ -95,7 +95,7 @@ class CreatorIntelligenceApplication:
         return self.lifecycle.stop()
 
     def _configure_logging(self) -> str:
-        configure_logging()
+        configure_logging(self.workspace.paths.logs)
         return "structured logging ready"
 
     def _initialize_workspace(self) -> str:

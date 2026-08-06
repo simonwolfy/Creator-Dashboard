@@ -67,6 +67,13 @@ def test_example_configuration_names_are_release_safe(tmp_path: Path):
     assert audit_repository(tmp_path) == []
 
 
+def test_security_source_names_are_safe_but_credential_json_is_not(tmp_path: Path):
+    (tmp_path / "credential_vault.py").write_text("class Vault: pass",encoding="utf-8")
+    (tmp_path / "credentials.json").write_text("{}",encoding="utf-8")
+    findings=audit_repository(tmp_path)
+    assert [finding.path for finding in findings]==["credentials.json"]
+
+
 def test_history_audit_reports_old_database_by_path_only(tmp_path: Path):
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path, check=True)

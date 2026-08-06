@@ -7,11 +7,14 @@ import pandas as pd
 
 from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
 from creator_intelligence.services.social_platforms import SocialPlatformService
+from creator_intelligence.core.credential_vault import MemoryCredentialBackend
 
 
 class DB:
     def __init__(self, path):
         self.connection = sqlite3.connect(str(path))
+        self.path = path
+        self.credential_backend = MemoryCredentialBackend()
 
     def execute(self, sql, params=()):
         cursor = self.connection.execute(sql, tuple(params))
