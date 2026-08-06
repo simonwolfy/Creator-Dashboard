@@ -345,3 +345,23 @@ def test_youtube_api_pages_results_and_classifies_shorts(tmp_path, monkeypatch):
 
     assert [record["source_video_id"] for record in records] == ["one", "two"]
     assert [record["content_type"] for record in records] == ["short", "video"]
+
+
+def test_youtube_content_performance_guides_title_and_description_packaging(tmp_path):
+    service, _, clip_id = make_service(tmp_path)
+    service.db.execute("""CREATE TABLE youtube_content(
+        content_id TEXT PRIMARY KEY,title TEXT,description TEXT,duration_seconds REAL,
+        views INTEGER,ctr REAL,avg_percentage_viewed REAL,likes INTEGER,comments INTEGER,shares INTEGER)""")
+    service.db.execute("""INSERT INTO youtube_content VALUES
+        ('best','I Finally Found the Hidden Tunnel','Subscribe and comment for more RimWorld.',45,50000,8.0,92,4000,300,200),
+        ('weak','A Tunnel Appeared','Basic description',50,100,1.0,20,2,0,0)""")
+
+    result = service.analyze_clip_candidate(clip_id)
+    youtube = result["platform_packages"]["youtube_shorts"]
+    evidence = result["packaging_context"]["youtube_evidence"]
+
+    assert evidence["count"] == 2
+    assert evidence["examples"][0]["content_id"] == "best"
+    assert "Subscribe for more moments" in youtube["description"]
+    assert youtube["historical_evidence"][0]["title"] == "I Finally Found the Hidden Tunnel"
+    assert any("weighted by performance" in reason for reason in result["packaging_reasoning"])

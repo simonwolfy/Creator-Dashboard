@@ -42,7 +42,7 @@ class SocialPlatformService:
             "PRAGMA table_info(creator_published_titles)"
         ).iterrows()}
         for name, sql_type in (("shares", "INTEGER"), ("reach", "INTEGER"),
-                               ("duration_seconds", "REAL")):
+                               ("duration_seconds", "REAL"), ("description", "TEXT")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE creator_published_titles ADD COLUMN {name} {sql_type}")
         self.db.execute(
@@ -98,7 +98,7 @@ class SocialPlatformService:
     def content(self, platform: str):
         platform = self._platform(platform)
         return self.db.frame(
-            """SELECT id,title,content_type,published_at,views,likes,comments,shares,
+            """SELECT id,title,description,content_type,published_at,views,likes,comments,shares,
                reach,watch_time,duration_seconds,source_video_id FROM creator_published_titles
                WHERE platform=? ORDER BY COALESCE(published_at,created_at) DESC""",
             (platform,),
@@ -221,26 +221,54 @@ class SocialPlatformService:
             (platform, source_id),
         )
         title = str(record.get("title") or record.get("caption") or "Untitled post").strip()
-        values = (record.get("content_type") or "short", title, record.get("published_at"),
+        values = (record.get("content_type") or "short", title, record.get("description"), record.get("published_at"),
                   self._number(record.get("views"), int), self._number(record.get("likes"), int),
                   self._number(record.get("comments"), int), self._number(record.get("shares"), int),
                   self._number(record.get("reach"), int), self._number(record.get("watch_time"), float),
                   self._number(record.get("duration_seconds"), float))
         changed = existing.empty or tuple(self._normalized(existing.iloc[0].get(name)) for name in (
-            "content_type", "title", "published_at", "views", "likes", "comments", "shares",
+            "content_type", "title", "description", "published_at", "views", "likes", "comments", "shares",
             "reach", "watch_time", "duration_seconds")) != values
         now = datetime.now().isoformat()
         if existing.empty:
             self.db.execute("""INSERT INTO creator_published_titles(
-                platform,content_type,title,published_at,views,likes,comments,shares,reach,
+                platform,content_type,title,description,published_at,views,likes,comments,shares,reach,
                 watch_time,duration_seconds,example_type,source_video_id,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,'published',?,?,?)""",
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'published',?,?,?)""",
                 (platform, *values, source_id, now, now))
         else:
-            self.db.execute("""UPDATE creator_published_titles SET content_type=?,title=?,published_at=?,
+            self.db.execute("""UPDATE creator_published_titles SET content_type=?,title=?,description=?,published_at=?,
                 views=?,likes=?,comments=?,shares=?,reach=?,watch_time=?,duration_seconds=?,updated_at=?
                 WHERE id=?""", (*values, now, int(existing.iloc[0]["id"])))
+        if platform == "youtube":
+            self._mirror_youtube_content(record, title)
         return int(changed)
+
+    def _mirror_youtube_content(self, record: dict[str, Any], title: str) -> None:
+        columns = {str(row["name"]) for _, row in self.db.frame(
+            "PRAGMA table_info(youtube_content)"
+        ).iterrows()}
+        if not columns:
+            return
+        values = {
+            "content_id": str(record.get("source_video_id") or record.get("id")),
+            "title": title, "description": record.get("description"),
+            "publish_time": record.get("published_at"),
+            "duration_seconds": self._number(record.get("duration_seconds"), float),
+            "views": self._number(record.get("views"), int),
+            "likes": self._number(record.get("likes"), int),
+            "comments": self._number(record.get("comments"), int),
+            "shares": self._number(record.get("shares"), int),
+        }
+        available = [name for name in values if name in columns]
+        update = [name for name in available if name != "content_id"]
+        self.db.execute(
+            f"""INSERT INTO youtube_content({','.join(available)})
+                VALUES({','.join('?' for _ in available)})
+                ON CONFLICT(content_id) DO UPDATE SET
+                {','.join(f'{name}=excluded.{name}' for name in update)}""",
+            tuple(values[name] for name in available),
+        )
 
     def _fetch_records(self, platform: str, cursor: str | None):
         if platform == "youtube":
@@ -277,6 +305,7 @@ class SocialPlatformService:
                 stats = item.get("statistics") or {}
                 duration = self._iso_duration_seconds((item.get("contentDetails") or {}).get("duration") or "")
                 records.append({"source_video_id": item["id"], "title": snippet.get("title"),
+                                "description": snippet.get("description"),
                                 "content_type": "short" if duration <= 180 else "video",
                                 "published_at": snippet.get("publishedAt"), "duration_seconds": duration,
                                 "views": stats.get("viewCount"), "likes": stats.get("likeCount"),

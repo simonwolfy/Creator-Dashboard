@@ -112,3 +112,20 @@ def test_expired_token_refreshes_once_and_retries_sync(tmp_path, monkeypatch):
     result = service.sync("tiktok")
     assert result["seen"] == 0
     assert calls == ["expired", "fresh"]
+
+
+def test_youtube_sync_mirrors_content_tab_table(tmp_path):
+    db = DB(tmp_path / "youtube-mirror.db")
+    db.execute("""CREATE TABLE youtube_content(
+        content_id TEXT PRIMARY KEY,title TEXT,description TEXT,publish_time TEXT,
+        duration_seconds REAL,views INTEGER,likes INTEGER,comments INTEGER,shares INTEGER)""")
+    service = SocialPlatformService(db)
+    service.save_configuration("youtube", {"api_key": "key", "channel_id": "channel"})
+    service.sync("youtube", fetcher=lambda platform, cursor: [{
+        "source_video_id": "yt-1", "title": "A Better Clip Title", "description": "Description",
+        "published_at": "2026-08-01T00:00:00Z", "duration_seconds": 45, "views": 1000,
+    }])
+    row = db.frame("SELECT * FROM youtube_content WHERE content_id='yt-1'").iloc[0]
+    assert row["title"] == "A Better Clip Title"
+    assert row["description"] == "Description"
+    assert int(row["views"]) == 1000

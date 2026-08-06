@@ -8,6 +8,9 @@ class YouTubeIntelligenceService:
     def __init__(self, db):
         self.db = db
         self.social = SocialPlatformService(db)
+        columns = {str(row["name"]) for _, row in db.frame("PRAGMA table_info(youtube_content)").iterrows()}
+        if columns and "description" not in columns:
+            db.execute("ALTER TABLE youtube_content ADD COLUMN description TEXT")
 
     def content(self, format_filter=None):
         df = self.db.frame("""

@@ -57,6 +57,8 @@ class ImportCenterService:
                 "video id": "content_id",
                 "title": "title",
                 "video title": "title",
+                "description": "description",
+                "video description": "description",
                 "publish time": "publish_time",
                 "published at": "publish_time",
                 "duration": "duration_seconds",
@@ -182,6 +184,12 @@ class ImportCenterService:
         ]
         for statement in statements:
             self.db.execute(statement)
+        youtube_columns = {
+            str(row["name"])
+            for _, row in self.db.frame("PRAGMA table_info(youtube_content)").iterrows()
+        }
+        if youtube_columns and "description" not in youtube_columns:
+            self.db.execute("ALTER TABLE youtube_content ADD COLUMN description TEXT")
 
     @staticmethod
     def _normalize_header(value: str) -> str:
@@ -448,7 +456,7 @@ class ImportCenterService:
             conflict = "date"
         elif export_type == "youtube_content":
             columns = [
-                "content_id","title","publish_time","duration_seconds","views",
+                "content_id","title","description","publish_time","duration_seconds","views",
                 "engaged_views","watch_time_hours","subscribers_gained",
                 "subscribers_lost","likes","comments","shares","impressions","ctr"
             ]

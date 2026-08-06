@@ -6,6 +6,7 @@ import csv
 import math
 import json
 import re
+import pandas as pd
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -58,6 +59,11 @@ class CreatorPackagingIntelligenceMixin:
                 UNIQUE(clip_candidate_id, title)
             )"""
         )
+        youtube_columns = {str(row["name"]) for _, row in self.db.frame(
+            "PRAGMA table_info(youtube_content)"
+        ).iterrows()}
+        if youtube_columns and "description" not in youtube_columns:
+            self.db.execute("ALTER TABLE youtube_content ADD COLUMN description TEXT")
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS creator_published_titles(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -488,12 +494,15 @@ class CreatorPackagingIntelligenceMixin:
             if context.get("fallback_mode") == "quote"
             else self._title_options(context)
         )
-        titles = self._rank_titles_for_creator(titles, clip_id)
+        youtube_evidence = self._youtube_packaging_evidence(context)
+        context["youtube_evidence"] = youtube_evidence
+        titles = self._rank_titles_for_creator(titles, clip_id, youtube_evidence)
         title = titles[0]
         caption, style = self._social_caption(context)
         hook = self._hook_line(context)
         hashtags = self._contextual_hashtags(context)
         reasoning = self._packaging_reasoning(text, analysis, context)
+        youtube_description = self._youtube_description(context, caption, hook, hashtags, youtube_evidence)
         replay = min(100.0, analysis["surprise_score"] * 0.45 + analysis["quote_score"] * 0.35 + 15)
         share = min(100.0, analysis["humor_score"] * 0.30 + analysis["emotion_score"] * 0.25 + analysis["viral_score"] * 0.45)
         retention = min(95.0, 38 + analysis["hook_score"] * 0.32 + analysis["quote_score"] * 0.18)
@@ -502,7 +511,8 @@ class CreatorPackagingIntelligenceMixin:
         topic = context["topic"]
         audience = f"{topic} viewers" if topic != "Gaming" else "Gaming and livestream viewers"
         packages = {
-            "youtube_shorts": {"title": title, "description": caption, "hook": hook, "hashtags": hashtags[:5]},
+            "youtube_shorts": {"title": title, "description": youtube_description, "hook": hook,
+                               "hashtags": hashtags[:5], "historical_evidence": youtube_evidence["examples"]},
             "tiktok": {"caption": caption, "hook": hook, "hashtags": hashtags[:6]},
             "instagram_reels": {"caption": caption, "hook": hook, "hashtags": hashtags[:8]},
         }
@@ -525,7 +535,8 @@ class CreatorPackagingIntelligenceMixin:
             "packaging_context": context,
         }
 
-    def _rank_titles_for_creator(self, candidates: list[str], clip_id: int) -> list[str]:
+    def _rank_titles_for_creator(self, candidates: list[str], clip_id: int,
+                                 youtube_evidence: dict[str, Any] | None = None) -> list[str]:
         profile = self.title_style_profile()
         history = self.published_titles()
         old_titles = [str(value) for value in history.get("title", [])]
@@ -545,10 +556,89 @@ class CreatorPackagingIntelligenceMixin:
                 style += 8 if candidate.endswith("?") == (profile["question_rate"] >= .5) else 0
                 first_person = bool(re.search(r"\b(i|we|my|our)\b", candidate, re.I))
                 style += 6 if first_person == (profile["first_person_rate"] >= .5) else 0
+            youtube = youtube_evidence or {}
+            if youtube.get("count"):
+                style += len(tokens & set(youtube["preferred_words"])) * 4
+                style -= abs(len(candidate.split()) - youtube["average_words"]) * 1.5
+                style += 5 if candidate.endswith("?") == (youtube["question_rate"] >= .5) else 0
             similarity = max((self._similarity(candidate, old) for old in old_titles), default=0.0)
             duplicate_penalty = 100 if similarity >= .92 else 45 * max(0.0, similarity - .62)
             scored.append((style - duplicate_penalty - index * .01, candidate))
         return [title for _, title in sorted(scored, reverse=True)]
+
+    def _youtube_packaging_evidence(self, context: dict[str, Any]) -> dict[str, Any]:
+        tables = self.db.frame("SELECT name FROM sqlite_master WHERE type='table' AND name='youtube_content'")
+        if tables.empty:
+            return {"count": 0, "average_words": 0, "question_rate": 0,
+                    "preferred_words": [], "examples": [], "description_style": {}}
+        columns = {str(row["name"]) for _, row in self.db.frame("PRAGMA table_info(youtube_content)").iterrows()}
+        wanted = [name for name in ("content_id", "title", "description", "publish_time", "duration_seconds", "views",
+                                    "ctr", "avg_percentage_viewed", "likes", "comments", "shares") if name in columns]
+        frame = self.db.frame(f"SELECT {','.join(wanted)} FROM youtube_content")
+        if frame.empty or "title" not in frame:
+            return {"count": 0, "average_words": 0, "question_rate": 0,
+                    "preferred_words": [], "examples": [], "description_style": {}}
+        if "duration_seconds" in frame:
+            duration = pd.to_numeric(frame["duration_seconds"], errors="coerce").fillna(9999)
+            frame = frame[duration <= 180].copy()
+        metadata_table = self.db.frame(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='content_metadata'"
+        )
+        if not metadata_table.empty and context.get("topic") != "Gaming" and "content_id" in frame:
+            metadata = self.db.frame(
+                "SELECT content_id,game_topic FROM content_metadata WHERE platform='YouTube'"
+            )
+            if not metadata.empty:
+                frame = frame.merge(metadata, on="content_id", how="left")
+                relevant = frame["game_topic"].fillna("").str.lower() == str(context["topic"]).lower()
+                if relevant.any():
+                    frame = frame[relevant].copy()
+        if frame.empty:
+            return {"count": 0, "average_words": 0, "question_rate": 0,
+                    "preferred_words": [], "examples": [], "description_style": {}}
+        score = pd.Series(0.0, index=frame.index)
+        cohorts = None
+        if "publish_time" in frame:
+            published = pd.to_datetime(frame["publish_time"], errors="coerce")
+            cohorts = published.dt.to_period("Q").astype(str)
+        for name, multiplier in (("views", 3.0), ("ctr", 2.0), ("avg_percentage_viewed", 2.5),
+                                 ("likes", 1.0), ("comments", 1.0), ("shares", 1.5)):
+            if name in frame:
+                values = pd.to_numeric(frame[name], errors="coerce").fillna(0)
+                if cohorts is not None and cohorts.notna().any():
+                    normalized = values.groupby(cohorts).rank(pct=True)
+                else:
+                    spread = float(values.max() - values.min())
+                    normalized = (values - values.min()) / spread if spread else pd.Series(0.5, index=values.index)
+                score += normalized.fillna(.5) * multiplier
+        frame["evidence_score"] = score
+        frame = frame.sort_values("evidence_score", ascending=False)
+        weights = frame["evidence_score"].clip(lower=.25)
+        token_scores: dict[str, float] = {}
+        for (_, row), weight in zip(frame.iterrows(), weights):
+            for token in set(re.findall(r"[a-z0-9']+", str(row["title"]).lower())):
+                token_scores[token] = token_scores.get(token, 0) + float(weight)
+        descriptions = [str(value) for value in frame.get("description", []) if str(value).strip() and str(value) != "nan"]
+        examples = [{"content_id": row.get("content_id"), "title": row.get("title"),
+                     "score": round(float(row["evidence_score"]), 2),
+                     "views": int(cls_value) if pd.notna(cls_value := row.get("views")) else 0}
+                    for _, row in frame.head(3).iterrows()]
+        return {"count": len(frame),
+                "average_words": round(sum(len(str(title).split()) for title in frame["title"]) / len(frame), 1),
+                "question_rate": sum(str(title).rstrip().endswith("?") for title in frame["title"]) / len(frame),
+                "preferred_words": [token for token, _ in sorted(token_scores.items(), key=lambda item: -item[1])[:15]],
+                "examples": examples,
+                "description_style": {"count": len(descriptions),
+                                      "average_length": round(sum(map(len, descriptions)) / len(descriptions), 1) if descriptions else 0,
+                                      "cta_rate": sum(bool(re.search(r"\b(subscribe|follow|comment|watch)\b", d, re.I)) for d in descriptions) / len(descriptions) if descriptions else 0}}
+
+    @staticmethod
+    def _youtube_description(context, caption, hook, hashtags, evidence):
+        lines = [hook, "", caption]
+        if evidence.get("description_style", {}).get("cta_rate", 0) >= .35:
+            lines.extend(["", "Subscribe for more moments like this."])
+        lines.extend(["", " ".join(hashtags[:5])])
+        return "\n".join(lines).strip()
 
     @classmethod
     def _extract_context(cls, text: str, metadata: str, analysis: dict[str, Any],
@@ -871,6 +961,13 @@ class CreatorPackagingIntelligenceMixin:
         )
         if context.get("fallback_mode") == "quote":
             reasons.append("Event confidence was below 60%, so titles use the strongest standalone quote.")
+        evidence = context.get("youtube_evidence") or {}
+        if evidence.get("count"):
+            names = "; ".join(str(item["title"]) for item in evidence.get("examples", []))
+            reasons.append(
+                f"YouTube ranking used {evidence['count']} comparable Short(s), weighted by performance. "
+                f"Top historical evidence: {names}."
+            )
         if context["quote"]:
             reasons.append(f"The strongest standalone quote is: “{context['quote']}”.")
         if analysis["hook_score"] >= 50:
