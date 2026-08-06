@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
-import math
 import re
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -115,11 +115,31 @@ class CreatorPackagingIntelligenceMixin:
         kind = str(example_type).strip().lower()
         if kind not in {"published", "approved", "rejected"}:
             raise ValueError("example_type must be published, approved, or rejected.")
+        platform = platform.strip().lower()
+        content_type = content_type.strip().lower()
         now = datetime.now().isoformat()
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        dna.ensure_event_history()
+        existing = self.db.frame(
+            "SELECT * FROM creator_published_titles WHERE platform=? AND source_video_id=?",
+            (platform, source_video_id),
+        ) if source_video_id else self.db.frame(
+            """SELECT * FROM creator_published_titles
+               WHERE platform=? AND content_type=? AND title=?""",
+            (platform, content_type, clean),
+        )
+        if existing.empty and source_video_id:
+            existing = self.db.frame(
+                """SELECT * FROM creator_published_titles
+                   WHERE platform=? AND content_type=? AND title=?""",
+                (platform, content_type, clean),
+            )
+        before = existing.iloc[0].to_dict() if not existing.empty else None
         if source_video_id:
             sourced = self.db.frame(
                 "SELECT id FROM creator_published_titles WHERE platform=? AND source_video_id=?",
-                (platform.strip().lower(), source_video_id),
+                (platform, source_video_id),
             )
             if not sourced.empty:
                 record_id = int(sourced.iloc[0]["id"])
@@ -127,29 +147,70 @@ class CreatorPackagingIntelligenceMixin:
                     """UPDATE creator_published_titles SET content_type=?,title=?,game=?,
                        published_at=?,views=?,likes=?,comments=?,watch_time=?,example_type=?,
                        updated_at=? WHERE id=?""",
-                    (content_type.strip().lower(), clean, game, published_at, views,
+                    (content_type, clean, game, published_at, views,
                      likes, comments, watch_time, kind, now, record_id),
                 )
-                return record_id
-        self.db.execute(
-            """INSERT INTO creator_published_titles(
-               platform,content_type,title,game,published_at,views,likes,comments,
-               watch_time,example_type,source_video_id,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(platform,content_type,title) DO UPDATE SET
-               game=excluded.game,published_at=excluded.published_at,
-               views=excluded.views,likes=excluded.likes,comments=excluded.comments,
-               watch_time=excluded.watch_time,example_type=excluded.example_type,
-               source_video_id=excluded.source_video_id,updated_at=excluded.updated_at""",
-            (platform.strip().lower(), content_type.strip().lower(), clean, game,
-             published_at, views, likes, comments, watch_time, kind,
-             source_video_id, now, now),
+            else:
+                record_id = 0
+        else:
+            record_id = 0
+        if not record_id:
+            self.db.execute(
+                """INSERT INTO creator_published_titles(
+                   platform,content_type,title,game,published_at,views,likes,comments,
+                   watch_time,example_type,source_video_id,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(platform,content_type,title) DO UPDATE SET
+                   game=excluded.game,published_at=excluded.published_at,
+                   views=excluded.views,likes=excluded.likes,comments=excluded.comments,
+                   watch_time=excluded.watch_time,example_type=excluded.example_type,
+                   source_video_id=excluded.source_video_id,updated_at=excluded.updated_at""",
+                (platform, content_type, clean, game, published_at, views, likes,
+                 comments, watch_time, kind, source_video_id, now, now),
+            )
+            row = self.db.frame(
+                """SELECT id FROM creator_published_titles
+                   WHERE platform=? AND content_type=? AND title=?""",
+                (platform, content_type, clean),
+            )
+            record_id = int(row.iloc[0]["id"])
+        after = self.db.frame(
+            "SELECT * FROM creator_published_titles WHERE id=?", (record_id,)
+        ).iloc[0].to_dict()
+        before_safe = dna._json_safe(before) if before else None
+        after_safe = dna._json_safe(after)
+        compared = (
+            "platform", "content_type", "title", "game", "published_at",
+            "views", "likes", "comments", "watch_time", "example_type",
+            "source_video_id",
         )
-        row = self.db.frame(
-            "SELECT id FROM creator_published_titles WHERE platform=? AND content_type=? AND title=?",
-            (platform.strip().lower(), content_type.strip().lower(), clean),
-        )
-        return int(row.iloc[0]["id"])
+        changed = [
+            name for name in compared
+            if not before_safe or before_safe.get(name) != after_safe.get(name)
+        ]
+        if changed:
+            polarity, weight = dna.historical_title_evidence(after_safe)
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    {name: after_safe.get(name) for name in compared},
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            dna.record_event(
+                "historical_title_recorded" if before_safe is None else "historical_title_updated",
+                subject_type="published_title",
+                subject_id=record_id,
+                platform=platform,
+                evidence_polarity=polarity,
+                evidence_weight=weight,
+                field_name="title",
+                old_value=before_safe.get("title") if before_safe else None,
+                new_value=clean,
+                metadata={"record": after_safe, "changed_fields": changed},
+                source="title_history",
+                event_key=f"historical-title:{record_id}:{fingerprint}",
+            )
+        return record_id
 
     def import_published_titles(self, path: str) -> dict[str, int]:
         counts = {"imported": 0, "skipped": 0}
@@ -162,8 +223,8 @@ class CreatorPackagingIntelligenceMixin:
                 if not str(row.get("title") or "").strip():
                     counts["skipped"] += 1
                     continue
-                def number(name, cast):
-                    value = str(row.get(name) or "").strip()
+                def number(name, cast, source=row):
+                    value = str(source.get(name) or "").strip()
                     return cast(value) if value else None
                 self.record_published_title(
                     row["title"], platform=row.get("platform") or "twitch",
@@ -386,37 +447,8 @@ class CreatorPackagingIntelligenceMixin:
             return json.loads(response.read().decode("utf-8"))
 
     def title_style_profile(self) -> dict[str, Any]:
-        frame = self.published_titles()
-        weights = {"published": 3.0, "approved": 1.5, "rejected": -2.5}
-        positives = []
-        negatives = []
-        for _, row in frame.iterrows():
-            weight = weights.get(str(row["example_type"]), 0.0)
-            if weight > 0 and str(row["example_type"]) == "published":
-                views = float(row.get("views") or 0)
-                interactions = float(row.get("likes") or 0) + float(row.get("comments") or 0)
-                performance = min(2.0, math.log10(views + 1) / 3.0)
-                if views:
-                    performance += min(1.0, interactions / views * 10.0)
-                weight *= 1.0 + performance
-            item = (str(row["title"]), weight)
-            (positives if item[1] > 0 else negatives).append(item)
-        total = sum(weight for _, weight in positives) or 1.0
-        def avg(fn): return sum(fn(title) * weight for title, weight in positives) / total
-        token_scores: dict[str, float] = {}
-        for title, weight in positives + negatives:
-            for token in set(re.findall(r"[a-z0-9']+", title.lower())):
-                token_scores[token] = token_scores.get(token, 0.0) + weight
-        preferred = [k for k, v in sorted(token_scores.items(), key=lambda x: (-x[1], x[0])) if v > 0][:12]
-        avoided = [k for k, v in sorted(token_scores.items(), key=lambda x: (x[1], x[0])) if v < 0][:12]
-        return {
-            "example_count": len(frame), "positive_count": len(positives),
-            "negative_count": len(negatives), "average_words": round(avg(lambda t: len(t.split())), 1),
-            "question_rate": round(avg(lambda t: t.rstrip().endswith("?")), 2),
-            "first_person_rate": round(avg(lambda t: bool(re.search(r"\b(i|we|my|our)\b", t, re.I))), 2),
-            "exclamation_rate": round(avg(lambda t: "!" in t), 2),
-            "preferred_words": preferred, "avoided_words": avoided,
-        }
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        return CreatorDNAService(self.db).title_style_profile()
 
     def analyze_clip_candidate(self, clip_id: int) -> dict[str, Any]:
         frame = self.db.frame(

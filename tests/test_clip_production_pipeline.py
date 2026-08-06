@@ -67,6 +67,14 @@ def test_clip_review_and_idempotent_production_handoff(tmp_path):
     assert job["title"] == "Reaction and payoff"
     assert job["priority"] == "High"
     assert job["export_preset"] == "YouTube Shorts"
+    events = transcripts.db.frame(
+        """SELECT event_type,evidence_polarity FROM creator_learning_events
+           WHERE clip_id=? ORDER BY id""",
+        (clip_id,),
+    )
+    assert list(events["event_type"]).count("production_handoff") == 1
+    assert "clip_approved" in set(events["event_type"])
+    assert set(events["evidence_polarity"]) == {"positive"}
 
 
 def test_clip_queue_status_notes_dashboard_and_exports(tmp_path):
@@ -103,6 +111,12 @@ def test_rejected_clip_cannot_enter_production(tmp_path):
         "creator-selection",
     )
     transcripts.set_clip_review_status([clip_id], "Rejected")
+    event = transcripts.db.frame(
+        """SELECT * FROM creator_learning_events
+           WHERE clip_id=? AND event_type='clip_rejected'""",
+        (clip_id,),
+    ).iloc[0]
+    assert event["evidence_polarity"] == "negative"
 
     try:
         transcripts.send_clips_to_production([clip_id])

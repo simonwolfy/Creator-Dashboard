@@ -70,6 +70,13 @@ def test_auto_match_and_milestone_snapshots_use_synced_post(tmp_path):
     dashboard = service.dashboard()
     assert dashboard.iloc[0]["source_video_id"] == "post-1"
     assert dashboard.iloc[0]["actual_score"] > 0
+    observations = db.frame(
+        """SELECT * FROM creator_learning_events
+           WHERE package_id=? AND event_type='package_outcome_observed'""",
+        (package_id,),
+    )
+    assert set(observations["evidence_polarity"]) == {"neutral"}
+    assert len(observations) == len(captured)
 
 
 def test_only_measured_published_outcomes_affect_learning(tmp_path):
@@ -106,3 +113,9 @@ def test_social_sync_runs_outcome_matching(tmp_path):
 
     assert result["outcomes_matched"] == 1
     assert outcomes.package(package_id)["decision_status"] == "Published"
+    events = db.frame(
+        "SELECT event_type,source FROM creator_learning_events ORDER BY id"
+    )
+    assert "historical_title_recorded" in set(events["event_type"])
+    assert "package_published" in set(events["event_type"])
+    assert "social_platform_sync" in set(events["source"])

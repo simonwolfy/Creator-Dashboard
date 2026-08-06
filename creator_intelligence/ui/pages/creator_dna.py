@@ -32,7 +32,7 @@ class CreatorDNAPage(QWidget):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "A local profile built from approved, rejected, and revised clip decisions."
+            "A local profile rebuilt from permanent choices, edits, rejections, imports, and handoffs."
         )
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
@@ -64,6 +64,10 @@ class CreatorDNAPage(QWidget):
             ("preferred_title_style", "Preferred title style"),
             ("preferred_caption_style", "Preferred caption style"),
             ("packaging_confidence", "Packaging confidence"),
+            ("positive_examples", "Positive evidence"),
+            ("negative_examples", "Negative evidence"),
+            ("neutral_examples", "Neutral evidence"),
+            ("source_event_count", "Learning events"),
         ]
         for index, (key, label) in enumerate(card_names):
             box = QGroupBox(label)
@@ -118,7 +122,7 @@ class CreatorDNAPage(QWidget):
         QMessageBox.information(
             self,
             "Creator DNA rebuilt",
-            f"Profile rebuilt from {profile.get('approved_clips', 0)} approved clip(s).",
+            f"Profile rebuilt from {profile.get('source_event_count', 0)} permanent learning event(s).",
         )
 
     def complete_selected(self) -> None:

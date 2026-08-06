@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from difflib import SequenceMatcher
 import json
-import math
 import re
 import uuid
+from datetime import datetime, timezone
+from difflib import SequenceMatcher
 
 
 class PackagingExperimentService:
@@ -130,12 +129,49 @@ class PackagingExperimentService:
         used["hashtags"] = self._json(variant.get("hashtags_json"), [])
         self.outcomes.record_decision(experiment["package_id"], "Approved", used)
         self.db.execute("UPDATE packaging_experiments SET status='Active',updated_at=? WHERE id=?", (now, experiment["id"]))
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        field = "title" if variant.get("title") else "caption"
+        dna.record_event(
+            "title_alternative_selected",
+            clip_id=int(experiment["clip_candidate_id"]),
+            package_id=str(experiment["package_id"]),
+            subject_type="package_variant",
+            subject_id=str(variant_id),
+            platform=experiment.get("platform"),
+            field_name=field,
+            new_value=variant.get(field),
+            metadata={
+                "variant": dna._json_safe(variant),
+                "auto_approved": True,
+                "presented_alternatives": dna._json_safe(
+                    self.variants(experiment["id"]).to_dict("records")
+                ),
+            },
+            source="packaging_experiments",
+        )
         return self.variant(variant_id)
 
     def reject(self, variant_id):
         variant = self.variant(variant_id)
+        experiment = self.experiment(variant["experiment_id"])
         self.db.execute("UPDATE packaging_experiment_variants SET decision_status='Rejected',updated_at=? WHERE id=?",
                         (datetime.now(timezone.utc).isoformat(), variant_id))
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        field = "title" if variant.get("title") else "caption"
+        dna.record_event(
+            "title_alternative_rejected",
+            clip_id=int(experiment["clip_candidate_id"]),
+            package_id=str(experiment["package_id"]),
+            subject_type="package_variant",
+            subject_id=str(variant_id),
+            platform=experiment.get("platform"),
+            field_name=field,
+            new_value=variant.get(field),
+            metadata={"variant": dna._json_safe(variant)},
+            source="packaging_experiments",
+        )
         return self.variant(variant_id)
 
     def record_result(self, variant_id, metrics, milestone_hours=24, source_video_id=None):

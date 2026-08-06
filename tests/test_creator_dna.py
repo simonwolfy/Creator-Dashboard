@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 import pandas as pd
+import pytest
 
 from creator_intelligence.services.creator_dna import CreatorDNAService
 
@@ -90,3 +91,93 @@ def test_recommendations_surface_backlog_and_production_actions(tmp_path):
     assert "review-backlog" in keys
     assert "approved-ready" in keys
     assert recommendations.iloc[0]["priority"] >= recommendations.iloc[-1]["priority"]
+
+
+def test_learning_events_are_immutable_and_profile_replays_the_ledger(tmp_path):
+    service = make_service(tmp_path)
+    original = service.rebuild_profile()
+    event_id = int(service.learning_events().iloc[0]["id"])
+
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        service.db.execute(
+            "UPDATE creator_learning_events SET new_value='Changed' WHERE id=?",
+            (event_id,),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        service.db.execute("DELETE FROM creator_learning_events WHERE id=?", (event_id,))
+
+    service.db.execute(
+        """UPDATE transcript_clip_candidates
+           SET review_status='Rejected',suggested_title='Mutable table changed' WHERE id=1"""
+    )
+    replayed = service.rebuild_profile()
+    assert replayed["approved_clips"] == original["approved_clips"] == 2
+    assert replayed["average_hook"] == original["average_hook"] == 75.0
+    assert replayed["preferred_title_style"] == original["preferred_title_style"]
+    service.db.execute("DELETE FROM creator_profiles")
+    restored = service.creator_dna()
+    for key in (
+        "approved_clips", "rejected_clips", "average_hook",
+        "preferred_title_style", "favorite_hashtags", "source_event_count",
+    ):
+        assert restored[key] == replayed[key]
+
+
+def test_title_profile_separates_positive_negative_and_neutral_evidence(tmp_path):
+    service = CreatorDNAService(SQLiteDB(tmp_path / "feedback.db"))
+    service.record_event(
+        "package_approved", package_id="approved", field_name="decision",
+        metadata={"copy": {"title": "We Found the Hidden Tunnel"}},
+    )
+    service.record_event(
+        "package_rejected", package_id="rejected", field_name="decision",
+        metadata={"copy": {"title": "EPIC GAMING MOMENT"}},
+    )
+    service.record_event(
+        "title_alternative_selected", package_id="selected", field_name="title",
+        new_value="Could This Be the Tunnel?",
+    )
+    service.record_event(
+        "title_edited", package_id="edited", field_name="title",
+        old_value="Bad Original", new_value="My Better Tunnel Title",
+    )
+
+    profile = service.title_style_profile()
+    assert profile["positive_count"] == 2
+    assert profile["negative_count"] == 2
+    assert profile["neutral_count"] == 1
+    assert "epic" in profile["avoided_words"]
+    assert "better" in profile["preferred_words"]
+
+    rebuilt = service.creator_dna()
+    assert rebuilt["positive_examples"] == 1
+    assert rebuilt["negative_examples"] == 1
+    assert rebuilt["neutral_examples"] == 2
+    assert rebuilt["source_event_count"] == 4
+
+
+def test_existing_v1_learning_event_table_upgrades_without_losing_rows(tmp_path):
+    db = SQLiteDB(tmp_path / "legacy-feedback.db")
+    db.execute(
+        """CREATE TABLE creator_learning_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            clip_id INTEGER,event_type TEXT NOT NULL,old_value TEXT,new_value TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL
+        )"""
+    )
+    db.execute(
+        """INSERT INTO creator_learning_events(
+            clip_id,event_type,old_value,new_value,metadata_json,created_at
+        ) VALUES(1,'approved','Unreviewed','Approved','{}','2026-01-01T00:00:00')"""
+    )
+
+    service = CreatorDNAService(db)
+    service.record_event(
+        "package_approved", clip_id=1, package_id="new-package",
+        metadata={"copy": {"title": "A New Approved Title"}},
+    )
+
+    events = service.learning_events()
+    assert len(events) == 2
+    assert set(events["event_type"]) == {"approved", "package_approved"}
+    assert set(events["schema_version"]) == {"creator-feedback-v1"}

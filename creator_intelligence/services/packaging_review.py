@@ -117,6 +117,27 @@ class PackagingReviewService:
                WHERE id=?""",
             (now, variant_id),
         )
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        field = "title" if variant.get("title") else "caption"
+        dna.record_event(
+            "title_alternative_selected",
+            clip_id=int(experiment["clip_candidate_id"]),
+            package_id=str(package_id),
+            subject_type="package_variant",
+            subject_id=str(variant_id),
+            platform=experiment.get("platform"),
+            field_name=field,
+            new_value=variant.get(field),
+            metadata={
+                "variant": dna._json_safe(variant),
+                "recommended": str(experiment.get("recommended_variant_id")) == str(variant_id),
+                "presented_alternatives": dna._json_safe(
+                    self.experiments.variants(experiment["id"]).to_dict("records")
+                ),
+            },
+            source="packaging_review",
+        )
         return self.outcomes.package(package_id)
 
     def approve(self, package_id, edits=None):
@@ -149,18 +170,41 @@ class PackagingReviewService:
         existing = self.db.frame(
             "SELECT id FROM publishing_items WHERE pipeline_item_id=? AND platform=?",
             (int(package["clip_candidate_id"]), self._platform_label(package["platform"])))
-        if not existing.empty: return int(existing.iloc[0]["id"])
         title = package.get("used_title") or package.get("generated_title") or package.get("used_caption") or package.get("generated_caption")
-        return self.planner.create_item({
-            "title": title, "platform": self._platform_label(package["platform"]),
-            "content_type": "Short", "status": "Ready",
-            "pipeline_item_id": int(package["clip_candidate_id"]),
-            "planned_publish_at": planned_publish_at,
-            "score": float(package.get("predicted_score") or 0), "confidence": .7,
-            "rationale": f"Approved packaging review {package_id}",
-            "description_status": "Ready" if package.get("used_description") or package.get("generated_description") else "Missing",
-            "thumbnail_status": "Missing", "metadata_status": "Ready", "upload_status": "Not uploaded",
-            "notes": json.dumps({"package_id": package_id})})
+        if not existing.empty:
+            item_id = int(existing.iloc[0]["id"])
+        else:
+            item_id = self.planner.create_item({
+                "title": title, "platform": self._platform_label(package["platform"]),
+                "content_type": "Short", "status": "Ready",
+                "pipeline_item_id": int(package["clip_candidate_id"]),
+                "planned_publish_at": planned_publish_at,
+                "score": float(package.get("predicted_score") or 0), "confidence": .7,
+                "rationale": f"Approved packaging review {package_id}",
+                "description_status": "Ready" if package.get("used_description") or package.get("generated_description") else "Missing",
+                "thumbnail_status": "Missing", "metadata_status": "Ready", "upload_status": "Not uploaded",
+                "notes": json.dumps({"package_id": package_id})})
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        copy = dna._package_copy(dna._json_safe(package))
+        dna.record_event(
+            "production_handoff",
+            clip_id=int(package["clip_candidate_id"]),
+            package_id=str(package_id),
+            subject_type="publishing_item",
+            subject_id=item_id,
+            platform=package.get("platform"),
+            field_name="title" if copy.get("title") else "caption",
+            new_value=copy.get("title") or copy.get("caption"),
+            metadata={
+                "copy": copy,
+                "clip": dna._clip_snapshot(int(package["clip_candidate_id"])),
+                "publishing_item_id": item_id,
+            },
+            source="packaging_review",
+            event_key=f"publishing-handoff:{package_id}:{item_id}",
+        )
+        return item_id
 
     def export_payload(self, package_ids):
         payload = []

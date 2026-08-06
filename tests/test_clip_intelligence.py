@@ -220,6 +220,46 @@ def test_csv_import_records_titles_and_performance_metadata(tmp_path):
     assert row["title"] == "Did Chat Really Say That?"
     assert int(row["views"]) == 5000
     assert row["game"] == "RimWorld"
+    event = service.db.frame(
+        """SELECT * FROM creator_learning_events
+           WHERE event_type='historical_title_recorded'"""
+    ).iloc[0]
+    assert event["new_value"] == "Did Chat Really Say That?"
+    assert event["evidence_polarity"] == "positive"
+    assert event["source"] == "title_history"
+    service.import_published_titles(str(path))
+    repeated = service.db.frame(
+        """SELECT * FROM creator_learning_events
+           WHERE event_type LIKE 'historical_title_%'"""
+    )
+    assert len(repeated) == 1
+
+
+def test_title_stats_refresh_appends_event_without_double_weighting(tmp_path):
+    service, _, _ = make_service(tmp_path)
+    service.record_published_title(
+        "The Tunnel Changed Everything", platform="youtube",
+        source_video_id="video-1", views=100,
+    )
+    first = service.db.frame(
+        "SELECT * FROM creator_learning_events WHERE subject_type='published_title'"
+    ).iloc[0].to_dict()
+    service.record_published_title(
+        "The Tunnel Changed Everything", platform="youtube",
+        source_video_id="video-1", views=500,
+    )
+
+    events = service.db.frame(
+        """SELECT * FROM creator_learning_events
+           WHERE subject_type='published_title' ORDER BY id"""
+    )
+    assert list(events["event_type"]) == [
+        "historical_title_recorded", "historical_title_updated"
+    ]
+    assert events.iloc[0]["metadata_json"] == first["metadata_json"]
+    profile = service.title_style_profile()
+    assert profile["example_count"] == 1
+    assert profile["source_event_count"] == 1
 
 
 def test_learned_style_ranks_candidates_and_penalizes_near_duplicates(tmp_path):

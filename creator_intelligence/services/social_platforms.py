@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+import hashlib
 import json
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
 from creator_intelligence.core.credential_vault import CredentialVault
 
 
@@ -268,6 +270,9 @@ class SocialPlatformService:
             raise RuntimeError(safe) from None
 
     def _upsert_record(self, platform: str, record: dict[str, Any]) -> int:
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        dna.ensure_event_history()
         source_id = str(record.get("source_video_id") or record.get("id") or "").strip()
         if not source_id:
             raise ValueError("Platform record is missing its source ID.")
@@ -295,6 +300,38 @@ class SocialPlatformService:
             self.db.execute("""UPDATE creator_published_titles SET content_type=?,title=?,description=?,published_at=?,
                 views=?,likes=?,comments=?,shares=?,reach=?,watch_time=?,duration_seconds=?,updated_at=?
                 WHERE id=?""", (*values, now, int(existing.iloc[0]["id"])))
+        if changed:
+            current = self.db.frame(
+                "SELECT * FROM creator_published_titles WHERE platform=? AND source_video_id=?",
+                (platform, source_id),
+            ).iloc[0].to_dict()
+            before_safe = dna._json_safe(existing.iloc[0].to_dict()) if not existing.empty else None
+            current_safe = dna._json_safe(current)
+            polarity, weight = dna.historical_title_evidence(current_safe)
+            compared = (
+                "platform", "content_type", "title", "description", "published_at",
+                "views", "likes", "comments", "shares", "reach", "watch_time",
+                "duration_seconds", "example_type", "source_video_id",
+            )
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    {name: current_safe.get(name) for name in compared}, sort_keys=True
+                ).encode("utf-8")
+            ).hexdigest()
+            dna.record_event(
+                "historical_title_recorded" if before_safe is None else "historical_title_updated",
+                subject_type="published_title",
+                subject_id=int(current_safe["id"]),
+                platform=platform,
+                evidence_polarity=polarity,
+                evidence_weight=weight,
+                field_name="title",
+                old_value=before_safe.get("title") if before_safe else None,
+                new_value=title,
+                metadata={"record": current_safe, "sync_source": platform},
+                source="social_platform_sync",
+                event_key=f"historical-title:{current_safe['id']}:{fingerprint}",
+            )
         if platform == "youtube":
             self._mirror_youtube_content(record, title)
         return int(changed)

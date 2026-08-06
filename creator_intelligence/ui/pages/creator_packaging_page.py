@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+
 import pandas as pd
 from PySide6.QtWidgets import (
     QApplication,
@@ -60,7 +61,9 @@ class CreatorPackagingPage(TranscriptProductionPage):
     def view_title_profile(self) -> None:
         profile = self.service.title_style_profile()
         text = (
-            f"Examples: {profile['example_count']} ({profile['positive_count']} positive, {profile['negative_count']} negative)\n"
+            f"Examples: {profile['example_count']} ({profile['positive_count']} positive, "
+            f"{profile['negative_count']} negative, {profile.get('neutral_count', 0)} neutral)\n"
+            f"Permanent learning events: {profile.get('source_event_count', 0)}\n"
             f"Average length: {profile['average_words']} words\n"
             f"Question titles: {profile['question_rate']:.0%}\n"
             f"First-person titles: {profile['first_person_rate']:.0%}\n"
@@ -94,7 +97,7 @@ class CreatorPackagingPage(TranscriptProductionPage):
             return
         clip_id = int(clip_ids[0])
         row = self.service.clip_packaging(clip_id)
-        if not row.get("analyzed_at") or row.get("intelligence_version") != "creator-packaging-v5":
+        if not row.get("analyzed_at") or row.get("intelligence_version") != "creator-packaging-v6":
             self.service.analyze_clip_candidate(clip_id)
             row = self.service.clip_packaging(clip_id)
 

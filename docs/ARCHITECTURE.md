@@ -34,6 +34,8 @@ Packaging consumes transcript context and Creator DNA evidence. It emits package
 
 Creator DNA owns creator preference evidence, learned style profiles, evidence weighting, and recommendations. It consumes creator actions and published outcomes. It does not generate transcript facts, approve packages, or create production jobs.
 
+Creator actions are appended to `creator_learning_events`. These records are immutable: corrections are represented by later events, never by rewriting history. Positive, negative, and neutral evidence remain distinct. `creator_profiles` is a replaceable materialized view rebuilt by replaying the event ledger; packaging title-style ranking reads the same event-derived evidence. Existing pre-ledger clip decisions, title history, package decisions, and production jobs are converted once during the feedback-ledger migration.
+
 ## Production
 
 Production owns projects, clip jobs, assignments, export settings, editor notes, status, and delivery. It accepts explicit handoffs from approved packaging or deliberate transcript actions. It does not reinterpret transcripts or choose packaging copy.

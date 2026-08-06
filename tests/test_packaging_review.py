@@ -80,6 +80,11 @@ def test_approved_package_handoff_is_idempotent(tmp_path):
     row=db.frame("SELECT * FROM publishing_items WHERE id=?",(first,)).iloc[0]
     assert row["status"]=="Ready"
     assert row["platform"]=="YouTube Shorts"
+    events=db.frame(
+        "SELECT * FROM creator_learning_events WHERE event_type='production_handoff'"
+    )
+    assert len(events)==1
+    assert events.iloc[0]["evidence_polarity"]=="positive"
 
 
 def test_bulk_review_export_and_regeneration(tmp_path):
@@ -110,10 +115,58 @@ def test_applying_alternative_requires_separate_explicit_approval(tmp_path):
     assert applied["decision_status"]=="Generated"
 
     service.approve(package_id)
-    assert planner.outcomes.package(package_id)["decision_status"]=="Approved"
+    approved=planner.outcomes.package(package_id)
+    assert approved["decision_status"]=="Approved"
+    assert approved["used_title"]=="We Somehow Debated Pants"
 
     service.save_edits(package_id,{"title":"A Final Manual Edit"})
     edited=planner.outcomes.package(package_id)
     assert edited["used_title"]=="A Final Manual Edit"
     assert edited["decision_status"]=="Generated"
     with pytest.raises(ValueError):service.send_to_publishing(package_id)
+
+    events=planner.db.frame(
+        """SELECT event_type,evidence_polarity,field_name,old_value,new_value
+           FROM creator_learning_events ORDER BY id"""
+    )
+    assert "title_alternative_selected" in set(events["event_type"])
+    assert "package_approved" in set(events["event_type"])
+    assert "package_approval_invalidated" in set(events["event_type"])
+    title_edits=events[
+        (events["event_type"]=="title_edited")
+        & (events["field_name"]=="title")
+    ]
+    assert list(title_edits["new_value"])==[
+        "We Somehow Debated Pants", "A Final Manual Edit"
+    ]
+    assert set(events["evidence_polarity"]) >= {"positive", "neutral"}
+
+
+def test_rejected_package_is_negative_creator_dna_evidence(tmp_path):
+    db,_,service,_,package_id=setup(tmp_path)
+    service.reject(package_id)
+    event=db.frame(
+        """SELECT * FROM creator_learning_events
+           WHERE package_id=? AND event_type='package_rejected'""",
+        (package_id,),
+    ).iloc[0]
+    assert event["evidence_polarity"]=="negative"
+    assert float(event["evidence_weight"])==2.0
+
+
+def test_caption_edit_records_before_after_and_approved_copy(tmp_path):
+    db,planner,service,_,package_id=setup(
+        tmp_path,platform="tiktok",title="Original caption"
+    )
+    service.save_edits(package_id,{"caption":"My final creator caption"})
+    service.approve(package_id)
+
+    package=planner.outcomes.package(package_id)
+    assert package["used_caption"]=="My final creator caption"
+    event=db.frame(
+        """SELECT * FROM creator_learning_events
+           WHERE package_id=? AND event_type='caption_edited'""",
+        (package_id,),
+    ).iloc[0]
+    assert event["old_value"]=="Original caption"
+    assert event["new_value"]=="My final creator caption"

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
 import json
 import re
-from typing import Iterable
-
+from collections.abc import Iterable
+from datetime import datetime
 
 CLIP_REVIEW_STATUSES = ("Unreviewed", "Approved", "Rejected", "Needs work")
 
@@ -272,15 +271,45 @@ class TranscriptProductionMixin:
     def set_clip_review_status(self, clip_ids: Iterable[int], status: str) -> int:
         if status not in CLIP_REVIEW_STATUSES:
             raise ValueError(status)
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        dna.ensure_event_history()
         now = datetime.now().isoformat()
         count = 0
         for clip_id in {int(value) for value in clip_ids}:
+            before = self.db.frame(
+                "SELECT * FROM transcript_clip_candidates WHERE id=?", (clip_id,)
+            )
+            if before.empty:
+                raise KeyError(clip_id)
+            old_status = str(before.iloc[0].get("review_status") or "Unreviewed")
             cursor = self.db.execute(
                 """UPDATE transcript_clip_candidates
                    SET review_status=?,updated_at=? WHERE id=?""",
                 (status, now, clip_id),
             )
             count += int(getattr(cursor, "rowcount", 1) or 0)
+            if old_status != status:
+                after = self.db.frame(
+                    "SELECT * FROM transcript_clip_candidates WHERE id=?", (clip_id,)
+                ).iloc[0].to_dict()
+                event_type = {
+                    "Approved": "clip_approved",
+                    "Rejected": "clip_rejected",
+                    "Needs work": "clip_needs_work",
+                    "Unreviewed": "clip_review_reset",
+                }[status]
+                dna.record_event(
+                    event_type,
+                    clip_id=clip_id,
+                    subject_type="clip",
+                    subject_id=clip_id,
+                    field_name="decision",
+                    old_value=old_status,
+                    new_value=status,
+                    metadata={"clip": dna._json_safe(after)},
+                    source="transcript_review",
+                )
         return count
 
     def send_clips_to_production(
@@ -291,6 +320,9 @@ class TranscriptProductionMixin:
         priority: str = "Normal",
         destination: str | None = None,
     ) -> list[int]:
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        dna.ensure_event_history()
         now = datetime.now().isoformat()
         created: list[int] = []
         for clip_id in {int(value) for value in clip_ids}:
@@ -308,32 +340,65 @@ class TranscriptProductionMixin:
                 (clip_id,),
             )
             if not existing.empty:
-                created.append(int(existing.iloc[0]["id"]))
-                continue
-            job_id = int(self.db.execute(
-                """INSERT INTO production_clip_jobs(
-                    clip_candidate_id,transcript_id,title,start_seconds,end_seconds,
-                    status,priority,export_preset,destination,source_reason,
-                    created_at,updated_at
-                ) VALUES(?,?,?,?,?,'New',?,?,?,?,?,?)""",
-                (
-                    clip_id,
-                    int(row["transcript_id"]),
-                    str(row.get("suggested_title") or row.get("title") or f"Clip {clip_id}"),
-                    float(row.get("suggested_start_seconds") or row["start_seconds"]),
-                    float(row.get("suggested_end_seconds") or row["end_seconds"]),
-                    priority,
-                    export_preset,
-                    destination,
-                    row.get("reason"),
-                    now,
-                    now,
-                ),
-            ))
+                job_id = int(existing.iloc[0]["id"])
+                created_new = False
+            else:
+                created_new = True
+                job_id = int(self.db.execute(
+                    """INSERT INTO production_clip_jobs(
+                        clip_candidate_id,transcript_id,title,start_seconds,end_seconds,
+                        status,priority,export_preset,destination,source_reason,
+                        created_at,updated_at
+                    ) VALUES(?,?,?,?,?,'New',?,?,?,?,?,?)""",
+                    (
+                        clip_id,
+                        int(row["transcript_id"]),
+                        str(row.get("suggested_title") or row.get("title") or f"Clip {clip_id}"),
+                        float(row.get("suggested_start_seconds") or row["start_seconds"]),
+                        float(row.get("suggested_end_seconds") or row["end_seconds"]),
+                        priority,
+                        export_preset,
+                        destination,
+                        row.get("reason"),
+                        now,
+                        now,
+                    ),
+                ))
+                self.db.execute(
+                    """UPDATE transcript_clip_candidates
+                       SET review_status='Approved',updated_at=? WHERE id=?""",
+                    (now, clip_id),
+                )
             created.append(job_id)
-            self.db.execute(
-                """UPDATE transcript_clip_candidates
-                   SET review_status='Approved',updated_at=? WHERE id=?""",
-                (now, clip_id),
+            after = dna._clip_snapshot(clip_id)
+            if created_new and str(row.get("review_status") or "Unreviewed") != "Approved":
+                dna.record_event(
+                    "clip_approved",
+                    clip_id=clip_id,
+                    subject_type="clip",
+                    subject_id=clip_id,
+                    field_name="decision",
+                    old_value=row.get("review_status") or "Unreviewed",
+                    new_value="Approved",
+                    metadata={"clip": after},
+                    source="transcript_production",
+                )
+            job = self.db.frame(
+                "SELECT * FROM production_clip_jobs WHERE id=?", (job_id,)
+            ).iloc[0].to_dict()
+            dna.record_event(
+                "production_handoff",
+                clip_id=clip_id,
+                subject_type="production_job",
+                subject_id=job_id,
+                field_name="title",
+                new_value=job.get("title"),
+                metadata={
+                    "copy": {"title": job.get("title")},
+                    "clip": after,
+                    "job": dna._json_safe(job),
+                },
+                source="transcript_production",
+                event_key=f"production-job-handoff:{job_id}",
             )
         return created

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from difflib import SequenceMatcher
+import hashlib
 import json
 import math
 import re
 import uuid
+from datetime import UTC, datetime
+from difflib import SequenceMatcher
 
 import pandas as pd
-
 
 PLATFORM_KEYS = {
     "youtube_shorts": "youtube", "youtube": "youtube",
@@ -65,7 +65,7 @@ class PublishingOutcomeService:
     def snapshot_packages(self, clip_id, packages, context=None, prediction=None, predicted_score=None):
         context = context or {}
         created = {}
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         for package_key, package in packages.items():
             platform = PLATFORM_KEYS.get(package_key, package_key)
             package_id = str(uuid.uuid4())
@@ -87,31 +87,102 @@ class PublishingOutcomeService:
     def record_decision(self, package_id, status, used=None):
         if status not in {"Generated", "Approved", "Rejected", "Published"}:
             raise ValueError("Unsupported package decision status.")
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        dna.ensure_event_history()
         row = self.package(package_id)
-        used = used or {}
+        supplied = used or {}
         generated = {
             "title": row.get("generated_title"), "description": row.get("generated_description"),
             "caption": row.get("generated_caption"), "hook": row.get("generated_hook"),
             "hashtags": self._json(row.get("generated_hashtags_json"), []),
         }
+        current = {
+            "title": self._coalesce(row.get("used_title"), generated["title"]),
+            "description": self._coalesce(row.get("used_description"), generated["description"]),
+            "caption": self._coalesce(row.get("used_caption"), generated["caption"]),
+            "hook": self._coalesce(row.get("used_hook"), generated["hook"]),
+            "hashtags": self._json(row.get("used_hashtags_json"), generated["hashtags"])
+            if self._present(row.get("used_hashtags_json")) else generated["hashtags"],
+        }
+        final = dict(current)
+        for key in ("title", "description", "caption", "hook", "hashtags"):
+            if key in supplied:
+                final[key] = supplied[key]
         edit_status = "Edited" if any(
-            key in used and used.get(key) != generated.get(key)
+            final.get(key) != generated.get(key)
             for key in ("title", "description", "caption", "hook", "hashtags")
         ) else "Unchanged"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         self.db.execute(
             """UPDATE publishing_packages SET decision_status=?,edit_status=?,
                used_title=?,used_description=?,used_caption=?,used_hook=?,used_hashtags_json=?,
-               approved_at=CASE WHEN ? IN ('Approved','Published') THEN COALESCE(approved_at,?) ELSE approved_at END
+               approved_at=CASE
+                 WHEN ? IN ('Approved','Published') THEN COALESCE(approved_at,?)
+                 WHEN ? IN ('Generated','Rejected') THEN NULL ELSE approved_at END
                WHERE id=?""",
-            (status, edit_status, used.get("title", generated["title"]),
-             used.get("description", generated["description"]),
-             used.get("caption", generated["caption"]), used.get("hook", generated["hook"]),
-             json.dumps(used.get("hashtags", generated["hashtags"])), status, now, package_id),
+            (status, edit_status, final["title"], final["description"],
+             final["caption"], final["hook"], json.dumps(final["hashtags"]),
+             status, now, status, package_id),
         )
-        return self.package(package_id)
+        updated = self.package(package_id)
+        metadata = {
+            "copy": final,
+            "generated_copy": generated,
+            "clip": dna._clip_snapshot(int(row["clip_candidate_id"])),
+            "decision_status": status,
+        }
+        for field in ("title", "description", "caption", "hook", "hashtags"):
+            if current.get(field) == final.get(field):
+                continue
+            edit_event = (
+                f"{field}_edited"
+                if field in {"title", "caption"}
+                else "package_field_edited"
+            )
+            dna.record_event(
+                edit_event,
+                clip_id=int(row["clip_candidate_id"]),
+                package_id=str(package_id),
+                subject_type="package",
+                subject_id=str(package_id),
+                platform=row.get("platform"),
+                field_name=field,
+                old_value=current.get(field),
+                new_value=final.get(field),
+                metadata=metadata,
+                source="publishing_outcomes",
+            )
+        event_type = {
+            "Approved": "package_approved",
+            "Rejected": "package_rejected",
+            "Published": "package_published",
+        }.get(status)
+        if (
+            status == "Generated"
+            and str(row.get("decision_status")) in {"Approved", "Published"}
+        ):
+            event_type = "package_approval_invalidated"
+        if event_type and str(row.get("decision_status")) != status:
+            dna.record_event(
+                event_type,
+                clip_id=int(row["clip_candidate_id"]),
+                package_id=str(package_id),
+                subject_type="package",
+                subject_id=str(package_id),
+                platform=row.get("platform"),
+                field_name="decision",
+                old_value=row.get("decision_status"),
+                new_value=status,
+                metadata=metadata,
+                source="publishing_outcomes",
+            )
+        return updated
 
     def link(self, package_id, source_video_id, method="manual", confidence=1.0, manually_confirmed=True):
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        dna.ensure_event_history()
         package = self.package(package_id)
         source = self.db.frame(
             "SELECT * FROM creator_published_titles WHERE platform=? AND source_video_id=?",
@@ -120,7 +191,7 @@ class PublishingOutcomeService:
         if source.empty:
             raise ValueError("That published platform post has not been synced yet.")
         published_at = source.iloc[0].get("published_at")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         self.db.execute(
             """INSERT OR REPLACE INTO publishing_outcome_links(
                package_id,platform,source_video_id,match_method,match_confidence,
@@ -132,7 +203,33 @@ class PublishingOutcomeService:
             "UPDATE publishing_packages SET decision_status='Published',published_at=? WHERE id=?",
             (published_at or now, package_id),
         )
-        return self.package(package_id)
+        updated = self.package(package_id)
+        if str(package.get("decision_status")) != "Published":
+            copy = dna._package_copy(dna._json_safe(updated))
+            fingerprint = hashlib.sha256(
+                f"{package_id}:{source_video_id}".encode()
+            ).hexdigest()
+            dna.record_event(
+                "package_published",
+                clip_id=int(package["clip_candidate_id"]),
+                package_id=str(package_id),
+                subject_type="package",
+                subject_id=str(package_id),
+                platform=package.get("platform"),
+                field_name="decision",
+                old_value=package.get("decision_status"),
+                new_value="Published",
+                metadata={
+                    "copy": copy,
+                    "clip": dna._clip_snapshot(int(package["clip_candidate_id"])),
+                    "published_record": dna._json_safe(source.iloc[0].to_dict()),
+                    "match_method": method,
+                    "match_confidence": float(confidence),
+                },
+                source="publishing_outcomes",
+                event_key=f"package-published:{fingerprint}",
+            )
+        return updated
 
     def auto_match(self, platform=None):
         clauses, params = ["l.package_id IS NULL", "p.decision_status<>'Rejected'"], []
@@ -161,9 +258,14 @@ class PublishingOutcomeService:
         return matched
 
     def capture_due_snapshots(self, now=None):
-        now = self._dt(now) if now else datetime.now(timezone.utc)
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        dna.ensure_event_history()
+        now = self._dt(now) if now else datetime.now(UTC)
         rows = self.db.frame(
-            """SELECT p.id AS package_id,p.published_at AS package_published_at,t.* FROM publishing_packages p
+            """SELECT p.id AS package_id,p.clip_candidate_id,
+               p.platform AS package_platform,p.published_at AS package_published_at,t.*
+               FROM publishing_packages p
                JOIN publishing_outcome_links l ON l.package_id=p.id
                JOIN creator_published_titles t ON t.platform=l.platform AND t.source_video_id=l.source_video_id""")
         captured = []
@@ -188,6 +290,26 @@ class PublishingOutcomeService:
                        shares,reach,watch_time,actual_score) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                     (row["package_id"], milestone, now.isoformat(), age, metrics["views"], metrics["likes"],
                      metrics["comments"], metrics["shares"], metrics["reach"], metrics["watch_time"], score))
+                dna.record_event(
+                    "package_outcome_observed",
+                    clip_id=int(row["clip_candidate_id"]),
+                    package_id=str(row["package_id"]),
+                    subject_type="package_outcome",
+                    subject_id=f"{row['package_id']}:{milestone}",
+                    platform=row.get("package_platform"),
+                    evidence_polarity="neutral",
+                    evidence_weight=0,
+                    field_name="performance",
+                    new_value=score,
+                    metadata={
+                        "milestone_hours": milestone,
+                        "age_hours": age,
+                        "metrics": metrics,
+                        "actual_score": score,
+                    },
+                    source="publishing_outcomes",
+                    event_key=f"package-outcome:{row['package_id']}:{milestone}",
+                )
                 captured.append((row["package_id"], milestone))
         return captured
 
@@ -255,12 +377,25 @@ class PublishingOutcomeService:
         if not value or str(value) == "nan":
             return None
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
     @classmethod
     def _days_between(cls, left, right):
         a, b = cls._dt(left), cls._dt(right)
         return abs((b - a).total_seconds()) / 86400 if a and b else None
+
+    @staticmethod
+    def _present(value):
+        if value is None:
+            return False
+        try:
+            return not pd.isna(value)
+        except (TypeError, ValueError):
+            return True
+
+    @classmethod
+    def _coalesce(cls, value, fallback):
+        return value if cls._present(value) else fallback
 
     @staticmethod
     def _json(value, default):
