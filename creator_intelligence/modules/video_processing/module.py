@@ -49,7 +49,7 @@ class VideoProcessingModule:
         "1.5.0",
         "media",
         "FFmpeg management, metadata extraction, proxies, thumbnails, and adaptive job scheduling.",
-        ("storage", "creator_planner"),
+        ("storage",),
     )
 
     def register(self, registry):

@@ -10,6 +10,7 @@ from creator_intelligence.core.diagnostics import DiagnosticsService, Diagnostic
 from creator_intelligence.core.health import HealthService
 from creator_intelligence.core.lifecycle import ApplicationLifecycle, LifecycleReport
 from creator_intelligence.core.logging import configure_logging
+from creator_intelligence.core.versioning import APPLICATION_VERSION
 from creator_intelligence.core.workspace import WorkspaceManager
 from creator_intelligence.data.database import Database
 from creator_intelligence.services.backup import BackupService
@@ -32,7 +33,7 @@ class CreatorIntelligenceApplication:
     """Owns Creator Intelligence startup, runtime services, and shutdown."""
 
     APPLICATION_NAME = "Creator Intelligence"
-    VERSION = "5.0.0-alpha.2"
+    VERSION = APPLICATION_VERSION
 
     def __init__(self, workspace_root: Path | None = None):
         self.workspace = WorkspaceManager(workspace_root or PROJECT_ROOT)

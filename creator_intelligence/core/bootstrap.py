@@ -18,5 +18,6 @@ def bootstrap_application(db, settings=None):
     config_path = PROJECT_ROOT / "config" / "modules.json"
     loader = ModuleLoader(registry, config_path)
     loader.load_all()
+    loader.assert_required_modules()
     context.set("registry", registry)
     return context, registry

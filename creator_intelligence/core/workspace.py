@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from creator_intelligence.core.versioning import WORKSPACE_SCHEMA_VERSION
+
 
 @dataclass(frozen=True)
 class WorkspacePaths:
@@ -29,7 +31,7 @@ class WorkspacePaths:
 class WorkspaceManager:
     """Creates and validates an isolated Creator Intelligence workspace."""
 
-    METADATA_VERSION = 1
+    METADATA_VERSION = WORKSPACE_SCHEMA_VERSION
 
     def __init__(self, root: Path, name: str = "My Workspace"):
         root = Path(root).expanduser().resolve()

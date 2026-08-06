@@ -1,5 +1,7 @@
-from creator_intelligence.core.contracts import ModuleMetadata,ServiceBinding,NavigationItem
+from creator_intelligence.core.contracts import ModuleMetadata, NavigationItem, ServiceBinding
+from creator_intelligence.services.packaging import PackagingReviewService
 from creator_intelligence.services.publishing_planner import PublishingPlannerService
+
 
 def _page(registry):
     from creator_intelligence.ui.pages.publishing import PublishingPage
@@ -27,9 +29,7 @@ class PublishingModule:
         ))
         registry.register_service(ServiceBinding(
             "packaging_review",
-            lambda ctx: __import__(
-                "creator_intelligence.services.packaging_review",fromlist=["PackagingReviewService"]
-            ).PackagingReviewService(
+            lambda ctx: PackagingReviewService(
                 ctx.db,registry.resolve("publishing"),registry.resolve("transcripts")
             ),module_id=self.metadata.module_id
         ))
