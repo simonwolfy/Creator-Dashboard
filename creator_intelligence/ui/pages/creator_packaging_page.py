@@ -27,6 +27,8 @@ class CreatorPackagingPage(TranscriptProductionPage):
         layout = self.clip_controls.layout()
         for label, handler in (("Add historical title", self.add_historical_title),
                                ("Import title CSV", self.import_title_csv),
+                               ("Sync Twitch titles", lambda: self.sync_titles("twitch")),
+                               ("Sync YouTube titles", lambda: self.sync_titles("youtube")),
                                ("View title profile", self.view_title_profile)):
             button = QPushButton(label, self.clip_controls)
             button.clicked.connect(handler)
@@ -67,6 +69,28 @@ class CreatorPackagingPage(TranscriptProductionPage):
             f"Avoided words: {', '.join(profile['avoided_words']) or 'None learned'}"
         )
         QMessageBox.information(self, "Learned title profile", text)
+
+    def sync_titles(self, platform: str) -> None:
+        if platform == "youtube" and not self.service._title_sync_configuration("youtube"):
+            api_key, ok = QInputDialog.getText(self, "YouTube title sync", "YouTube Data API key:")
+            if not ok or not api_key.strip():
+                return
+            channel_id, ok = QInputDialog.getText(self, "YouTube title sync", "YouTube channel ID:")
+            if not ok or not channel_id.strip():
+                return
+            self.service.save_title_sync_configuration(
+                "youtube", {"api_key": api_key.strip(), "channel_id": channel_id.strip()}
+            )
+        try:
+            result = self.service.sync_title_history(platform)
+        except Exception as exc:
+            QMessageBox.critical(self, f"{platform.title()} title sync", str(exc))
+            return
+        QMessageBox.information(
+            self, f"{platform.title()} title sync",
+            f"Sync complete. Found {result['seen']} title(s); added {result['changed']}. "
+            f"The learned title profile has been refreshed.",
+        )
 
     def view_clip_intelligence(self) -> None:
         clip_ids = self._selected_clip_ids()

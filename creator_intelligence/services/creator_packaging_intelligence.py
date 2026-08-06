@@ -7,6 +7,8 @@ import math
 import json
 import re
 from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 
 class CreatorPackagingIntelligenceMixin:
@@ -78,6 +80,18 @@ class CreatorPackagingIntelligenceMixin:
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_creator_titles_example ON creator_published_titles(example_type)"
         )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS creator_title_sync_state(
+                platform TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'Never synced',
+                last_cursor TEXT,
+                last_synced_at TEXT,
+                last_error TEXT,
+                records_seen INTEGER NOT NULL DEFAULT 0,
+                records_changed INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )"""
+        )
 
     def record_published_title(self, title: str, *, platform: str = "twitch",
                                content_type: str = "clip", game: str | None = None,
@@ -93,6 +107,21 @@ class CreatorPackagingIntelligenceMixin:
         if kind not in {"published", "approved", "rejected"}:
             raise ValueError("example_type must be published, approved, or rejected.")
         now = datetime.now().isoformat()
+        if source_video_id:
+            sourced = self.db.frame(
+                "SELECT id FROM creator_published_titles WHERE platform=? AND source_video_id=?",
+                (platform.strip().lower(), source_video_id),
+            )
+            if not sourced.empty:
+                record_id = int(sourced.iloc[0]["id"])
+                self.db.execute(
+                    """UPDATE creator_published_titles SET content_type=?,title=?,game=?,
+                       published_at=?,views=?,likes=?,comments=?,watch_time=?,example_type=?,
+                       updated_at=? WHERE id=?""",
+                    (content_type.strip().lower(), clean, game, published_at, views,
+                     likes, comments, watch_time, kind, now, record_id),
+                )
+                return record_id
         self.db.execute(
             """INSERT INTO creator_published_titles(
                platform,content_type,title,game,published_at,views,likes,comments,
@@ -141,6 +170,201 @@ class CreatorPackagingIntelligenceMixin:
 
     def published_titles(self):
         return self.db.frame("SELECT * FROM creator_published_titles ORDER BY COALESCE(published_at,created_at) DESC,id DESC")
+
+    def title_sync_status(self, platform: str | None = None):
+        if platform:
+            frame = self.db.frame(
+                "SELECT * FROM creator_title_sync_state WHERE platform=?",
+                (platform.strip().lower(),),
+            )
+            return frame.iloc[0].to_dict() if not frame.empty else {
+                "platform": platform.strip().lower(), "status": "Never synced",
+                "last_cursor": None, "last_synced_at": None, "last_error": None,
+                "records_seen": 0, "records_changed": 0,
+            }
+        return self.db.frame("SELECT * FROM creator_title_sync_state ORDER BY platform")
+
+    def save_title_sync_configuration(self, platform: str, config: dict[str, str]) -> None:
+        now = datetime.now().isoformat()
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS integration_settings(
+                integration_id TEXT PRIMARY KEY, enabled INTEGER DEFAULT 0,
+                config_json TEXT NOT NULL DEFAULT '{}', last_connected_at TEXT,
+                last_error TEXT, updated_at TEXT NOT NULL)"""
+        )
+        self.db.execute(
+            """INSERT INTO integration_settings(integration_id,enabled,config_json,updated_at)
+               VALUES(?,1,?,?) ON CONFLICT(integration_id) DO UPDATE SET
+               enabled=1,config_json=excluded.config_json,updated_at=excluded.updated_at""",
+            (f"{platform.strip().lower()}_title_sync", json.dumps(config), now),
+        )
+
+    def sync_title_history(self, platform: str, fetcher=None) -> dict[str, Any]:
+        platform = platform.strip().lower()
+        if platform not in {"twitch", "youtube"}:
+            raise ValueError("Platform must be twitch or youtube.")
+        prior = self.title_sync_status(platform)
+        since = prior.get("last_cursor")
+        now = datetime.now().isoformat()
+        try:
+            records = list((fetcher or self._fetch_title_history)(platform, since))
+            changed = 0
+            newest = since
+            for record in records:
+                source_id = str(record.get("source_video_id") or record.get("id") or "").strip() or None
+                existing = self.db.frame(
+                    "SELECT * FROM creator_published_titles WHERE platform=? AND source_video_id=?",
+                    (platform, source_id),
+                ) if source_id else self.db.frame(
+                    "SELECT * FROM creator_published_titles WHERE platform=? AND title=?",
+                    (platform, str(record.get("title") or "").strip()),
+                )
+                incoming = {
+                    "title": str(record.get("title") or "").strip(),
+                    "content_type": record.get("content_type") or "clip",
+                    "published_at": record.get("published_at"),
+                    "views": self._optional_int(record.get("views")),
+                    "likes": self._optional_int(record.get("likes")),
+                    "comments": self._optional_int(record.get("comments")),
+                }
+                self.record_published_title(
+                    record.get("title") or "", platform=platform,
+                    content_type=record.get("content_type") or "clip",
+                    game=record.get("game"), published_at=record.get("published_at"),
+                    views=self._optional_int(record.get("views")),
+                    likes=self._optional_int(record.get("likes")),
+                    comments=self._optional_int(record.get("comments")),
+                    watch_time=self._optional_float(record.get("watch_time")),
+                    source_video_id=source_id,
+                )
+                if existing.empty or any(
+                    (None if existing.iloc[0].get(key) != existing.iloc[0].get(key) else existing.iloc[0].get(key)) != value
+                    for key, value in incoming.items()
+                ):
+                    changed += 1
+                published = str(record.get("published_at") or "")
+                newest = max(filter(None, [newest, published]), default=newest)
+            self.db.execute(
+                """INSERT INTO creator_title_sync_state(
+                   platform,status,last_cursor,last_synced_at,last_error,
+                   records_seen,records_changed,updated_at) VALUES(?,?,?,?,?,?,?,?)
+                   ON CONFLICT(platform) DO UPDATE SET status=excluded.status,
+                   last_cursor=excluded.last_cursor,last_synced_at=excluded.last_synced_at,
+                   last_error=NULL,records_seen=excluded.records_seen,
+                   records_changed=excluded.records_changed,updated_at=excluded.updated_at""",
+                (platform, "Completed", newest, now, None, len(records), changed, now),
+            )
+            return {"platform": platform, "seen": len(records), "changed": changed,
+                    "unchanged": len(records) - changed, "last_cursor": newest,
+                    "profile": self.title_style_profile()}
+        except Exception as exc:
+            self.db.execute(
+                """INSERT INTO creator_title_sync_state(platform,status,last_error,updated_at)
+                   VALUES(?,'Failed',?,?) ON CONFLICT(platform) DO UPDATE SET
+                   status='Failed',last_error=excluded.last_error,updated_at=excluded.updated_at""",
+                (platform, str(exc), now),
+            )
+            raise
+
+    @staticmethod
+    def _optional_int(value):
+        return int(value) if value not in (None, "") else None
+
+    @staticmethod
+    def _optional_float(value):
+        return float(value) if value not in (None, "") else None
+
+    def _fetch_title_history(self, platform: str, since: str | None):
+        return self._fetch_twitch_titles(since) if platform == "twitch" else self._fetch_youtube_titles(since)
+
+    def _fetch_twitch_titles(self, since: str | None):
+        settings = self.db.frame("SELECT * FROM live_integration_settings WHERE id=1")
+        if settings.empty:
+            raise ValueError("Configure Twitch credentials in Live Stream > Connections and rules.")
+        config = settings.iloc[0].to_dict()
+        required = (config.get("twitch_client_id"), config.get("twitch_access_token"), config.get("twitch_broadcaster_id"))
+        if not all(required):
+            raise ValueError("Configure Twitch client ID, OAuth token, and broadcaster ID first.")
+        params = {"broadcaster_id": required[2], "first": 100}
+        if since:
+            params["started_at"] = since
+        records = []
+        while True:
+            request = Request(
+                "https://api.twitch.tv/helix/clips?" + urlencode(params),
+                headers={"Client-Id": required[0], "Authorization": f"Bearer {required[1]}"},
+            )
+            payload = self._json_request(request)
+            records.extend({"title": item.get("title"), "content_type": "clip",
+                            "published_at": item.get("created_at"), "views": item.get("view_count"),
+                            "game": item.get("game_id"), "source_video_id": item.get("id")}
+                           for item in payload.get("data", []))
+            cursor = (payload.get("pagination") or {}).get("cursor")
+            if not cursor:
+                break
+            params["after"] = cursor
+        return records
+
+    def _fetch_youtube_titles(self, since: str | None):
+        config = self._title_sync_configuration("youtube")
+        api_key, channel_id = config.get("api_key"), config.get("channel_id")
+        if not api_key or not channel_id:
+            raise ValueError("YouTube API key and channel ID are required.")
+        params = {"part": "snippet", "channelId": channel_id, "type": "video",
+                  "order": "date", "maxResults": 50, "key": api_key}
+        if since:
+            params["publishedAfter"] = since
+        snippets = {}
+        while True:
+            search = self._json_request(Request("https://www.googleapis.com/youtube/v3/search?" + urlencode(params)))
+            snippets.update({item["id"]["videoId"]: item.get("snippet", {}) for item in search.get("items", [])})
+            page_token = search.get("nextPageToken")
+            if not page_token:
+                break
+            params["pageToken"] = page_token
+        if not snippets:
+            return []
+        result = []
+        video_ids = list(snippets)
+        for offset in range(0, len(video_ids), 50):
+            detail_params = {"part": "statistics,contentDetails",
+                             "id": ",".join(video_ids[offset:offset + 50]), "key": api_key}
+            details = self._json_request(Request("https://www.googleapis.com/youtube/v3/videos?" + urlencode(detail_params)))
+            for item in details.get("items", []):
+                video_id = item.get("id")
+                snippet, stats = snippets.get(video_id, {}), item.get("statistics", {})
+                duration = self._youtube_duration_seconds(
+                    (item.get("contentDetails") or {}).get("duration") or ""
+                )
+                result.append({"title": snippet.get("title"),
+                               "content_type": "short" if duration <= 180 else "video",
+                               "published_at": snippet.get("publishedAt"),
+                               "views": stats.get("viewCount"), "likes": stats.get("likeCount"),
+                               "comments": stats.get("commentCount"), "source_video_id": video_id})
+        return result
+
+    @staticmethod
+    def _youtube_duration_seconds(value: str) -> int:
+        match = re.fullmatch(
+            r"P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?",
+            value,
+        )
+        if not match:
+            return 181
+        parts = {name: int(number or 0) for name, number in match.groupdict().items()}
+        return parts["days"] * 86400 + parts["hours"] * 3600 + parts["minutes"] * 60 + parts["seconds"]
+
+    def _title_sync_configuration(self, platform: str) -> dict[str, Any]:
+        frame = self.db.frame(
+            "SELECT config_json FROM integration_settings WHERE integration_id=?",
+            (f"{platform}_title_sync",),
+        )
+        return json.loads(frame.iloc[0]["config_json"] or "{}") if not frame.empty else {}
+
+    @staticmethod
+    def _json_request(request: Request) -> dict[str, Any]:
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
 
     def title_style_profile(self) -> dict[str, Any]:
         frame = self.published_titles()

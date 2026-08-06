@@ -264,3 +264,84 @@ def test_low_confidence_event_uses_quote_driven_titles(tmp_path):
     assert result["packaging_context"]["confidence"]["event"] < .60
     assert result["suggested_title"] == "Can they even do that?"
     assert any("below 60%" in reason for reason in result["packaging_reasoning"])
+
+
+def test_twitch_title_sync_is_incremental_and_idempotent(tmp_path):
+    service, _, _ = make_service(tmp_path)
+    calls = []
+    records = [{"title": "The Colony Finally Snapped", "content_type": "clip",
+                "published_at": "2026-07-01T12:00:00Z", "views": 9000,
+                "game": "RimWorld", "source_video_id": "tw-1"}]
+
+    def fetcher(platform, since):
+        calls.append((platform, since))
+        return records
+
+    first = service.sync_title_history("twitch", fetcher=fetcher)
+    second = service.sync_title_history("twitch", fetcher=fetcher)
+
+    assert first["changed"] == 1
+    assert second["changed"] == 0
+    assert calls == [("twitch", None), ("twitch", "2026-07-01T12:00:00Z")]
+    assert len(service.published_titles()) == 1
+    status = service.title_sync_status("twitch")
+    assert status["status"] == "Completed"
+    assert status["records_changed"] == 0
+
+
+def test_youtube_title_sync_updates_profile_and_performance(tmp_path):
+    service, _, _ = make_service(tmp_path)
+
+    def fetcher(platform, since):
+        assert platform == "youtube"
+        assert since is None
+        return [{"title": "Can We Survive One More Raid?", "content_type": "short",
+                 "published_at": "2026-07-02T12:00:00Z", "views": "12000",
+                 "likes": "800", "comments": "40", "source_video_id": "yt-1"}]
+
+    result = service.sync_title_history("youtube", fetcher=fetcher)
+    row = service.published_titles().iloc[0]
+
+    assert result["changed"] == 1
+    assert result["profile"]["example_count"] == 1
+    assert int(row["views"]) == 12000
+    assert int(row["likes"]) == 800
+    assert row["content_type"] == "short"
+
+
+def test_failed_title_sync_records_diagnostic_state(tmp_path):
+    service, _, _ = make_service(tmp_path)
+
+    def broken(platform, since):
+        raise RuntimeError("expired token")
+
+    try:
+        service.sync_title_history("twitch", fetcher=broken)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("sync should fail")
+
+    status = service.title_sync_status("twitch")
+    assert status["status"] == "Failed"
+    assert status["last_error"] == "expired token"
+
+
+def test_youtube_api_pages_results_and_classifies_shorts(tmp_path, monkeypatch):
+    service, _, _ = make_service(tmp_path)
+    service.save_title_sync_configuration("youtube", {"api_key": "key", "channel_id": "channel"})
+    responses = iter([
+        {"items": [{"id": {"videoId": "one"}, "snippet": {"title": "One", "publishedAt": "2026-01-01"}}],
+         "nextPageToken": "next"},
+        {"items": [{"id": {"videoId": "two"}, "snippet": {"title": "Two", "publishedAt": "2026-01-02"}}]},
+        {"items": [
+            {"id": "one", "statistics": {"viewCount": "10"}, "contentDetails": {"duration": "PT45S"}},
+            {"id": "two", "statistics": {"viewCount": "20"}, "contentDetails": {"duration": "PT12M"}},
+        ]},
+    ])
+    monkeypatch.setattr(service, "_json_request", lambda request: next(responses))
+
+    records = service._fetch_youtube_titles(None)
+
+    assert [record["source_video_id"] for record in records] == ["one", "two"]
+    assert [record["content_type"] for record in records] == ["short", "video"]
