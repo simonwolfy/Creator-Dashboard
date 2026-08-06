@@ -77,7 +77,7 @@ class CreatorPackagingPage(TranscriptProductionPage):
             return
         clip_id = int(clip_ids[0])
         row = self.service.clip_packaging(clip_id)
-        if not row.get("analyzed_at") or row.get("intelligence_version") != "creator-packaging-v4":
+        if not row.get("analyzed_at") or row.get("intelligence_version") != "creator-packaging-v5":
             self.service.analyze_clip_candidate(clip_id)
             row = self.service.clip_packaging(clip_id)
 
@@ -91,6 +91,8 @@ class CreatorPackagingPage(TranscriptProductionPage):
         hashtags = load_json("suggested_hashtags_json", [])
         reasons = load_json("packaging_reasoning_json", [])
         packages = load_json("platform_packages_json", {})
+        event = load_json("packaging_context_json", {})
+        confidence = event.get("confidence", {})
         trim_start = row.get("suggested_start_seconds") or row["start_seconds"]
         trim_end = row.get("suggested_end_seconds") or row["end_seconds"]
 
@@ -124,6 +126,14 @@ class CreatorPackagingPage(TranscriptProductionPage):
             f"Retention estimate: {float(row.get('retention_estimate') or 0):.1f}%   "
             f"Predicted performance: {row.get('performance_prediction') or 'Unknown'}\n"
             f"Likely audience: {row.get('likely_audience') or 'Unknown'}\n\n"
+            f"SEMANTIC EVENT\n"
+            f"Subject: {event.get('subject', 'Unknown')} ({float(confidence.get('subject', 0)):.0%})\n"
+            f"Action: {event.get('action', 'Unknown')} ({float(confidence.get('action', 0)):.0%})\n"
+            f"Outcome: {event.get('outcome', 'Unknown')} ({float(confidence.get('outcome', 0)):.0%})\n"
+            f"Emotion: {event.get('emotion', 'Unknown')}\n"
+            f"Overall confidence: {float(confidence.get('event', 0)):.0%}\n"
+            f"Title source: {event.get('fallback_mode', 'event').title()}\n"
+            f"Context segments: {event.get('context_segment_count', 1)}\n\n"
             f"SUGGESTED TRIM\n{self._clock(trim_start)}–{self._clock(trim_end)}\n\n"
             f"PRIMARY TITLE\n{row.get('suggested_title') or row.get('title') or ''}\n\n"
             f"TITLE ALTERNATIVES\n{title_lines}\n\n"

@@ -88,7 +88,7 @@ def test_analyze_clip_candidate_builds_creator_package(tmp_path):
     assert "#RimWorld" in result["suggested_hashtags"]
 
     row = service.clip_packaging(clip_id)
-    assert row["intelligence_version"] == "creator-packaging-v4"
+    assert row["intelligence_version"] == "creator-packaging-v5"
     assert row["clip_type"] == "DISCOVERY"
     assert json.loads(row["packaging_context_json"])["subject"] == "tunnel"
     assert json.loads(row["title_alternatives_json"])
@@ -230,3 +230,37 @@ def test_learned_style_ranks_candidates_and_penalizes_near_duplicates(tmp_path):
     assert result["suggested_title"] != "I Finally Found the Tunnel"
     assert service._similarity(result["suggested_title"], "I Finally Found the Tunnel") < .92
     assert "Nobody Warned Me About This Tunnel" not in result["title_alternatives"][:2]
+
+
+def test_semantic_event_uses_surrounding_segments_for_ambiguous_pants_clip(tmp_path):
+    service, transcript_id, _ = make_service(tmp_path)
+    service.add_segments(transcript_id, [
+        {"start": 60, "end": 68, "text": "These colonists have clothing restrictions.", "confidence": .9},
+        {"start": 68, "end": 76, "text": "Can they even wear pants?", "confidence": .94},
+        {"start": 76, "end": 84, "text": "We somehow ended up debating what colonists can wear.", "confidence": .92},
+    ])
+    clip_id = service.add_clip_candidate(transcript_id, 68, 76, "Pants", "Ambiguous discussion", 75)
+
+    result = service.analyze_clip_candidate(clip_id)
+    event = result["packaging_context"]
+
+    assert event["subject"] in {"colonist", "colonists"}
+    assert event["subject"] != "pants"
+    assert event["context_segment_count"] >= 3
+    assert event["confidence"]["event"] >= .60
+    assert event["fallback_mode"] == "event"
+
+
+def test_low_confidence_event_uses_quote_driven_titles(tmp_path):
+    service, transcript_id, _ = make_service(tmp_path)
+    service.add_segments(transcript_id, [
+        {"start": 100, "end": 108, "text": "Can they even do that?", "confidence": .9},
+    ])
+    clip_id = service.add_clip_candidate(transcript_id, 100, 108, "Question", "Ambiguous", 55)
+
+    result = service.analyze_clip_candidate(clip_id)
+
+    assert result["packaging_context"]["fallback_mode"] == "quote"
+    assert result["packaging_context"]["confidence"]["event"] < .60
+    assert result["suggested_title"] == "Can they even do that?"
+    assert any("below 60%" in reason for reason in result["packaging_reasoning"])

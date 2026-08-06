@@ -189,10 +189,21 @@ class CreatorPackagingIntelligenceMixin:
         text = " ".join(
             str(value).strip() for value in segments.get("text", []) if str(value).strip()
         ).strip() or str(clip.get("title") or "").strip()
+        context_segments = self.segments(
+            transcript_id, start=max(0.0, start - 30.0), end=end + 30.0
+        )
+        context_text = " ".join(
+            str(value).strip()
+            for value in context_segments.get("text", [])
+            if str(value).strip()
+        ).strip() or text
         metadata = str(getattr(self, "_packaging_context_title", "") or "").strip()
 
         analysis = self._score_clip_text(text, start, end)
-        context = self._extract_context(text, metadata, analysis)
+        context = self._extract_context(
+            context_text, metadata, analysis, focus_text=text,
+            context_segment_count=len(context_segments),
+        )
         package = self._build_creator_package(text, analysis, context, int(clip_id))
         analysis.update(package)
         now = datetime.now().isoformat()
@@ -221,7 +232,7 @@ class CreatorPackagingIntelligenceMixin:
                 analysis["retention_estimate"], analysis["performance_prediction"],
                 json.dumps(analysis["platform_packages"]), analysis["clip_type"],
                 json.dumps(analysis["packaging_context"]),
-                "creator-packaging-v4", now, now, int(clip_id),
+                "creator-packaging-v5", now, now, int(clip_id),
             ),
         )
         self.db.execute(
@@ -248,7 +259,11 @@ class CreatorPackagingIntelligenceMixin:
         context: dict[str, Any],
         clip_id: int,
     ) -> dict[str, Any]:
-        titles = self._title_options(context)
+        titles = (
+            self._quote_title_options(context)
+            if context.get("fallback_mode") == "quote"
+            else self._title_options(context)
+        )
         titles = self._rank_titles_for_creator(titles, clip_id)
         title = titles[0]
         caption, style = self._social_caption(context)
@@ -299,26 +314,41 @@ class CreatorPackagingIntelligenceMixin:
         scored = []
         for index, candidate in enumerate(candidates):
             tokens = set(re.findall(r"[a-z0-9']+", candidate.lower()))
-            style = 20 - abs(len(candidate.split()) - target_words) * 2
-            style += len(tokens & preferred) * 3 - len(tokens & avoided) * 6
-            style += 8 if candidate.endswith("?") == (profile["question_rate"] >= .5) else 0
-            first_person = bool(re.search(r"\b(i|we|my|our)\b", candidate, re.I))
-            style += 6 if first_person == (profile["first_person_rate"] >= .5) else 0
+            style = 0.0
+            if profile["example_count"]:
+                style = 20 - abs(len(candidate.split()) - target_words) * 2
+                style += len(tokens & preferred) * 3 - len(tokens & avoided) * 6
+                style += 8 if candidate.endswith("?") == (profile["question_rate"] >= .5) else 0
+                first_person = bool(re.search(r"\b(i|we|my|our)\b", candidate, re.I))
+                style += 6 if first_person == (profile["first_person_rate"] >= .5) else 0
             similarity = max((self._similarity(candidate, old) for old in old_titles), default=0.0)
             duplicate_penalty = 100 if similarity >= .92 else 45 * max(0.0, similarity - .62)
             scored.append((style - duplicate_penalty - index * .01, candidate))
         return [title for _, title in sorted(scored, reverse=True)]
 
     @classmethod
-    def _extract_context(cls, text: str, metadata: str, analysis: dict[str, Any]) -> dict[str, Any]:
+    def _extract_context(cls, text: str, metadata: str, analysis: dict[str, Any],
+                         *, focus_text: str | None = None,
+                         context_segment_count: int = 1) -> dict[str, Any]:
         clean = re.sub(r"\s+", " ", text).strip()
         lowered = clean.lower()
         topic = cls._topic_label(f"{metadata} {clean}".lower())
         subject = cls._subject(lowered)
         action = cls._action(lowered)
         clip_type, emotion = cls._clip_type(lowered, analysis, action)
-        quote = cls._strongest_quote(clean)
+        quote = cls._strongest_quote(focus_text or clean)
         outcome = cls._outcome(lowered, subject, clip_type)
+        subject_occurrences = len(re.findall(rf"\b{re.escape(subject)}s?\b", lowered))
+        subject_confidence = min(0.95, 0.42 + subject_occurrences * 0.16)
+        if subject == "moment":
+            subject_confidence = 0.2
+        action_confidence = 0.82 if action != "react" else 0.42
+        outcome_confidence = 0.78 if clip_type not in {"REACTION", "SURPRISE"} else 0.52
+        event_confidence = round(
+            subject_confidence * 0.45 + action_confidence * 0.30
+            + outcome_confidence * 0.25, 2
+        )
+        fallback_mode = "quote" if event_confidence < 0.60 else "event"
         return {
             "subject": subject,
             "action": action,
@@ -327,6 +357,14 @@ class CreatorPackagingIntelligenceMixin:
             "emotion": emotion,
             "clip_type": clip_type,
             "topic": topic,
+            "confidence": {
+                "subject": round(subject_confidence, 2),
+                "action": round(action_confidence, 2),
+                "outcome": round(outcome_confidence, 2),
+                "event": event_confidence,
+            },
+            "fallback_mode": fallback_mode,
+            "context_segment_count": int(context_segment_count),
         }
 
     @staticmethod
@@ -345,14 +383,19 @@ class CreatorPackagingIntelligenceMixin:
     @staticmethod
     def _subject(lowered: str) -> str:
         preferred = (
-            "sheep", "coffee", "tunnel", "colony", "raid", "boss", "wolf", "zombie",
+            "colonist", "colonists", "sheep", "coffee", "tunnel", "colony", "raid", "boss", "wolf", "zombie",
             "pokemon", "pokémon", "village", "base", "cave", "dragon", "enemy", "chat",
         )
         for token in preferred:
             if token in lowered:
-                return token
+                return "colonist" if token == "colonists" else token
         words = re.findall(r"[a-z][a-z'-]+", lowered)
-        stop = {"this", "that", "there", "what", "with", "from", "have", "just", "they", "them", "your", "about", "which", "would", "could", "finally"}
+        stop = {
+            "this", "that", "there", "what", "with", "from", "have", "just",
+            "they", "them", "your", "about", "which", "would", "could", "finally",
+            "thing", "things", "stuff", "something", "someone", "person", "people",
+            "item", "piece", "part", "place", "time", "way", "pants",
+        }
         useful = [word for word in words if len(word) > 3 and word not in stop]
         return useful[0] if useful else "moment"
 
@@ -366,6 +409,7 @@ class CreatorPackagingIntelligenceMixin:
             (("attack", "fight", "shot", "shoot"), "fight"),
             (("built", "build"), "build"),
             (("caught", "catch"), "catch"),
+            (("debate", "debating", "discuss", "wear", "wearing"), "discuss"),
         ):
             if any(token in lowered for token in tokens):
                 return label
@@ -393,7 +437,7 @@ class CreatorPackagingIntelligenceMixin:
 
     @staticmethod
     def _strongest_quote(text: str) -> str:
-        sentences = [part.strip(" .") for part in re.split(r"[.!?]+", text) if part.strip()]
+        sentences = [part.strip() for part in re.findall(r"[^.!?]+[.!?]?", text) if part.strip()]
         if not sentences:
             return text[:100]
         return max(
@@ -404,6 +448,23 @@ class CreatorPackagingIntelligenceMixin:
                 len(sentence),
             ),
         )[:120]
+
+    @classmethod
+    def _quote_title_options(cls, context: dict[str, Any]) -> list[str]:
+        quote = re.sub(r"\s+", " ", str(context.get("quote") or "")).strip(" .")
+        if not quote:
+            quote = "What Just Happened?"
+        standalone = quote[:80]
+        if standalone[-1:] not in "?!":
+            standalone += "?" if standalone.lower().startswith(("can ", "could ", "do ", "did ", "is ", "are ", "what ", "why ", "how ")) else ""
+        subject = cls._title_case_subject(context.get("subject") or "moment")
+        return [
+            standalone,
+            f"We Somehow Ended Up Debating {subject}",
+            f"This Conversation About {subject} Got Weird",
+            f"I Was Not Ready for the {subject} Question",
+            f"Chat Had Questions About {subject}",
+        ]
 
     @staticmethod
     def _outcome(lowered: str, subject: str, clip_type: str) -> str:
@@ -579,6 +640,13 @@ class CreatorPackagingIntelligenceMixin:
             f"Detected a {context['clip_type'].lower().replace('_', ' ')} moment centered on {context['subject']}.",
             f"The key action is '{context['action']}' and {context['outcome']}.",
         ]
+        confidence = context.get("confidence", {})
+        reasons.append(
+            f"Event confidence is {float(confidence.get('event', 0)):.0%} using "
+            f"{context.get('context_segment_count', 1)} surrounding transcript segment(s)."
+        )
+        if context.get("fallback_mode") == "quote":
+            reasons.append("Event confidence was below 60%, so titles use the strongest standalone quote.")
         if context["quote"]:
             reasons.append(f"The strongest standalone quote is: “{context['quote']}”.")
         if analysis["hook_score"] >= 50:
