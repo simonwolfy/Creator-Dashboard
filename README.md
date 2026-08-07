@@ -99,11 +99,15 @@ dependency files change, or if the `.venv` folder is removed or damaged.
 
 ### 3. Launch the dashboard
 
-Double-click:
+For a normal launch with no Command Prompt window, double-click:
 
 ```text
-START_CREATOR_INTELLIGENCE.bat
+START_CREATOR_INTELLIGENCE.vbs
 ```
+
+The windowless launcher continues writing application errors to the workspace
+logs. Use `START_CREATOR_INTELLIGENCE.bat` when troubleshooting and you want to
+see terminal output.
 
 You can also launch it from PowerShell:
 

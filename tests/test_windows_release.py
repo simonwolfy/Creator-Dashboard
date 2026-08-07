@@ -29,6 +29,16 @@ from creator_intelligence.core.workspace import WorkspaceManager
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_source_launcher_starts_windowless_python_and_explains_missing_setup():
+    launcher = (ROOT / "START_CREATOR_INTELLIGENCE.vbs").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert ".venv\\Scripts\\pythonw.exe" in launcher
+    assert "shell.Run command, 0, False" in launcher
+    assert "Run SETUP_ONCE.bat" in launcher
+    assert "START_CREATOR_INTELLIGENCE.vbs" in readme
+
+
 def test_release_pipeline_has_privacy_history_gate_and_artifacts():
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert "python -m pytest" in workflow
