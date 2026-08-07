@@ -2,7 +2,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QTableView,QTabWidget,
     QAbstractItemView,QMessageBox,QInputDialog,QDialog,QFormLayout,QLineEdit,
-    QComboBox,QDialogButtonBox
+    QComboBox,QDialogButtonBox,QMenu,QToolButton
 )
 from creator_intelligence.ui.pages.twitch import FrameModel
 from creator_intelligence.services.publishing_planner import PLATFORMS,PUBLISH_STATUSES
@@ -59,27 +59,38 @@ class PublishingPage(QWidget):
         layout.addWidget(title)
 
         buttons=QHBoxLayout()
-        actions=[
-            ("New publishing item",self.new_item),
-            ("Sync approved projects",self.sync_projects),
-            ("Auto-schedule ready",self.auto_schedule),
-            ("Generate deadlines",self.generate_deadlines),
-            ("Change status",self.change_status),
+        buttons.setSpacing(8)
+        for label,handler in (
+            ("New item",self.new_item),
+            ("Sync approved",self.sync_projects),
+        ):
+            button=QPushButton(label); button.clicked.connect(handler)
+            buttons.addWidget(button)
+        buttons.addWidget(self._menu_button("Schedule", (
+            ("Auto-schedule ready items",self.auto_schedule),
+            ("Generate selected item deadlines",self.generate_deadlines),
+        )))
+        buttons.addWidget(self._menu_button("Readiness", (
+            ("Change selected item status",self.change_status),
             ("Mark thumbnail ready",lambda:self.update_readiness("thumbnail_status","Ready")),
             ("Mark metadata ready",lambda:self.update_readiness("metadata_status","Ready")),
             ("Mark uploaded",lambda:self.update_readiness("upload_status","Uploaded")),
-            ("Generate recommendations",self.generate_recommendations),
+        )))
+        recommendations=QPushButton("Recommendations")
+        recommendations.clicked.connect(self.generate_recommendations)
+        buttons.addWidget(recommendations)
+        buttons.addWidget(self._menu_button("Packages", (
             ("Match package outcomes",self.refresh_outcome_feedback),
-            ("Approve package",lambda:self.package_decision("Approved")),
-            ("Reject package",lambda:self.package_decision("Rejected")),
-            ("Link published post",self.link_selected_package),
-            ("Use experiment variant",self.select_variant),
-            ("Reject experiment variant",self.reject_variant),
-            ("Refresh",self.refresh)
-        ]
-        for label,handler in actions:
-            button=QPushButton(label); button.clicked.connect(handler)
-            buttons.addWidget(button)
+            ("Approve selected package",lambda:self.package_decision("Approved")),
+            ("Reject selected package",lambda:self.package_decision("Rejected")),
+            ("Link selected published post",self.link_selected_package),
+        )))
+        buttons.addWidget(self._menu_button("Experiments", (
+            ("Use selected variant",self.select_variant),
+            ("Reject selected variant",self.reject_variant),
+        )))
+        refresh=QPushButton("Refresh"); refresh.clicked.connect(self.refresh)
+        buttons.addWidget(refresh)
         buttons.addStretch()
         layout.addLayout(buttons)
 
@@ -112,6 +123,17 @@ class PublishingPage(QWidget):
         self.items_table.clicked.connect(lambda _:self.refresh_dependencies())
         self.experiments_table.clicked.connect(lambda _:self.refresh_variants())
         self.refresh()
+
+    def _menu_button(self, label, actions):
+        button=QToolButton(self)
+        button.setText(label)
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu=QMenu(button)
+        for action_label,handler in actions:
+            action=menu.addAction(action_label)
+            action.triggered.connect(handler)
+        button.setMenu(menu)
+        return button
 
     def selected_item_id(self):
         index=self.items_table.currentIndex()

@@ -29,6 +29,16 @@ from creator_intelligence.core.workspace import WorkspaceManager
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_source_launcher_starts_windowless_python_and_explains_missing_setup():
+    launcher = (ROOT / "START_CREATOR_INTELLIGENCE.vbs").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert ".venv\\Scripts\\pythonw.exe" in launcher
+    assert "shell.Run command, 0, False" in launcher
+    assert "Run SETUP_ONCE.bat" in launcher
+    assert "START_CREATOR_INTELLIGENCE.vbs" in readme
+
+
 def test_release_pipeline_has_privacy_history_gate_and_artifacts():
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert "python -m pytest" in workflow
@@ -130,7 +140,8 @@ def test_n_minus_one_workspace_upgrade_is_backed_up_and_preserves_data(tmp_path)
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
     assert latest_version not in applied
-    assert "video_asset_metadata" not in tables
+    assert "video_asset_metadata" in tables
+    assert "content_pipeline" not in tables
 
     assert run_upgrade_smoke(root) == 0
     assert verify_upgraded_workspace(root) == 0

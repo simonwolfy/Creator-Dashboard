@@ -8,8 +8,6 @@ class TwitchIntelligenceService:
 
     def daily(self, start=None, end=None):
         df = self.db.frame("SELECT * FROM twitch_daily ORDER BY date")
-        if df.empty:
-            return df
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         numeric = [c for c in df.columns if c not in {"date","source_file","imported_at"}]
         for c in numeric:

@@ -3,6 +3,7 @@
   "timezone": "America/Chicago",
   "currency": "USD",
   "theme": "dark",
+  "accent_color": "#7137c8",
   "auto_backup_on_start": true,
   "auto_backup_before_write": true,
   "backup_retention": 30,
