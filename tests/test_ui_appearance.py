@@ -7,11 +7,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pandas as pd
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QMainWindow, QTableWidget, QWidget
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QMainWindow,
+    QTableWidget,
+    QTreeWidgetItem,
+    QWidget,
+)
 
 from creator_intelligence.core.config import AppConfig
 from creator_intelligence.core.contracts import ModuleMetadata, NavigationItem
 from creator_intelligence.ui.main_window import (
+    HierarchicalNavigation,
     NAVIGATION_GROUP_ORDER,
     NAVIGATION_LABEL_GROUPS,
     MainWindow,
@@ -109,8 +117,10 @@ def test_navigation_uses_compact_top_level_groups():
 
 def test_main_window_builds_nested_navigation(tmp_path):
     app = QApplication.instance() or QApplication([])
-    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
-    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+    ui_settings = QSettings(
+        str(tmp_path / "creator-os.ini"),
+        QSettings.Format.IniFormat,
+    )
 
     class Registry:
         modules = {
@@ -124,7 +134,8 @@ def test_main_window_builds_nested_navigation(tmp_path):
             return [
                 NavigationItem("Home", QWidget, order=1, module_id="analytics"),
                 NavigationItem("Twitch", QWidget, order=2, module_id="analytics"),
-                NavigationItem("Settings", QWidget, order=3, module_id="system"),
+                NavigationItem("YouTube", QWidget, order=3, module_id="analytics"),
+                NavigationItem("Settings", QWidget, order=4, module_id="system"),
             ]
 
         @staticmethod
@@ -138,6 +149,7 @@ def test_main_window_builds_nested_navigation(tmp_path):
         settings=AppConfig(auto_check_updates=False),
         workspace=SimpleNamespace(paths=SimpleNamespace(root=tmp_path)),
         health_checks=[],
+        ui_settings=ui_settings,
     )
     window = MainWindow(runtime)
     groups = [
@@ -146,7 +158,54 @@ def test_main_window_builds_nested_navigation(tmp_path):
     ]
     assert groups == ["Overview", "Platforms", "System"]
     assert window.nav.topLevelItem(0).child(0).text(0) == "Home"
+    assert window.nav.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
+
+    system_group = window.nav.takeTopLevelItem(2)
+    window.nav.insertTopLevelItem(0, system_group)
+    platforms_group = window.nav.topLevelItem(2)
+    youtube_item = platforms_group.takeChild(1)
+    platforms_group.insertChild(0, youtube_item)
+    window._navigation_reordered()
     window.close()
+    app.processEvents()
+
+    restored = MainWindow(runtime)
+    restored_groups = [
+        restored.nav.topLevelItem(index).text(0)
+        for index in range(restored.nav.topLevelItemCount())
+    ]
+    assert restored_groups == ["System", "Overview", "Platforms"]
+    restored_platforms = restored.nav.topLevelItem(2)
+    assert [
+        restored_platforms.child(index).text(0)
+        for index in range(restored_platforms.childCount())
+    ] == ["YouTube", "Twitch"]
+    restored.close()
+    app.processEvents()
+
+
+def test_navigation_drop_destinations_keep_items_in_scope():
+    app = QApplication.instance() or QApplication([])
+    navigation = HierarchicalNavigation()
+    first_group = QTreeWidgetItem(["First"])
+    second_group = QTreeWidgetItem(["Second"])
+    first_tab = QTreeWidgetItem(["First tab"])
+    second_tab = QTreeWidgetItem(["Second tab"])
+    other_tab = QTreeWidgetItem(["Other tab"])
+    first_group.addChildren([first_tab, second_tab])
+    second_group.addChild(other_tab)
+    navigation.addTopLevelItems([first_group, second_group])
+
+    above = QAbstractItemView.DropIndicatorPosition.AboveItem
+    below = QAbstractItemView.DropIndicatorPosition.BelowItem
+    on_item = QAbstractItemView.DropIndicatorPosition.OnItem
+
+    assert navigation.drop_destination(first_group, second_group, below) == (None, 2)
+    assert navigation.drop_destination(first_tab, second_tab, below) == (first_group, 2)
+    assert navigation.drop_destination(first_tab, first_group, on_item) == (first_group, 2)
+    assert navigation.drop_destination(first_tab, second_group, on_item) is None
+    assert navigation.drop_destination(first_group, first_tab, above) is None
+    navigation.close()
     app.processEvents()
 
 

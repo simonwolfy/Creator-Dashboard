@@ -2,6 +2,7 @@ from pathlib import Path
 import sqlite3
 import os
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from creator_intelligence.core.application import CreatorIntelligenceApplication
@@ -77,6 +78,10 @@ def test_fresh_workspace_builds_every_page(tmp_path: Path):
     window = None
     try:
         runtime = application.start()
+        runtime.ui_settings = QSettings(
+            str(tmp_path / "ui-settings.ini"),
+            QSettings.Format.IniFormat,
+        )
         window = MainWindow(runtime, application_core=application)
         failures = {
             key: page.error_message

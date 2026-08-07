@@ -1,8 +1,9 @@
 import logging
 
-from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -83,12 +84,87 @@ NAVIGATION_LABEL_GROUPS = {
 
 
 class HierarchicalNavigation(QTreeWidget):
+    orderChanged = Signal()
+
     def __init__(self):
         super().__init__()
         self.setHeaderHidden(True)
         self.setRootIsDecorated(True)
         self.setIndentation(17)
         self.setUniformRowHeights(True)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def drop_destination(self, item: QTreeWidgetItem, target, position):
+        above = QAbstractItemView.DropIndicatorPosition.AboveItem
+        below = QAbstractItemView.DropIndicatorPosition.BelowItem
+        on_item = QAbstractItemView.DropIndicatorPosition.OnItem
+        on_viewport = QAbstractItemView.DropIndicatorPosition.OnViewport
+
+        parent = item.parent()
+        if parent is None:
+            if target is None and position == on_viewport:
+                return None, self.topLevelItemCount()
+            if target is None or target.parent() is not None:
+                return None
+            target_index = self.indexOfTopLevelItem(target)
+            if position == above:
+                return None, target_index
+            if position == below:
+                return None, target_index + 1
+            return None
+
+        if target is parent and position == on_item:
+            return parent, parent.childCount()
+        if target is None or target.parent() is not parent:
+            return None
+        target_index = parent.indexOfChild(target)
+        if position == above:
+            return parent, target_index
+        if position == below:
+            return parent, target_index + 1
+        return None
+
+    def dropEvent(self, event) -> None:
+        item = self.currentItem()
+        if item is None:
+            event.ignore()
+            return
+        original_parent = item.parent()
+        original_index = (
+            self.indexOfTopLevelItem(item)
+            if original_parent is None
+            else original_parent.indexOfChild(item)
+        )
+
+        destination = self.drop_destination(
+            item,
+            self.itemAt(event.position().toPoint()),
+            self.dropIndicatorPosition(),
+        )
+        if destination is None:
+            event.ignore()
+            return
+
+        destination_parent, destination_index = destination
+        if original_parent is None:
+            self.takeTopLevelItem(original_index)
+            if original_index < destination_index:
+                destination_index -= 1
+            self.insertTopLevelItem(destination_index, item)
+        else:
+            original_parent.takeChild(original_index)
+            if original_index < destination_index:
+                destination_index -= 1
+            destination_parent.insertChild(destination_index, item)
+        self.setCurrentItem(item)
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+        self.orderChanged.emit()
 
 
 class ModuleFailurePage(QWidget):
@@ -113,7 +189,12 @@ class MainWindow(QMainWindow):
         self.db = runtime.db
         self.context = runtime.context
         self.registry = runtime.registry
-        self.settings = QSettings("Creator Intelligence", "Creator OS")
+        injected_settings = getattr(runtime, "ui_settings", None)
+        self.settings = (
+            injected_settings
+            if injected_settings is not None
+            else QSettings("Creator Intelligence", "Creator OS")
+        )
         self.setWindowTitle(f"Creator Intelligence {APPLICATION_VERSION} — Creator OS")
         self.resize(1600, 960)
         self.setMinimumSize(QSize(1180, 740))
@@ -136,12 +217,39 @@ class MainWindow(QMainWindow):
         for item in navigation:
             grouped_navigation.setdefault(self._navigation_group(item), []).append(item)
 
-        known_groups = [group for group in NAVIGATION_GROUP_ORDER if group in grouped_navigation]
-        extra_groups = sorted(set(grouped_navigation) - set(known_groups))
-        for group_name in [*known_groups, *extra_groups]:
+        default_groups = [group for group in NAVIGATION_GROUP_ORDER if group in grouped_navigation]
+        default_groups.extend(sorted(set(grouped_navigation) - set(default_groups)))
+        saved_groups = self.settings.value("navigation/group_order", [], list)
+        legacy_item_order = self.settings.value("navigation/order", [], list)
+        saved_group_positions = {
+            str(group): index for index, group in enumerate(saved_groups)
+        }
+        for group_name in sorted(
+            default_groups,
+            key=lambda group: (
+                saved_group_positions.get(group, len(saved_group_positions) + default_groups.index(group))
+            ),
+        ):
             group_item = self._add_navigation_group(group_name)
+            item_order_key = f"navigation/item_order/{group_name}"
+            saved_items = (
+                self.settings.value(item_order_key, [], list)
+                if self.settings.contains(item_order_key)
+                else legacy_item_order
+            )
+            saved_item_positions = {
+                str(key): index for index, key in enumerate(saved_items)
+            }
             for item in sorted(
-                grouped_navigation[group_name], key=lambda entry: (entry.order, entry.label.lower())
+                grouped_navigation[group_name],
+                key=lambda entry: (
+                    saved_item_positions.get(
+                        self._navigation_key(entry),
+                        len(saved_item_positions) + entry.order,
+                    ),
+                    entry.order,
+                    entry.label.lower(),
+                ),
             ):
                 key = self._navigation_key(item)
                 try:
@@ -168,6 +276,7 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(page)
 
         self.nav.currentItemChanged.connect(self._show_current_navigation_page)
+        self.nav.orderChanged.connect(self._navigation_reordered)
         self.nav.itemExpanded.connect(lambda _item: self._save_navigation_state())
         self.nav.itemCollapsed.connect(lambda _item: self._save_navigation_state())
         self._restore_navigation_state()
@@ -251,7 +360,6 @@ class MainWindow(QMainWindow):
     def _add_navigation_group(self, label: str) -> QTreeWidgetItem:
         item = QTreeWidgetItem([label])
         item.setData(0, NAV_GROUP_ROLE, label)
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         font = item.font(0)
         font.setBold(True)
         item.setFont(0, font)
@@ -262,6 +370,7 @@ class MainWindow(QMainWindow):
     def _add_navigation_item(parent: QTreeWidgetItem, label: str, key: str):
         item = QTreeWidgetItem([label])
         item.setData(0, NAV_KEY_ROLE, key)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
         parent.addChild(item)
         return item
 
@@ -300,6 +409,20 @@ class MainWindow(QMainWindow):
                 expanded.append(str(group.data(0, NAV_GROUP_ROLE)))
         self.settings.setValue("navigation/expanded_groups", expanded)
         self.settings.sync()
+
+    def _navigation_reordered(self) -> None:
+        group_order = []
+        for index in range(self.nav.topLevelItemCount()):
+            group = self.nav.topLevelItem(index)
+            group_name = str(group.data(0, NAV_GROUP_ROLE))
+            group_order.append(group_name)
+            item_order = [
+                str(group.child(child_index).data(0, NAV_KEY_ROLE))
+                for child_index in range(group.childCount())
+            ]
+            self.settings.setValue(f"navigation/item_order/{group_name}", item_order)
+        self.settings.setValue("navigation/group_order", group_order)
+        self._save_navigation_state()
 
     @staticmethod
     def _configure_page_tables(page: QWidget) -> None:
