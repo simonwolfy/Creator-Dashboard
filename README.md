@@ -11,6 +11,15 @@ Drive, long-form VODs, clips, editors, and historical content performance.
 > workspace regularly and review generated titles, captions, and recommendations
 > before publishing them.
 
+## Download the current version
+
+**[Download the current source code (ZIP)](https://github.com/simonwolfy/Creator-Dashboard/archive/refs/heads/main.zip)**
+
+This link always downloads the newest version from the default `main` branch.
+When a signed Windows installer is published, it will appear on the
+[GitHub Releases](https://github.com/simonwolfy/Creator-Dashboard/releases) page
+and become the recommended download.
+
 ## What it does
 
 - Imports Twitch and YouTube analytics exports.
