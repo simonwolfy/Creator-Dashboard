@@ -1,9 +1,12 @@
 from __future__ import annotations
+
 import logging
-from pathlib import Path
+
 from creator_intelligence.core.context import ApplicationContext
-from creator_intelligence.core.registry import ModuleRegistry
 from creator_intelligence.core.loader import ModuleLoader
+from creator_intelligence.core.registry import ModuleRegistry
+from creator_intelligence.utils.paths import PROJECT_ROOT
+
 
 def bootstrap_application(db, settings=None):
     context = ApplicationContext(
@@ -12,8 +15,9 @@ def bootstrap_application(db, settings=None):
         logger=logging.getLogger("creator_intelligence")
     )
     registry = ModuleRegistry(context)
-    config_path = Path(__file__).resolve().parents[2] / "config" / "modules.json"
+    config_path = PROJECT_ROOT / "config" / "modules.json"
     loader = ModuleLoader(registry, config_path)
     loader.load_all()
+    loader.assert_required_modules()
     context.set("registry", registry)
     return context, registry

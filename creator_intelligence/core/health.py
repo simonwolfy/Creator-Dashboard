@@ -1,8 +1,11 @@
 from __future__ import annotations
+
+import shutil
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-import sqlite3
-import shutil
+
 
 @dataclass
 class HealthCheck:
@@ -12,10 +15,9 @@ class HealthCheck:
 
 class HealthService:
     REQUIRED_TABLES = {
-        "twitch_daily",
-        "youtube_content",
-        "prediction_runs",
         "app_settings",
+        "content_items",
+        "managed_assets",
         "schema_migrations",
     }
 
@@ -43,7 +45,7 @@ class HealthService:
 
         if self.db_path.exists():
             try:
-                with sqlite3.connect(self.db_path) as con:
+                with closing(sqlite3.connect(self.db_path)) as con:
                     integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
                     results.append(HealthCheck(
                         "SQLite integrity",

@@ -1,20 +1,42 @@
+import logging
 import sys
 import traceback
-import logging
-from PySide6.QtWidgets import QApplication, QMessageBox
-from creator_intelligence.core.logging import configure_logging
-from creator_intelligence.core.config import ConfigService
-from creator_intelligence.data.database import Database
-from creator_intelligence.services.backup import BackupService
-from creator_intelligence.ui.main_window import MainWindow
-from creator_intelligence.utils.paths import DB_PATH, BACKUP_DIR
+from pathlib import Path
 
-def main():
-    configure_logging()
-    log = logging.getLogger(__name__)
+from PySide6.QtWidgets import QApplication, QMessageBox
+
+from creator_intelligence.core.application import CreatorIntelligenceApplication
+from creator_intelligence.core.onboarding import OnboardingService
+from creator_intelligence.ui.dialogs.onboarding import OnboardingWizard
+from creator_intelligence.ui.main_window import MainWindow
+
+
+def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--release-smoke-test" in arguments:
+        from creator_intelligence.core.release_smoke import run_release_smoke
+
+        return run_release_smoke()
+    if "--release-upgrade-smoke-test" in arguments:
+        from creator_intelligence.core.release_smoke import run_upgrade_smoke
+
+        index = arguments.index("--release-upgrade-smoke-test")
+        if index + 1 >= len(arguments):
+            raise SystemExit("--release-upgrade-smoke-test requires a workspace path")
+        return run_upgrade_smoke(Path(arguments[index + 1]))
     app = QApplication(sys.argv)
-    app.setApplicationName("Creator Intelligence 3.0")
-    app.setOrganizationName("SimonWolfy")
+    app.setApplicationName("Creator Intelligence")
+    app.setApplicationVersion(CreatorIntelligenceApplication.VERSION)
+    app.setOrganizationName("Creator Intelligence")
+
+    onboarding = OnboardingService()
+    if onboarding.needs_onboarding():
+        wizard = OnboardingWizard(onboarding)
+        if not wizard.exec():
+            return 0
+    profile = onboarding.profile()
+    core = CreatorIntelligenceApplication(Path(profile.workspace_root))
+    log = logging.getLogger(__name__)
 
     def handle_exception(exc_type, exc_value, exc_tb):
         details = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
@@ -29,20 +51,25 @@ def main():
     sys.excepthook = handle_exception
 
     try:
-        db = Database(DB_PATH)
-        db.migrate()
-        config = ConfigService().load()
-        if config.auto_backup_on_start:
-            BackupService(DB_PATH, BACKUP_DIR, config.backup_retention).create("startup")
-        window = MainWindow(db)
+        runtime = core.start()
+        runtime.context.set("onboarding", onboarding)
+        window = MainWindow(runtime, application_core=core)
         window.show()
-        log.info("Application started")
         return app.exec()
     except Exception as exc:
         details = traceback.format_exc()
         log.critical("Startup failure\n%s", details)
-        QMessageBox.critical(None, "Startup failed", f"{exc}\n\nSee the logs folder for details.")
+        QMessageBox.critical(
+            None,
+            "Startup failed",
+            f"{exc}\n\nSee the logs folder for details."
+        )
+        try:
+            core.stop()
+        except Exception:
+            log.exception("Cleanup after startup failure also failed")
         return 1
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -1,23 +1,45 @@
 from __future__ import annotations
-import sqlite3
+
 import logging
+import sqlite3
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Any
-from datetime import datetime
+from typing import Any
+
 import pandas as pd
-from creator_intelligence.data.migrations import MIGRATIONS
+
 from creator_intelligence.core.exceptions import DatabaseError, MigrationError
+from creator_intelligence.data.google_drive_folder_migration import GOOGLE_DRIVE_FOLDER_MIGRATIONS
+from creator_intelligence.data.google_drive_metadata_migration import (
+    GOOGLE_DRIVE_METADATA_MIGRATIONS,
+)
+from creator_intelligence.data.google_drive_migrations import GOOGLE_DRIVE_MIGRATIONS
+from creator_intelligence.data.migration_manager import MigrationManager, MigrationRecord
+from creator_intelligence.data.migrations import MIGRATIONS
+from creator_intelligence.data.video_metadata_migration import VIDEO_METADATA_MIGRATIONS
 
 log = logging.getLogger(__name__)
+
 
 class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.migration_manager = MigrationManager(
+            [
+                *MIGRATIONS,
+                *GOOGLE_DRIVE_MIGRATIONS,
+                *GOOGLE_DRIVE_FOLDER_MIGRATIONS,
+                *GOOGLE_DRIVE_METADATA_MIGRATIONS,
+                *VIDEO_METADATA_MIGRATIONS,
+            ]
+        )
+        self.last_applied_migrations: list[MigrationRecord] = []
 
     def _configure(self, con):
         con.execute("PRAGMA foreign_keys=ON")
+        con.execute("PRAGMA secure_delete=ON")
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA synchronous=NORMAL")
         con.execute("PRAGMA busy_timeout=5000")
@@ -36,35 +58,32 @@ class Database:
         finally:
             con.close()
 
-    def migrate(self):
+    def migrate(self) -> list[MigrationRecord]:
         try:
             with self.connect() as con:
-                con.execute("""CREATE TABLE IF NOT EXISTS schema_migrations(
-                    version INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    applied_at TEXT NOT NULL
-                )""")
-                applied = {
-                    row[0] for row in con.execute("SELECT version FROM schema_migrations")
-                }
-                for version, name, sql in MIGRATIONS:
-                    if version in applied:
-                        continue
-                    log.info("Applying migration %s: %s", version, name)
-                    con.executescript(sql)
-                    con.execute(
-                        "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",
-                        (version, name, datetime.now().isoformat())
-                    )
+                self.last_applied_migrations = self.migration_manager.apply(con)
+                return list(self.last_applied_migrations)
         except Exception as exc:
             raise MigrationError(f"Migration failed: {exc}") from exc
 
+    def migration_history(self) -> list[MigrationRecord]:
+        with self.connect() as con:
+            return self.migration_manager.history(con)
+
+    def pending_migrations(self) -> list[tuple[int, str, str]]:
+        with self.connect() as con:
+            return self.migration_manager.pending(con)
+
     def frame(self, sql: str, params: Iterable[Any] = ()) -> pd.DataFrame:
+        connection = None
         try:
-            with sqlite3.connect(self.path) as con:
-                return pd.read_sql_query(sql, con, params=tuple(params))
+            connection = sqlite3.connect(self.path)
+            return pd.read_sql_query(sql, connection, params=tuple(params))
         except Exception as exc:
             raise DatabaseError(str(exc)) from exc
+        finally:
+            if connection is not None:
+                connection.close()
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> int:
         try:
@@ -90,10 +109,12 @@ class Database:
             raise DatabaseError(str(exc)) from exc
 
     def table_exists(self, table: str) -> bool:
-        return bool(self.scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-            (table,)
-        ))
+        return bool(
+            self.scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            )
+        )
 
     def integrity_check(self):
         return self.scalar("PRAGMA integrity_check", default="unknown")

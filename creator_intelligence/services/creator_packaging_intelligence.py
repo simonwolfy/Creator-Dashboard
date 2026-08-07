@@ -1,0 +1,1313 @@
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import re
+from datetime import datetime
+from difflib import SequenceMatcher
+from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+import pandas as pd
+
+from creator_intelligence.core.credential_vault import CredentialVault
+
+
+class CreatorPackagingIntelligenceMixin:
+    """Local, clip-specific packaging intelligence with duplicate prevention."""
+
+    def _ensure_clip_intelligence_columns(self) -> None:
+        super()._ensure_clip_intelligence_columns()
+        existing = {
+            str(row["name"])
+            for _, row in self.db.frame("PRAGMA table_info(transcript_clip_candidates)").iterrows()
+        }
+        columns = {
+            "title_alternatives_json": "TEXT",
+            "title_score": "REAL",
+            "caption_style": "TEXT",
+            "hook_line": "TEXT",
+            "packaging_reasoning_json": "TEXT",
+            "likely_audience": "TEXT",
+            "replayability_score": "REAL",
+            "shareability_score": "REAL",
+            "retention_estimate": "REAL",
+            "performance_prediction": "TEXT",
+            "platform_packages_json": "TEXT",
+            "clip_type": "TEXT",
+            "packaging_context_json": "TEXT",
+        }
+        for name, sql_type in columns.items():
+            if name not in existing:
+                self.db.execute(
+                    f"ALTER TABLE transcript_clip_candidates ADD COLUMN {name} {sql_type}"
+                )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS creator_package_history(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clip_candidate_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                hook TEXT,
+                caption TEXT,
+                hashtags_json TEXT NOT NULL DEFAULT '[]',
+                clip_type TEXT,
+                approved INTEGER NOT NULL DEFAULT 0,
+                published INTEGER NOT NULL DEFAULT 0,
+                views INTEGER,
+                ctr REAL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(clip_candidate_id, title)
+            )"""
+        )
+        youtube_columns = {str(row["name"]) for _, row in self.db.frame(
+            "PRAGMA table_info(youtube_content)"
+        ).iterrows()}
+        if youtube_columns and "description" not in youtube_columns:
+            self.db.execute("ALTER TABLE youtube_content ADD COLUMN description TEXT")
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS creator_published_titles(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL DEFAULT 'twitch',
+                content_type TEXT NOT NULL DEFAULT 'clip',
+                title TEXT NOT NULL,
+                game TEXT,
+                published_at TEXT,
+                views INTEGER,
+                likes INTEGER,
+                comments INTEGER,
+                watch_time REAL,
+                example_type TEXT NOT NULL DEFAULT 'published',
+                source_video_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(platform, content_type, title)
+            )"""
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_creator_titles_example ON creator_published_titles(example_type)"
+        )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS creator_title_sync_state(
+                platform TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'Never synced',
+                last_cursor TEXT,
+                last_synced_at TEXT,
+                last_error TEXT,
+                records_seen INTEGER NOT NULL DEFAULT 0,
+                records_changed INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+
+    def record_published_title(self, title: str, *, platform: str = "twitch",
+                               content_type: str = "clip", game: str | None = None,
+                               published_at: str | None = None, views: int | None = None,
+                               likes: int | None = None, comments: int | None = None,
+                               watch_time: float | None = None,
+                               example_type: str = "published",
+                               source_video_id: str | None = None) -> int:
+        clean = re.sub(r"\s+", " ", str(title)).strip()
+        if not clean:
+            raise ValueError("Title cannot be empty.")
+        kind = str(example_type).strip().lower()
+        if kind not in {"published", "approved", "rejected"}:
+            raise ValueError("example_type must be published, approved, or rejected.")
+        platform = platform.strip().lower()
+        content_type = content_type.strip().lower()
+        now = datetime.now().isoformat()
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        dna = CreatorDNAService(self.db)
+        dna.ensure_event_history()
+        existing = self.db.frame(
+            "SELECT * FROM creator_published_titles WHERE platform=? AND source_video_id=?",
+            (platform, source_video_id),
+        ) if source_video_id else self.db.frame(
+            """SELECT * FROM creator_published_titles
+               WHERE platform=? AND content_type=? AND title=?""",
+            (platform, content_type, clean),
+        )
+        if existing.empty and source_video_id:
+            existing = self.db.frame(
+                """SELECT * FROM creator_published_titles
+                   WHERE platform=? AND content_type=? AND title=?""",
+                (platform, content_type, clean),
+            )
+        before = existing.iloc[0].to_dict() if not existing.empty else None
+        if source_video_id:
+            sourced = self.db.frame(
+                "SELECT id FROM creator_published_titles WHERE platform=? AND source_video_id=?",
+                (platform, source_video_id),
+            )
+            if not sourced.empty:
+                record_id = int(sourced.iloc[0]["id"])
+                self.db.execute(
+                    """UPDATE creator_published_titles SET content_type=?,title=?,game=?,
+                       published_at=?,views=?,likes=?,comments=?,watch_time=?,example_type=?,
+                       updated_at=? WHERE id=?""",
+                    (content_type, clean, game, published_at, views,
+                     likes, comments, watch_time, kind, now, record_id),
+                )
+            else:
+                record_id = 0
+        else:
+            record_id = 0
+        if not record_id:
+            self.db.execute(
+                """INSERT INTO creator_published_titles(
+                   platform,content_type,title,game,published_at,views,likes,comments,
+                   watch_time,example_type,source_video_id,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(platform,content_type,title) DO UPDATE SET
+                   game=excluded.game,published_at=excluded.published_at,
+                   views=excluded.views,likes=excluded.likes,comments=excluded.comments,
+                   watch_time=excluded.watch_time,example_type=excluded.example_type,
+                   source_video_id=excluded.source_video_id,updated_at=excluded.updated_at""",
+                (platform, content_type, clean, game, published_at, views, likes,
+                 comments, watch_time, kind, source_video_id, now, now),
+            )
+            row = self.db.frame(
+                """SELECT id FROM creator_published_titles
+                   WHERE platform=? AND content_type=? AND title=?""",
+                (platform, content_type, clean),
+            )
+            record_id = int(row.iloc[0]["id"])
+        after = self.db.frame(
+            "SELECT * FROM creator_published_titles WHERE id=?", (record_id,)
+        ).iloc[0].to_dict()
+        before_safe = dna._json_safe(before) if before else None
+        after_safe = dna._json_safe(after)
+        compared = (
+            "platform", "content_type", "title", "game", "published_at",
+            "views", "likes", "comments", "watch_time", "example_type",
+            "source_video_id",
+        )
+        changed = [
+            name for name in compared
+            if not before_safe or before_safe.get(name) != after_safe.get(name)
+        ]
+        if changed:
+            polarity, weight = dna.historical_title_evidence(after_safe)
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    {name: after_safe.get(name) for name in compared},
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            dna.record_event(
+                "historical_title_recorded" if before_safe is None else "historical_title_updated",
+                subject_type="published_title",
+                subject_id=record_id,
+                platform=platform,
+                evidence_polarity=polarity,
+                evidence_weight=weight,
+                field_name="title",
+                old_value=before_safe.get("title") if before_safe else None,
+                new_value=clean,
+                metadata={"record": after_safe, "changed_fields": changed},
+                source="title_history",
+                event_key=f"historical-title:{record_id}:{fingerprint}",
+            )
+        return record_id
+
+    def import_published_titles(self, path: str) -> dict[str, int]:
+        counts = {"imported": 0, "skipped": 0}
+        with open(path, encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or "title" not in {n.strip().lower() for n in reader.fieldnames}:
+                raise ValueError("CSV must include a title column.")
+            for raw in reader:
+                row = {str(k).strip().lower(): v for k, v in raw.items()}
+                if not str(row.get("title") or "").strip():
+                    counts["skipped"] += 1
+                    continue
+                def number(name, cast, source=row):
+                    value = str(source.get(name) or "").strip()
+                    return cast(value) if value else None
+                self.record_published_title(
+                    row["title"], platform=row.get("platform") or "twitch",
+                    content_type=row.get("content_type") or "clip", game=row.get("game") or None,
+                    published_at=row.get("published_at") or None, views=number("views", int),
+                    likes=number("likes", int), comments=number("comments", int),
+                    watch_time=number("watch_time", float),
+                    example_type=row.get("example_type") or "published",
+                    source_video_id=row.get("source_video_id") or None,
+                )
+                counts["imported"] += 1
+        return counts
+
+    def published_titles(self):
+        return self.db.frame("SELECT * FROM creator_published_titles ORDER BY COALESCE(published_at,created_at) DESC,id DESC")
+
+    def title_sync_status(self, platform: str | None = None):
+        if platform:
+            frame = self.db.frame(
+                "SELECT * FROM creator_title_sync_state WHERE platform=?",
+                (platform.strip().lower(),),
+            )
+            return frame.iloc[0].to_dict() if not frame.empty else {
+                "platform": platform.strip().lower(), "status": "Never synced",
+                "last_cursor": None, "last_synced_at": None, "last_error": None,
+                "records_seen": 0, "records_changed": 0,
+            }
+        return self.db.frame("SELECT * FROM creator_title_sync_state ORDER BY platform")
+
+    def save_title_sync_configuration(self, platform: str, config: dict[str, str]) -> None:
+        now = datetime.now().isoformat()
+        public=CredentialVault.for_database(self.db).protect(platform,config)
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS integration_settings(
+                integration_id TEXT PRIMARY KEY, enabled INTEGER DEFAULT 0,
+                config_json TEXT NOT NULL DEFAULT '{}', last_connected_at TEXT,
+                last_error TEXT, updated_at TEXT NOT NULL)"""
+        )
+        self.db.execute(
+            """INSERT INTO integration_settings(integration_id,enabled,config_json,updated_at)
+               VALUES(?,1,?,?) ON CONFLICT(integration_id) DO UPDATE SET
+               enabled=1,config_json=excluded.config_json,updated_at=excluded.updated_at""",
+            (f"{platform.strip().lower()}_title_sync", json.dumps(public), now),
+        )
+
+    def sync_title_history(self, platform: str, fetcher=None) -> dict[str, Any]:
+        platform = platform.strip().lower()
+        if platform not in {"twitch", "youtube"}:
+            raise ValueError("Platform must be twitch or youtube.")
+        prior = self.title_sync_status(platform)
+        since = prior.get("last_cursor")
+        now = datetime.now().isoformat()
+        try:
+            records = list((fetcher or self._fetch_title_history)(platform, since))
+            changed = 0
+            newest = since
+            for record in records:
+                source_id = str(record.get("source_video_id") or record.get("id") or "").strip() or None
+                existing = self.db.frame(
+                    "SELECT * FROM creator_published_titles WHERE platform=? AND source_video_id=?",
+                    (platform, source_id),
+                ) if source_id else self.db.frame(
+                    "SELECT * FROM creator_published_titles WHERE platform=? AND title=?",
+                    (platform, str(record.get("title") or "").strip()),
+                )
+                incoming = {
+                    "title": str(record.get("title") or "").strip(),
+                    "content_type": record.get("content_type") or "clip",
+                    "published_at": record.get("published_at"),
+                    "views": self._optional_int(record.get("views")),
+                    "likes": self._optional_int(record.get("likes")),
+                    "comments": self._optional_int(record.get("comments")),
+                }
+                self.record_published_title(
+                    record.get("title") or "", platform=platform,
+                    content_type=record.get("content_type") or "clip",
+                    game=record.get("game"), published_at=record.get("published_at"),
+                    views=self._optional_int(record.get("views")),
+                    likes=self._optional_int(record.get("likes")),
+                    comments=self._optional_int(record.get("comments")),
+                    watch_time=self._optional_float(record.get("watch_time")),
+                    source_video_id=source_id,
+                )
+                if existing.empty or any(
+                    (None if existing.iloc[0].get(key) != existing.iloc[0].get(key) else existing.iloc[0].get(key)) != value
+                    for key, value in incoming.items()
+                ):
+                    changed += 1
+                published = str(record.get("published_at") or "")
+                newest = max(filter(None, [newest, published]), default=newest)
+            self.db.execute(
+                """INSERT INTO creator_title_sync_state(
+                   platform,status,last_cursor,last_synced_at,last_error,
+                   records_seen,records_changed,updated_at) VALUES(?,?,?,?,?,?,?,?)
+                   ON CONFLICT(platform) DO UPDATE SET status=excluded.status,
+                   last_cursor=excluded.last_cursor,last_synced_at=excluded.last_synced_at,
+                   last_error=NULL,records_seen=excluded.records_seen,
+                   records_changed=excluded.records_changed,updated_at=excluded.updated_at""",
+                (platform, "Completed", newest, now, None, len(records), changed, now),
+            )
+            from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+            outcomes = PublishingOutcomeService(self.db).process_sync(platform)
+            return {"platform": platform, "seen": len(records), "changed": changed,
+                    "unchanged": len(records) - changed, "last_cursor": newest,
+                    "profile": self.title_style_profile(),
+                    "outcomes_matched": outcomes["matched"],
+                    "outcome_snapshots": outcomes["snapshots"]}
+        except Exception as exc:
+            self.db.execute(
+                """INSERT INTO creator_title_sync_state(platform,status,last_error,updated_at)
+                   VALUES(?,'Failed',?,?) ON CONFLICT(platform) DO UPDATE SET
+                   status='Failed',last_error=excluded.last_error,updated_at=excluded.updated_at""",
+                (platform, str(exc), now),
+            )
+            raise
+
+    @staticmethod
+    def _optional_int(value):
+        return int(value) if value not in (None, "") else None
+
+    @staticmethod
+    def _optional_float(value):
+        return float(value) if value not in (None, "") else None
+
+    def _fetch_title_history(self, platform: str, since: str | None):
+        return self._fetch_twitch_titles(since) if platform == "twitch" else self._fetch_youtube_titles(since)
+
+    def _fetch_twitch_titles(self, since: str | None):
+        settings = self.db.frame("SELECT * FROM live_integration_settings WHERE id=1")
+        if settings.empty:
+            raise ValueError("Configure Twitch credentials in Live Stream > Connections and rules.")
+        config = settings.iloc[0].to_dict()
+        required = (config.get("twitch_client_id"), config.get("twitch_access_token"), config.get("twitch_broadcaster_id"))
+        if not all(required):
+            raise ValueError("Configure Twitch client ID, OAuth token, and broadcaster ID first.")
+        params = {"broadcaster_id": required[2], "first": 100}
+        if since:
+            params["started_at"] = since
+        records = []
+        while True:
+            request = Request(
+                "https://api.twitch.tv/helix/clips?" + urlencode(params),
+                headers={"Client-Id": required[0], "Authorization": f"Bearer {required[1]}"},
+            )
+            payload = self._json_request(request)
+            records.extend({"title": item.get("title"), "content_type": "clip",
+                            "published_at": item.get("created_at"), "views": item.get("view_count"),
+                            "game": item.get("game_id"), "source_video_id": item.get("id")}
+                           for item in payload.get("data", []))
+            cursor = (payload.get("pagination") or {}).get("cursor")
+            if not cursor:
+                break
+            params["after"] = cursor
+        return records
+
+    def _fetch_youtube_titles(self, since: str | None):
+        config = self._title_sync_configuration("youtube")
+        api_key, channel_id = config.get("api_key"), config.get("channel_id")
+        if not api_key or not channel_id:
+            raise ValueError("YouTube API key and channel ID are required.")
+        params = {"part": "snippet", "channelId": channel_id, "type": "video",
+                  "order": "date", "maxResults": 50, "key": api_key}
+        if since:
+            params["publishedAfter"] = since
+        snippets = {}
+        while True:
+            search = self._json_request(Request("https://www.googleapis.com/youtube/v3/search?" + urlencode(params)))
+            snippets.update({item["id"]["videoId"]: item.get("snippet", {}) for item in search.get("items", [])})
+            page_token = search.get("nextPageToken")
+            if not page_token:
+                break
+            params["pageToken"] = page_token
+        if not snippets:
+            return []
+        result = []
+        video_ids = list(snippets)
+        for offset in range(0, len(video_ids), 50):
+            detail_params = {"part": "statistics,contentDetails",
+                             "id": ",".join(video_ids[offset:offset + 50]), "key": api_key}
+            details = self._json_request(Request("https://www.googleapis.com/youtube/v3/videos?" + urlencode(detail_params)))
+            for item in details.get("items", []):
+                video_id = item.get("id")
+                snippet, stats = snippets.get(video_id, {}), item.get("statistics", {})
+                duration = self._youtube_duration_seconds(
+                    (item.get("contentDetails") or {}).get("duration") or ""
+                )
+                result.append({"title": snippet.get("title"),
+                               "content_type": "short" if duration <= 180 else "video",
+                               "published_at": snippet.get("publishedAt"),
+                               "views": stats.get("viewCount"), "likes": stats.get("likeCount"),
+                               "comments": stats.get("commentCount"), "source_video_id": video_id})
+        return result
+
+    @staticmethod
+    def _youtube_duration_seconds(value: str) -> int:
+        match = re.fullmatch(
+            r"P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?",
+            value,
+        )
+        if not match:
+            return 181
+        parts = {name: int(number or 0) for name, number in match.groupdict().items()}
+        return parts["days"] * 86400 + parts["hours"] * 3600 + parts["minutes"] * 60 + parts["seconds"]
+
+    def _title_sync_configuration(self, platform: str) -> dict[str, Any]:
+        frame = self.db.frame(
+            "SELECT config_json FROM integration_settings WHERE integration_id=?",
+            (f"{platform}_title_sync",),
+        )
+        public=json.loads(frame.iloc[0]["config_json"] or "{}") if not frame.empty else {}
+        vault=CredentialVault.for_database(self.db);clean=vault.protect(platform,public)
+        if clean!=public:
+            self.db.execute("UPDATE integration_settings SET config_json=?,updated_at=? WHERE integration_id=?",
+                            (json.dumps(clean),datetime.now().isoformat(),f"{platform}_title_sync"))
+        return vault.reveal(platform,clean)
+
+    @staticmethod
+    def _json_request(request: Request) -> dict[str, Any]:
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def title_style_profile(self) -> dict[str, Any]:
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+        return CreatorDNAService(self.db).title_style_profile()
+
+    def analyze_clip_candidate(self, clip_id: int) -> dict[str, Any]:
+        frame = self.db.frame(
+            "SELECT * FROM transcript_clip_candidates WHERE id=?", (int(clip_id),)
+        )
+        if frame.empty:
+            raise KeyError(clip_id)
+        clip = frame.iloc[0].to_dict()
+        transcript_id = int(clip["transcript_id"])
+        start = float(clip["start_seconds"])
+        end = float(clip["end_seconds"])
+        segments = self.segments(transcript_id, start=start, end=end)
+        if not segments.empty:
+            strict_overlap = (
+                pd.to_numeric(segments["end_seconds"], errors="coerce") > start
+            ) & (
+                pd.to_numeric(segments["start_seconds"], errors="coerce") < end
+            )
+            if strict_overlap.any():
+                segments = segments[strict_overlap].copy()
+        text = " ".join(
+            str(value).strip() for value in segments.get("text", []) if str(value).strip()
+        ).strip() or str(clip.get("title") or "").strip()
+        context_segments = self._neighboring_segments(
+            transcript_id, segments, before=2, after=2
+        )
+        context_text = " ".join(
+            str(value).strip()
+            for value in context_segments.get("text", [])
+            if str(value).strip()
+        ).strip() or text
+        metadata = str(getattr(self, "_packaging_context_title", "") or "").strip()
+
+        analysis = self._score_clip_text(text, start, end)
+        context = self._extract_context(
+            context_text, metadata, analysis, focus_text=text,
+            context_segment_count=len(context_segments),
+        )
+        context["segments"] = self._packaging_segment_evidence(
+            context_segments, start, end, context
+        )
+        package = self._build_creator_package(text, analysis, context, int(clip_id))
+        analysis.update(package)
+        now = datetime.now().isoformat()
+        self.db.execute(
+            """UPDATE transcript_clip_candidates SET
+               hook_score=?,humor_score=?,surprise_score=?,emotion_score=?,
+               quote_score=?,viral_score=?,suggested_start_seconds=?,
+               suggested_end_seconds=?,suggested_title=?,suggested_caption=?,
+               suggested_hashtags_json=?,title_alternatives_json=?,title_score=?,
+               caption_style=?,hook_line=?,packaging_reasoning_json=?,likely_audience=?,
+               replayability_score=?,shareability_score=?,retention_estimate=?,
+               performance_prediction=?,platform_packages_json=?,clip_type=?,
+               packaging_context_json=?,intelligence_version=?,analyzed_at=?,updated_at=?
+               WHERE id=?""",
+            (
+                analysis["hook_score"], analysis["humor_score"],
+                analysis["surprise_score"], analysis["emotion_score"],
+                analysis["quote_score"], analysis["viral_score"],
+                analysis["suggested_start_seconds"], analysis["suggested_end_seconds"],
+                analysis["suggested_title"], analysis["suggested_caption"],
+                json.dumps(analysis["suggested_hashtags"]),
+                json.dumps(analysis["title_alternatives"]), analysis["title_score"],
+                analysis["caption_style"], analysis["hook_line"],
+                json.dumps(analysis["packaging_reasoning"]), analysis["likely_audience"],
+                analysis["replayability_score"], analysis["shareability_score"],
+                analysis["retention_estimate"], analysis["performance_prediction"],
+                json.dumps(analysis["platform_packages"]), analysis["clip_type"],
+                json.dumps(analysis["packaging_context"]),
+                "creator-packaging-v6", now, now, int(clip_id),
+            ),
+        )
+        if analysis.get("packaging_status") != "insufficient_context":
+            self.db.execute(
+                """INSERT OR REPLACE INTO creator_package_history(
+               clip_candidate_id,title,hook,caption,hashtags_json,clip_type,
+               approved,published,views,ctr,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,COALESCE((SELECT approved FROM creator_package_history
+               WHERE clip_candidate_id=? AND title=?),0),
+               COALESCE((SELECT published FROM creator_package_history
+               WHERE clip_candidate_id=? AND title=?),0),NULL,NULL,?,?)""",
+                (
+                    int(clip_id), analysis["suggested_title"], analysis["hook_line"],
+                    analysis["suggested_caption"], json.dumps(analysis["suggested_hashtags"]),
+                    analysis["clip_type"], int(clip_id), analysis["suggested_title"],
+                    int(clip_id), analysis["suggested_title"], now, now,
+                ),
+            )
+        return {"id": int(clip_id), **analysis}
+
+    def _neighboring_segments(self, transcript_id, focus_segments, *, before=2, after=2):
+        """Return exact neighboring segments without using an arbitrary time window."""
+        if focus_segments.empty or "segment_index" not in focus_segments:
+            return focus_segments
+        first = int(focus_segments["segment_index"].min()) - max(0, int(before))
+        last = int(focus_segments["segment_index"].max()) + max(0, int(after))
+        return self.db.frame(
+            """SELECT id,segment_index,start_seconds,end_seconds,text,
+               speaker,confidence,tags_json FROM transcript_segments
+               WHERE transcript_id=? AND segment_index BETWEEN ? AND ?
+               ORDER BY segment_index""",
+            (int(transcript_id), first, last),
+        )
+
+    @staticmethod
+    def _packaging_segment_evidence(segments, focus_start, focus_end, context):
+        action_terms = {
+            "destroy": ("destroy", "kill"), "discover": ("find", "found", "discover", "secret"),
+            "fail": ("fail", "failed", "died", "lost"), "win": ("win", "won", "saved", "survived"),
+            "fight": ("attack", "fight", "shot", "shoot"), "build": ("build", "built"),
+            "catch": ("catch", "caught"), "discuss": ("debate", "discuss", "wear"),
+        }
+        subject = str(context.get("subject") or "").lower()
+        action = str(context.get("action") or "").lower()
+        result = []
+        for _, row in segments.iterrows():
+            start, end = float(row["start_seconds"]), float(row["end_seconds"])
+            role = "focus" if end > focus_start and start < focus_end else "previous" if end <= focus_start else "next"
+            lowered = str(row["text"]).lower()
+            result.append({
+                "segment_index": int(row["segment_index"]),
+                "role": role,
+                "start_seconds": start,
+                "end_seconds": end,
+                "text": str(row["text"]),
+                "supports_subject": bool(subject and re.search(rf"\b{re.escape(subject)}s?\b", lowered)),
+                "supports_action": any(term in lowered for term in action_terms.get(action, (action,))),
+            })
+        return result
+
+    def _build_creator_package(
+        self,
+        text: str,
+        analysis: dict[str, Any],
+        context: dict[str, Any],
+        clip_id: int,
+    ) -> dict[str, Any]:
+        if context.get("fallback_mode") == "insufficient_context":
+            reasoning = self._packaging_reasoning(text, analysis, context)
+            return {
+                "suggested_title": "",
+                "title_alternatives": [],
+                "title_score": 0.0,
+                "suggested_caption": "",
+                "caption_style": "insufficient-context",
+                "hook_line": "",
+                "suggested_hashtags": [],
+                "packaging_reasoning": reasoning,
+                "likely_audience": "Unknown",
+                "replayability_score": 0.0,
+                "shareability_score": 0.0,
+                "retention_estimate": 0.0,
+                "performance_prediction": "Insufficient context",
+                "platform_packages": {},
+                "clip_type": "INSUFFICIENT_CONTEXT",
+                "packaging_context": context,
+                "packaging_status": "insufficient_context",
+            }
+        titles = (
+            self._quote_title_options(context)
+            if context.get("fallback_mode") == "quote"
+            else self._title_options(context)
+        )
+        youtube_evidence = self._youtube_packaging_evidence(context)
+        context["youtube_evidence"] = youtube_evidence
+        platform_profiles = {
+            platform: self._platform_performance_profile(platform, context)
+            for platform in ("youtube", "tiktok", "instagram", "twitch")
+        }
+        context["platform_profiles"] = platform_profiles
+        titles, ranking = self._rank_titles_for_creator(
+            titles, clip_id, youtube_evidence, include_scores=True
+        )
+        context["title_ranking"] = ranking
+        title = titles[0]
+        caption, style = self._social_caption(context)
+        hook = self._hook_line(context)
+        hashtags = self._contextual_hashtags(context)
+        reasoning = self._packaging_reasoning(text, analysis, context)
+        youtube_description = self._youtube_description(context, caption, hook, hashtags, youtube_evidence)
+        tiktok_caption = self._platform_caption("tiktok", context, caption, hook, platform_profiles["tiktok"])
+        instagram_caption = self._platform_caption("instagram", context, caption, hook, platform_profiles["instagram"])
+        twitch_titles = self._rank_for_platform(titles, platform_profiles["twitch"])
+        replay = min(100.0, analysis["surprise_score"] * 0.45 + analysis["quote_score"] * 0.35 + 15)
+        share = min(100.0, analysis["humor_score"] * 0.30 + analysis["emotion_score"] * 0.25 + analysis["viral_score"] * 0.45)
+        retention = min(95.0, 38 + analysis["hook_score"] * 0.32 + analysis["quote_score"] * 0.18)
+        title_score = min(100.0, analysis["hook_score"] * 0.45 + analysis["viral_score"] * 0.55 + 6)
+        performance = "High" if analysis["viral_score"] >= 70 else "Moderate" if analysis["viral_score"] >= 45 else "Experimental"
+        topic = context["topic"]
+        audience = f"{topic} viewers" if topic != "Gaming" else "Gaming and livestream viewers"
+        packages = {
+            "youtube_shorts": {"title": title, "title_alternatives": titles[:4],
+                               "description": youtube_description, "hook": hook,
+                               "hashtags": hashtags[:5], "historical_evidence": youtube_evidence["examples"],
+                               "profile_confidence": platform_profiles["youtube"]["confidence"]},
+            "tiktok": {"caption": tiktok_caption, "hook": hook, "hashtags": hashtags[:6],
+                       "historical_evidence": platform_profiles["tiktok"]["examples"],
+                       "profile_confidence": platform_profiles["tiktok"]["confidence"]},
+            "instagram_reels": {"caption": instagram_caption, "hook": hook, "hashtags": hashtags[:8],
+                                "historical_evidence": platform_profiles["instagram"]["examples"],
+                                "profile_confidence": platform_profiles["instagram"]["confidence"]},
+            "twitch": {"title": twitch_titles[0], "title_alternatives": twitch_titles[:3], "hook": hook,
+                       "historical_evidence": platform_profiles["twitch"]["examples"],
+                       "profile_confidence": platform_profiles["twitch"]["confidence"]},
+        }
+        from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+        package_ids = PublishingOutcomeService(self.db).snapshot_packages(
+            clip_id, packages, context, performance, round(analysis["viral_score"], 1)
+        )
+        for platform, package_id in package_ids.items():
+            packages[platform]["package_id"] = package_id
+        from creator_intelligence.services.packaging_experiments import PackagingExperimentService
+        experiments = PackagingExperimentService(self.db)
+        for platform, package_id in package_ids.items():
+            packages[platform]["experiment_id"] = experiments.ensure_for_package(
+                package_id, packages[platform], packages[platform].get("title_alternatives")
+            )
+        return {
+            "suggested_title": title,
+            "title_alternatives": titles[:5],
+            "title_score": round(title_score, 1),
+            "suggested_caption": caption,
+            "caption_style": style,
+            "hook_line": hook,
+            "suggested_hashtags": hashtags,
+            "packaging_reasoning": reasoning,
+            "likely_audience": audience,
+            "replayability_score": round(replay, 1),
+            "shareability_score": round(share, 1),
+            "retention_estimate": round(retention, 1),
+            "performance_prediction": performance,
+            "platform_packages": packages,
+            "clip_type": context["clip_type"],
+            "packaging_context": context,
+            "packaging_status": "ready_for_review",
+        }
+
+    def _rank_titles_for_creator(self, candidates: list[str], clip_id: int,
+                                 youtube_evidence: dict[str, Any] | None = None,
+                                 *, include_scores: bool = False):
+        profile = self.title_style_profile()
+        history = self.published_titles()
+        old_titles = [str(value) for value in history.get("title", [])]
+        package_history = self.db.frame(
+            "SELECT title FROM creator_package_history WHERE clip_candidate_id<>?", (int(clip_id),)
+        )
+        old_titles += [str(value) for value in package_history.get("title", [])]
+        preferred, avoided = set(profile["preferred_words"]), set(profile["avoided_words"])
+        target_words = float(profile["average_words"] or 8)
+        scored = []
+        unique_candidates = list(dict.fromkeys(
+            " ".join(str(candidate).split()).strip()
+            for candidate in candidates if str(candidate).strip()
+        ))
+        for index, candidate in enumerate(unique_candidates):
+            tokens = set(re.findall(r"[a-z0-9']+", candidate.lower()))
+            style = 0.0
+            if profile["example_count"]:
+                style = 20 - abs(len(candidate.split()) - target_words) * 2
+                style += len(tokens & preferred) * 3 - len(tokens & avoided) * 6
+                style += 8 if candidate.endswith("?") == (profile["question_rate"] >= .5) else 0
+                first_person = bool(re.search(r"\b(i|we|my|our)\b", candidate, re.I))
+                style += 6 if first_person == (profile["first_person_rate"] >= .5) else 0
+            youtube = youtube_evidence or {}
+            if youtube.get("count"):
+                style += len(tokens & set(youtube["preferred_words"])) * 4
+                style -= abs(len(candidate.split()) - youtube["average_words"]) * 1.5
+                style += 5 if candidate.endswith("?") == (youtube["question_rate"] >= .5) else 0
+            closest = max(old_titles, key=lambda old: self._similarity(candidate, old), default="")
+            similarity = self._similarity(candidate, closest) if closest else 0.0
+            duplicate_penalty = 100 if similarity >= .92 else 45 * max(0.0, similarity - .62)
+            score = style - duplicate_penalty - index * .01
+            scored.append({
+                "title": candidate,
+                "score": round(score, 2),
+                "style_score": round(style, 2),
+                "duplicate_similarity": round(similarity, 3),
+                "duplicate_of": closest or None,
+                "duplicate_risk": "duplicate" if similarity >= .92 else "near" if similarity >= .78 else "low",
+            })
+        ranked = sorted(
+            scored,
+            key=lambda item: (item["duplicate_risk"] == "duplicate", -item["score"]),
+        )
+        titles = [item["title"] for item in ranked if item["duplicate_risk"] != "duplicate"]
+        if not titles and ranked:
+            titles = [ranked[0]["title"]]
+        return (titles, ranked) if include_scores else titles
+
+    def _youtube_packaging_evidence(self, context: dict[str, Any]) -> dict[str, Any]:
+        tables = self.db.frame("SELECT name FROM sqlite_master WHERE type='table' AND name='youtube_content'")
+        if tables.empty:
+            return {"count": 0, "average_words": 0, "question_rate": 0,
+                    "preferred_words": [], "examples": [], "description_style": {}}
+        columns = {str(row["name"]) for _, row in self.db.frame("PRAGMA table_info(youtube_content)").iterrows()}
+        wanted = [name for name in ("content_id", "title", "description", "publish_time", "duration_seconds", "views",
+                                    "ctr", "avg_percentage_viewed", "likes", "comments", "shares") if name in columns]
+        frame = self.db.frame(f"SELECT {','.join(wanted)} FROM youtube_content")
+        if frame.empty or "title" not in frame:
+            return {"count": 0, "average_words": 0, "question_rate": 0,
+                    "preferred_words": [], "examples": [], "description_style": {}}
+        if "duration_seconds" in frame:
+            duration = pd.to_numeric(frame["duration_seconds"], errors="coerce").fillna(9999)
+            frame = frame[duration <= 180].copy()
+        metadata_table = self.db.frame(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='content_metadata'"
+        )
+        if not metadata_table.empty and context.get("topic") != "Gaming" and "content_id" in frame:
+            metadata = self.db.frame(
+                "SELECT content_id,game_topic FROM content_metadata WHERE platform='YouTube'"
+            )
+            if not metadata.empty:
+                frame = frame.merge(metadata, on="content_id", how="left")
+                relevant = frame["game_topic"].fillna("").str.lower() == str(context["topic"]).lower()
+                if relevant.any():
+                    frame = frame[relevant].copy()
+        if frame.empty:
+            return {"count": 0, "average_words": 0, "question_rate": 0,
+                    "preferred_words": [], "examples": [], "description_style": {}}
+        score = pd.Series(0.0, index=frame.index)
+        cohorts = None
+        if "publish_time" in frame:
+            published = pd.to_datetime(frame["publish_time"], errors="coerce")
+            cohorts = published.dt.to_period("Q").astype(str)
+        for name, multiplier in (("views", 3.0), ("ctr", 2.0), ("avg_percentage_viewed", 2.5),
+                                 ("likes", 1.0), ("comments", 1.0), ("shares", 1.5)):
+            if name in frame:
+                values = pd.to_numeric(frame[name], errors="coerce").fillna(0)
+                if cohorts is not None and cohorts.notna().any():
+                    normalized = values.groupby(cohorts).rank(pct=True)
+                else:
+                    spread = float(values.max() - values.min())
+                    normalized = (values - values.min()) / spread if spread else pd.Series(0.5, index=values.index)
+                score += normalized.fillna(.5) * multiplier
+        frame["evidence_score"] = score
+        frame = frame.sort_values("evidence_score", ascending=False)
+        weights = frame["evidence_score"].clip(lower=.25)
+        token_scores: dict[str, float] = {}
+        for (_, row), weight in zip(frame.iterrows(), weights):
+            for token in set(re.findall(r"[a-z0-9']+", str(row["title"]).lower())):
+                token_scores[token] = token_scores.get(token, 0) + float(weight)
+        descriptions = [str(value) for value in frame.get("description", []) if str(value).strip() and str(value) != "nan"]
+        examples = [{"content_id": row.get("content_id"), "title": row.get("title"),
+                     "score": round(float(row["evidence_score"]), 2),
+                     "views": int(cls_value) if pd.notna(cls_value := row.get("views")) else 0}
+                    for _, row in frame.head(3).iterrows()]
+        return {"count": len(frame),
+                "average_words": round(sum(len(str(title).split()) for title in frame["title"]) / len(frame), 1),
+                "question_rate": sum(str(title).rstrip().endswith("?") for title in frame["title"]) / len(frame),
+                "preferred_words": [token for token, _ in sorted(token_scores.items(), key=lambda item: -item[1])[:15]],
+                "examples": examples,
+                "description_style": {"count": len(descriptions),
+                                      "average_length": round(sum(map(len, descriptions)) / len(descriptions), 1) if descriptions else 0,
+                                      "cta_rate": sum(bool(re.search(r"\b(subscribe|follow|comment|watch)\b", d, re.I)) for d in descriptions) / len(descriptions) if descriptions else 0}}
+
+    def _platform_performance_profile(self, platform: str, context: dict[str, Any]) -> dict[str, Any]:
+        columns = {str(row["name"]) for _, row in self.db.frame(
+            "PRAGMA table_info(creator_published_titles)"
+        ).iterrows()}
+        wanted = [name for name in ("title", "description", "content_type", "game", "published_at",
+                                    "views", "likes", "comments", "shares", "watch_time", "source_video_id")
+                  if name in columns]
+        frame = self.db.frame(
+            f"SELECT {','.join(wanted)} FROM creator_published_titles WHERE platform=? AND example_type='published'",
+            (platform,),
+        )
+        if frame.empty:
+            return self._empty_platform_profile(platform)
+        short_types = {"clip", "short", "reel", "reels", "video"}
+        if "content_type" in frame:
+            shorts = frame[frame["content_type"].fillna("").str.lower().isin(short_types)]
+            if not shorts.empty:
+                frame = shorts.copy()
+        if context.get("topic") != "Gaming" and "game" in frame:
+            relevant = frame["game"].fillna("").str.lower() == str(context["topic"]).lower()
+            if relevant.any():
+                frame = frame[relevant].copy()
+        score = pd.Series(0.0, index=frame.index)
+        cohorts = pd.to_datetime(frame.get("published_at"), errors="coerce", utc=True).dt.tz_localize(None).dt.to_period("Q").astype(str) \
+            if "published_at" in frame else None
+        for name, multiplier in (("views", 3.0), ("likes", 1.0), ("comments", 1.2),
+                                 ("shares", 2.0), ("watch_time", 2.5)):
+            if name not in frame:
+                continue
+            values = pd.to_numeric(frame[name], errors="coerce").fillna(0)
+            normalized = values.groupby(cohorts).rank(pct=True) if cohorts is not None else values.rank(pct=True)
+            score += normalized.fillna(.5) * multiplier
+        frame["evidence_score"] = score
+        frame = frame.sort_values("evidence_score", ascending=False)
+        texts = [str(value) for value in frame["title"] if str(value).strip()]
+        weights = frame["evidence_score"].clip(lower=.25)
+        token_scores: dict[str, float] = {}
+        for (_, row), weight in zip(frame.iterrows(), weights):
+            for token in set(re.findall(r"[a-z0-9']+", str(row["title"]).lower())):
+                token_scores[token] = token_scores.get(token, 0.0) + float(weight)
+        from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+        for token, weight in PublishingOutcomeService(self.db).learning_adjustments(platform).items():
+            token_scores[token] = token_scores.get(token, 0.0) + weight
+        count = len(frame)
+        confidence = "High" if count >= 20 else "Medium" if count >= 8 else "Low" if count >= 3 else "Insufficient"
+        examples = [{"source_video_id": row.get("source_video_id"), "title": row.get("title"),
+                     "score": round(float(row["evidence_score"]), 2),
+                     "views": int(value) if pd.notna(value := row.get("views")) else 0}
+                    for _, row in frame.head(3).iterrows()]
+        return {"platform": platform, "count": count, "confidence": confidence,
+                "average_characters": round(sum(map(len, texts)) / len(texts), 1) if texts else 0,
+                "average_words": round(sum(len(text.split()) for text in texts) / len(texts), 1) if texts else 0,
+                "question_rate": sum(text.rstrip().endswith("?") for text in texts) / len(texts) if texts else 0,
+                "cta_rate": sum(bool(re.search(r"\b(follow|subscribe|comment|tell me|what would)\b", text, re.I)) for text in texts) / len(texts) if texts else 0,
+                "preferred_words": [token for token, _ in sorted(token_scores.items(), key=lambda item: -item[1])[:12]],
+                "examples": examples}
+
+    @staticmethod
+    def _empty_platform_profile(platform: str) -> dict[str, Any]:
+        return {"platform": platform, "count": 0, "confidence": "Insufficient",
+                "average_characters": 0, "average_words": 0, "question_rate": 0,
+                "cta_rate": 0, "preferred_words": [], "examples": []}
+
+    @staticmethod
+    def _platform_caption(platform, context, base_caption, hook, profile):
+        if profile.get("confidence") == "Insufficient":
+            return base_caption
+        if platform == "tiktok":
+            caption = f"{hook} {base_caption}"
+            if profile.get("question_rate", 0) >= .4 and "?" not in caption:
+                caption += " What would you do?"
+        else:
+            caption = f"{hook}\n\n{base_caption}"
+        target = int(profile.get("average_characters") or len(caption))
+        caption = caption[:max(80, min(500, target + 80))].strip()
+        if platform == "instagram" and profile.get("cta_rate", 0) >= .35:
+            caption += "\n\nFollow for more moments like this."
+        return caption
+
+    @staticmethod
+    def _rank_for_platform(candidates, profile):
+        if profile.get("confidence") == "Insufficient":
+            return list(candidates)
+        preferred = set(profile.get("preferred_words", []))
+        target = float(profile.get("average_words") or 8)
+        return sorted(candidates, key=lambda title: (
+            len(set(re.findall(r"[a-z0-9']+", title.lower())) & preferred) * 4
+            - abs(len(title.split()) - target) * 1.5
+            + (5 if title.endswith("?") == (profile.get("question_rate", 0) >= .5) else 0)
+        ), reverse=True)
+
+    @staticmethod
+    def _youtube_description(context, caption, hook, hashtags, evidence):
+        lines = [hook, "", caption]
+        if evidence.get("description_style", {}).get("cta_rate", 0) >= .35:
+            lines.extend(["", "Subscribe for more moments like this."])
+        lines.extend(["", " ".join(hashtags[:5])])
+        return "\n".join(lines).strip()
+
+    @classmethod
+    def _extract_context(cls, text: str, metadata: str, analysis: dict[str, Any],
+                         *, focus_text: str | None = None,
+                         context_segment_count: int = 1) -> dict[str, Any]:
+        clean = re.sub(r"\s+", " ", text).strip()
+        lowered = clean.lower()
+        topic = cls._topic_label(f"{metadata} {clean}".lower())
+        subject = cls._subject(lowered)
+        action = cls._action(lowered)
+        clip_type, emotion = cls._clip_type(lowered, analysis, action)
+        quote = cls._strongest_quote(focus_text or clean)
+        outcome = cls._outcome(lowered, subject, clip_type)
+        subject_occurrences = len(re.findall(rf"\b{re.escape(subject)}s?\b", lowered))
+        subject_confidence = min(0.95, 0.42 + subject_occurrences * 0.16)
+        if subject == "moment":
+            subject_confidence = 0.2
+        known_subjects = {
+            "colonist", "sheep", "coffee", "tunnel", "colony", "raid", "boss",
+            "wolf", "zombie", "pokemon", "pokÃ©mon", "village", "base", "cave",
+            "dragon", "enemy", "chat",
+        }
+        subject_source = (
+            "recognized_entity" if subject in known_subjects
+            else "repeated_term" if subject_occurrences >= 2
+            else "inferred_term"
+        )
+        if subject_source == "inferred_term":
+            subject_confidence = min(subject_confidence, 0.50)
+        action_confidence = 0.82 if action != "react" else 0.42
+        outcome_confidence = 0.78 if clip_type not in {"REACTION", "SURPRISE"} else 0.52
+        quote_words = re.findall(r"[a-z0-9']+", quote.lower())
+        filler = {
+            "yeah", "okay", "ok", "um", "uh", "like", "well", "so", "just",
+            "you", "know", "this", "that", "it", "they", "them", "there",
+        }
+        meaningful_quote_words = [word for word in quote_words if word not in filler]
+        quote_confidence = min(
+            0.95,
+            0.20 + min(len(quote_words), 10) * 0.055
+            + min(len(meaningful_quote_words), 6) * 0.06
+            + (0.12 if quote.rstrip().endswith("?") else 0.0),
+        )
+        event_confidence = round(
+            subject_confidence * 0.45 + action_confidence * 0.30
+            + outcome_confidence * 0.25, 2
+        )
+        validation = {
+            "subject": subject != "moment" and subject_confidence >= 0.58,
+            "action": action != "react" and action_confidence >= 0.60,
+            "outcome": clip_type not in {"REACTION", "SURPRISE"} and outcome_confidence >= 0.60,
+            "quote": len(meaningful_quote_words) >= 2 and quote_confidence >= 0.60,
+        }
+        event_valid = all(validation[key] for key in ("subject", "action", "outcome"))
+        if event_valid and event_confidence >= 0.60:
+            fallback_mode = "event"
+        elif validation["quote"]:
+            fallback_mode = "quote"
+            outcome = "event details were not reliable enough to claim"
+        else:
+            fallback_mode = "insufficient_context"
+            outcome = "Insufficient context"
+            clip_type, emotion = "INSUFFICIENT_CONTEXT", "unknown"
+        validation_issues = [key for key, valid in validation.items() if not valid]
+        return {
+            "subject": subject,
+            "subject_source": subject_source,
+            "action": action,
+            "outcome": outcome,
+            "quote": quote,
+            "emotion": emotion,
+            "clip_type": clip_type,
+            "topic": topic,
+            "confidence": {
+                "subject": round(subject_confidence, 2),
+                "action": round(action_confidence, 2),
+                "outcome": round(outcome_confidence, 2),
+                "event": event_confidence,
+                "quote": round(quote_confidence, 2),
+            },
+            "validation": validation,
+            "validation_issues": validation_issues,
+            "fallback_mode": fallback_mode,
+            "context_segment_count": int(context_segment_count),
+        }
+
+    @staticmethod
+    def _topic_label(lowered: str) -> str:
+        for tokens, label in (
+            (("minecraft", "pixelmon", "cobblemon"), "Minecraft"),
+            (("tarkov", "escape from tarkov"), "Escape from Tarkov"),
+            (("rimworld", "rim world"), "RimWorld"),
+            (("pokemon", "pokémon"), "Pokémon"),
+            (("zomboid", "project zomboid"), "Project Zomboid"),
+        ):
+            if any(token in lowered for token in tokens):
+                return label
+        return "Gaming"
+
+    @staticmethod
+    def _subject(lowered: str) -> str:
+        preferred = (
+            "colonist", "colonists", "sheep", "coffee", "tunnel", "colony", "raid", "boss", "wolf", "zombie",
+            "pokemon", "pokémon", "village", "base", "cave", "dragon", "enemy", "chat",
+        )
+        for token in preferred:
+            if token in lowered:
+                return "colonist" if token == "colonists" else token
+        words = re.findall(r"[a-z][a-z'-]+", lowered)
+        stop = {
+            "this", "that", "there", "what", "with", "from", "have", "just",
+            "they", "them", "your", "about", "which", "would", "could", "finally",
+            "thing", "things", "stuff", "something", "someone", "person", "people",
+            "item", "piece", "part", "place", "time", "way", "pants",
+        }
+        useful = [word for word in words if len(word) > 3 and word not in stop]
+        return useful[0] if useful else "moment"
+
+    @staticmethod
+    def _action(lowered: str) -> str:
+        for tokens, label in (
+            (("destroy", "killed", "kill"), "destroy"),
+            (("found", "find", "discover", "secret"), "discover"),
+            (("died", "death", "failed", "lost"), "fail"),
+            (("won", "win", "saved", "survived"), "win"),
+            (("attack", "fight", "shot", "shoot"), "fight"),
+            (("built", "build"), "build"),
+            (("caught", "catch"), "catch"),
+            (("debate", "debating", "discuss", "wear", "wearing"), "discuss"),
+        ):
+            if any(token in lowered for token in tokens):
+                return label
+        return "react"
+
+    @staticmethod
+    def _clip_type(lowered: str, analysis: dict[str, Any], action: str) -> tuple[str, str]:
+        if any(token in lowered for token in ("hallucination", "confused", "what did i", "brain")):
+            return "CONFUSION", "confusion"
+        if action == "fail":
+            return "FAIL", "frustration"
+        if action == "win":
+            return "VICTORY", "excitement"
+        if action == "discover":
+            return "DISCOVERY", "surprise"
+        if action == "discuss":
+            return "DISCUSSION", "curiosity"
+        if action in {"destroy", "fight"}:
+            return "CHAOS", "anticipation"
+        if "accident" in lowered or "mistake" in lowered:
+            return "ACCIDENT", "surprise"
+        if analysis.get("humor_score", 0) >= 45:
+            return "FUNNY_QUOTE", "humor"
+        if analysis.get("surprise_score", 0) >= analysis.get("emotion_score", 0):
+            return "SURPRISE", "surprise"
+        return "REACTION", "reaction"
+
+    @staticmethod
+    def _strongest_quote(text: str) -> str:
+        sentences = [part.strip() for part in re.findall(r"[^.!?]+[.!?]?", text) if part.strip()]
+        if not sentences:
+            return text[:100]
+        return max(
+            sentences,
+            key=lambda sentence: (
+                any(token in sentence.lower() for token in ("finally", "never", "secret", "destroy", "insane", "no way")),
+                5 <= len(sentence.split()) <= 16,
+                len(sentence),
+            ),
+        )[:120]
+
+    @classmethod
+    def _quote_title_options(cls, context: dict[str, Any]) -> list[str]:
+        quote = re.sub(r"\s+", " ", str(context.get("quote") or "")).strip(" .")
+        if not quote:
+            quote = "What Just Happened?"
+        standalone = quote[:80]
+        if standalone[-1:] not in "?!":
+            standalone += "?" if standalone.lower().startswith(("can ", "could ", "do ", "did ", "is ", "are ", "what ", "why ", "how ")) else ""
+        return [
+            standalone,
+            "That Question Derailed the Whole Conversation",
+            "We Somehow Ended Up Here",
+            "This Conversation Took a Very Strange Turn",
+            "Chat Was Not Ready for That Question",
+        ]
+
+    @staticmethod
+    def _outcome(lowered: str, subject: str, clip_type: str) -> str:
+        if "finally" in lowered:
+            return f"the {subject} problem finally reached its payoff"
+        return {
+            "FAIL": "the plan fell apart",
+            "VICTORY": "the run finally paid off",
+            "DISCOVERY": f"the hidden {subject} changed the run",
+            "CONFUSION": "the conversation stopped making sense",
+            "CHAOS": f"the {subject} became the target",
+            "ACCIDENT": "an unintended choice created the payoff",
+            "FUNNY_QUOTE": "the dialogue delivered the punchline",
+            "DISCUSSION": f"the conversation clarified what the {subject} could do",
+            "SURPRISE": "the outcome was unexpected",
+            "REACTION": "the reaction became the payoff",
+        }.get(clip_type, "the moment produced a payoff")
+
+    @classmethod
+    def _title_options(cls, context: dict[str, Any]) -> list[str]:
+        subject = cls._title_case_subject(context["subject"])
+        topic = context["topic"]
+        clip_type = context["clip_type"]
+        action = context["action"]
+        if clip_type == "CHAOS" and context["subject"] == "sheep":
+            return [
+                "The Sheep Never Saw This Coming",
+                "We Finally Declared War on the Sheep",
+                "Our Colony Finally Snapped",
+                "The Sheep Problem Is Officially Over",
+                "This RimWorld Problem Required Violence",
+            ]
+        templates = {
+            "CONFUSION": [
+                f"{subject} Completely Broke My Brain",
+                f"I Have No Explanation for the {subject} Situation",
+                f"This {subject} Conversation Went Off the Rails",
+                f"What Did I Just Say About {subject}?",
+                f"The {subject} Moment That Made No Sense",
+            ],
+            "DISCOVERY": [
+                f"I Was Not Supposed to Find This {subject}",
+                f"The Hidden {subject} I Almost Missed",
+                f"Finding This {subject} Changed the Entire Run",
+                f"I Finally Found the {subject}",
+                f"Nobody Warned Me About This {subject}",
+            ],
+            "FAIL": [
+                f"The {subject} Plan Failed Immediately",
+                f"This {subject} Mistake Cost Me Everything",
+                f"I Knew the {subject} Plan Was a Bad Idea",
+                f"Everything Fell Apart Because of {subject}",
+                f"The Most Avoidable {subject} Fail",
+            ],
+            "VICTORY": [
+                f"We Finally Beat the {subject}",
+                f"The {subject} Victory We Actually Earned",
+                f"This Changed the Entire {topic} Run",
+                "I Cannot Believe We Pulled This Off",
+                "The Exact Moment the Run Turned Around",
+            ],
+            "FUNNY_QUOTE": [
+                f"The Funniest Thing Said About {subject}",
+                f"Chat Lost It Over the {subject}",
+                f"This {subject} Joke Got Better Every Second",
+                f"The Timing on This {subject} Moment Was Perfect",
+                "I Could Not Stop Laughing at This",
+            ],
+            "DISCUSSION": [
+                f"Can the {subject} Actually Do That?",
+                f"We Somehow Started Debating the {subject}",
+                f"This {subject} Question Took Over the Conversation",
+                f"Nobody Had an Answer About the {subject}",
+                f"The {subject} Debate Got Surprisingly Complicated",
+            ],
+            "SURPRISE": [
+                f"The {subject} Caught Everyone Off Guard",
+                f"This {subject} Moment Escalated Instantly",
+                f"Nobody Expected the {subject} to Do This",
+                f"The Stream Took a Wild Turn Because of {subject}",
+                f"That Was the Last Thing I Expected from {subject}",
+            ],
+            "REACTION": [
+                f"My Reaction to the {subject} Says Everything",
+                f"The {subject} Left Me Speechless",
+                f"This {subject} Moment Caught Me Off Guard",
+                f"The Exact Moment I Understood the {subject}",
+                f"I Still Cannot Believe the {subject} Did This",
+            ],
+            "CHAOS": [
+                f"We Finally Chose Violence Against the {subject}",
+                f"The {subject} Became Public Enemy Number One",
+                f"This {subject} Problem Got Completely Out of Control",
+                f"Our Only Solution Was to {action.title()} the {subject}",
+                f"The {subject} Had No Idea What Was Coming",
+            ],
+            "ACCIDENT": [
+                f"The {subject} Accident That Changed Everything",
+                f"I Did Not Mean to Do This to the {subject}",
+                f"One Mistake Created Total {subject} Chaos",
+                "This Was Definitely Not the Plan",
+                f"The Accidental {subject} Moment I Cannot Explain",
+            ],
+        }
+        return templates.get(clip_type, templates["REACTION"])
+
+    def _deduplicate_titles(self, candidates: list[str], clip_id: int) -> list[str]:
+        history = self.db.frame(
+            "SELECT title FROM creator_package_history WHERE clip_candidate_id<>?",
+            (int(clip_id),),
+        )
+        existing = [str(value) for value in history.get("title", [])]
+        accepted: list[str] = []
+        for candidate in candidates:
+            if all(self._similarity(candidate, old) < 0.85 for old in existing + accepted):
+                accepted.append(candidate)
+        for candidate in candidates:
+            if candidate not in accepted:
+                accepted.append(candidate)
+        return accepted
+
+    @staticmethod
+    def _similarity(left: str, right: str) -> float:
+        return SequenceMatcher(None, left.lower().strip(), right.lower().strip()).ratio()
+
+    @classmethod
+    def _social_caption(cls, context: dict[str, Any]) -> tuple[str, str]:
+        subject = context["subject"]
+        clip_type = context["clip_type"]
+        captions = {
+            "CHAOS": f"The {subject} situation finally reached its breaking point 😂 Did we go too far?",
+            "CONFUSION": f"I still have no idea what was happening with the {subject} here 😂 What did you hear?",
+            "DISCOVERY": f"I almost walked right past this {subject}. Would you have noticed it?",
+            "FAIL": f"The {subject} plan failed exactly how you would expect. Would you have tried it anyway?",
+            "VICTORY": f"We finally pulled off the {subject} win. Was the payoff worth it?",
+            "FUNNY_QUOTE": f"The {subject} timing absolutely destroyed me 😂 Who else would have lost it?",
+            "DISCUSSION": f"We somehow turned the {subject} into a full debate. What do you think?",
+            "SURPRISE": f"The {subject} escalated much faster than expected. Did you see that coming?",
+            "ACCIDENT": f"The {subject} accident was definitely not part of the plan. What would you have done?",
+            "REACTION": f"My reaction to the {subject} says everything. How would you have reacted?",
+        }
+        return captions.get(clip_type, captions["REACTION"]), "clip-specific-engagement"
+
+    @classmethod
+    def _hook_line(cls, context: dict[str, Any]) -> str:
+        subject = context["subject"]
+        return {
+            "CHAOS": f"The {subject} had absolutely no idea what we were planning.",
+            "CONFUSION": f"The {subject} made this conversation stop making sense.",
+            "DISCOVERY": f"I nearly missed the most important {subject} in the run.",
+            "FAIL": f"The {subject} plan gets worse every second.",
+            "VICTORY": f"This was the moment the {subject} run finally paid off.",
+            "FUNNY_QUOTE": f"One line about the {subject} broke the entire stream.",
+            "DISCUSSION": f"One question about the {subject} took over the whole conversation.",
+            "SURPRISE": f"Nobody expected the {subject} to become the problem.",
+            "ACCIDENT": f"One accidental {subject} decision changed everything.",
+            "REACTION": f"Watch the exact moment I realize what the {subject} means.",
+        }.get(context["clip_type"], f"The {subject} changed everything.")
+
+    @staticmethod
+    def _contextual_hashtags(context: dict[str, Any]) -> list[str]:
+        topic_tags = {
+            "Minecraft": ["#Minecraft", "#MinecraftShorts", "#MinecraftFunny"],
+            "Escape from Tarkov": ["#EscapeFromTarkov", "#Tarkov", "#TarkovMoments"],
+            "RimWorld": ["#RimWorld", "#RimWorldStories", "#ColonySim"],
+            "Pokémon": ["#Pokemon", "#PokemonGaming", "#PokemonMoments"],
+            "Project Zomboid": ["#ProjectZomboid", "#ZombieSurvival", "#ZomboidMoments"],
+        }
+        type_tags = {
+            "CHAOS": "#GamingChaos", "CONFUSION": "#FunnyMoments",
+            "DISCOVERY": "#HiddenDetails", "FAIL": "#GamingFails",
+            "VICTORY": "#GamingWins", "FUNNY_QUOTE": "#GamingComedy",
+            "DISCUSSION": "#GamingDiscussion",
+            "SURPRISE": "#Unexpected", "ACCIDENT": "#GamingMistakes",
+            "REACTION": "#StreamerReaction",
+        }
+        tags = topic_tags.get(context["topic"], ["#Gaming", "#GamingClips"])
+        tags += [type_tags.get(context["clip_type"], "#StreamerMoments"), "#TwitchClips", "#GamingShorts"]
+        return list(dict.fromkeys(tags))[:8]
+
+    @staticmethod
+    def _packaging_reasoning(text: str, analysis: dict[str, Any], context: dict[str, Any]) -> list[str]:
+        reasons = [
+            f"Detected a {context['clip_type'].lower().replace('_', ' ')} moment centered on {context['subject']}.",
+            f"The key action is '{context['action']}' and {context['outcome']}.",
+        ]
+        confidence = context.get("confidence", {})
+        reasons.append(
+            f"Event confidence is {float(confidence.get('event', 0)):.0%} using "
+            f"{context.get('context_segment_count', 1)} surrounding transcript segment(s)."
+        )
+        if context.get("fallback_mode") == "quote":
+            reasons.append("Event confidence was below 60%, so titles use the strongest standalone quote.")
+        elif context.get("fallback_mode") == "insufficient_context":
+            issues = ", ".join(context.get("validation_issues") or ["event and quote"])
+            reasons.append(
+                f"Insufficient context: {issues} validation failed, so no package was invented."
+            )
+        evidence = context.get("youtube_evidence") or {}
+        if evidence.get("count"):
+            names = "; ".join(str(item["title"]) for item in evidence.get("examples", []))
+            reasons.append(
+                f"YouTube ranking used {evidence['count']} comparable Short(s), weighted by performance. "
+                f"Top historical evidence: {names}."
+            )
+        for platform, profile in (context.get("platform_profiles") or {}).items():
+            if profile.get("count"):
+                reasons.append(
+                    f"{platform.title()} profile confidence is {profile['confidence']} from "
+                    f"{profile['count']} performance-weighted post(s)."
+                )
+        if context["quote"]:
+            reasons.append(f"The strongest standalone quote is: “{context['quote']}”.")
+        if analysis["hook_score"] >= 50:
+            reasons.append("The opening creates enough curiosity to stop a scroll.")
+        if len(text.split()) <= 70:
+            reasons.append("The moment is compact enough for short-form pacing.")
+        reasons.append("The caption references the actual event and asks a direct question.")
+        return reasons
+
+    @staticmethod
+    def _title_case_subject(subject: str) -> str:
+        special = {"pokemon": "Pokémon", "pokémon": "Pokémon"}
+        return special.get(subject, subject.title())

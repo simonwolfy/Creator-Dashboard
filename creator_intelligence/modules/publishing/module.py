@@ -1,16 +1,22 @@
-from creator_intelligence.core.contracts import ModuleMetadata,ServiceBinding,NavigationItem
+from creator_intelligence.core.contracts import ModuleMetadata, NavigationItem, ServiceBinding
+from creator_intelligence.services.packaging import PackagingReviewService
 from creator_intelligence.services.publishing_planner import PublishingPlannerService
+
 
 def _page(registry):
     from creator_intelligence.ui.pages.publishing import PublishingPage
     return PublishingPage(registry.resolve("publishing"))
+
+def _review_page(registry):
+    from creator_intelligence.ui.pages.packaging_review import PackagingReviewPage
+    return PackagingReviewPage(registry.resolve("packaging_review"))
 
 class PublishingModule:
     metadata=ModuleMetadata(
         module_id="publishing",name="Publishing Planner",
         version="1.0.0",category="content",
         description="Publishing calendar, recurring slots, deadlines, readiness, and timing recommendations.",
-        dependencies=("storage","content","production")
+        dependencies=("storage","content","production","transcripts")
     )
     def register(self,registry):
         registry.register_service(ServiceBinding(
@@ -21,8 +27,18 @@ class PublishingModule:
             ),
             module_id=self.metadata.module_id
         ))
+        registry.register_service(ServiceBinding(
+            "packaging_review",
+            lambda ctx: PackagingReviewService(
+                ctx.db,registry.resolve("publishing"),registry.resolve("transcripts")
+            ),module_id=self.metadata.module_id
+        ))
         registry.register_navigation(NavigationItem(
             "Publishing",lambda:_page(registry),order=11,
+            module_id=self.metadata.module_id
+        ))
+        registry.register_navigation(NavigationItem(
+            "Packaging Review",lambda:_review_page(registry),order=12,
             module_id=self.metadata.module_id
         ))
 def create_module():

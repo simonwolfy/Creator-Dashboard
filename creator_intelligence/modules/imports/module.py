@@ -2,26 +2,36 @@ from creator_intelligence.core.contracts import (
     ModuleMetadata,ServiceBinding,ImporterBinding,NavigationItem
 )
 from creator_intelligence.services.import_center import ImportCenterService
+from creator_intelligence.services.import_schema_compat import upgrade_legacy_import_jobs
 from creator_intelligence.services.notifications import NotificationService
 from creator_intelligence.services.background_watcher import BackgroundWatcherService
+
 
 def _import_page(registry):
     from creator_intelligence.ui.pages.import_center import ImportCenterPage
     return ImportCenterPage(registry.resolve("import_center"))
 
+
 def _watcher_page(registry):
     from creator_intelligence.ui.pages.watcher import WatcherPage
     return WatcherPage(registry.resolve("background_watcher"))
+
 
 def _notifications_page(registry):
     from creator_intelligence.ui.pages.notifications import NotificationsPage
     return NotificationsPage(registry.resolve("notifications"))
 
+
+def _create_import_center(ctx, registry):
+    upgrade_legacy_import_jobs(ctx.db)
+    return ImportCenterService(ctx.db, registry)
+
+
 class ImportsModule:
     metadata=ModuleMetadata(
         module_id="imports",
         name="Import Automation and Notifications",
-        version="3.0.0",
+        version="3.0.1",
         category="imports",
         description="Staging, watched folders, background scans, operational alerts, and notification history.",
         dependencies=("storage",),
@@ -35,7 +45,7 @@ class ImportsModule:
         ))
         registry.register_service(ServiceBinding(
             "import_center",
-            lambda ctx:ImportCenterService(ctx.db,registry),
+            lambda ctx:_create_import_center(ctx,registry),
             module_id=self.metadata.module_id
         ))
         registry.register_service(ServiceBinding(
@@ -83,6 +93,7 @@ class ImportsModule:
             "application_closing",
             lambda ctx: registry.resolve("background_watcher").stop()
         )
+
 
 def create_module():
     return ImportsModule()

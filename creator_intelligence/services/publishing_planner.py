@@ -12,6 +12,40 @@ class PublishingPlannerService:
         self.production_service = production_service
         self.notifications = notifications
         self._ensure_schema()
+        from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
+        self.outcomes = PublishingOutcomeService(db)
+        from creator_intelligence.services.packaging_experiments import PackagingExperimentService
+        self.experiments = PackagingExperimentService(db,self.outcomes)
+
+    def outcome_dashboard(self):
+        return self.outcomes.dashboard()
+
+    def outcome_summary(self):
+        return self.outcomes.summary()
+
+    def refresh_outcomes(self):
+        return self.outcomes.process_sync()
+
+    def set_package_decision(self, package_id, status, used=None):
+        return self.outcomes.record_decision(package_id, status, used)
+
+    def link_package(self, package_id, source_video_id):
+        return self.outcomes.link(package_id, source_video_id)
+
+    def experiment_dashboard(self):
+        return self.experiments.dashboard()
+
+    def experiment_variants(self, experiment_id):
+        return self.experiments.variants(experiment_id)
+
+    def experiment_patterns(self):
+        return self.experiments.winning_patterns()
+
+    def select_experiment_variant(self, variant_id):
+        return self.experiments.select(variant_id)
+
+    def reject_experiment_variant(self, variant_id):
+        return self.experiments.reject(variant_id)
 
     def _ensure_schema(self):
         statements = [

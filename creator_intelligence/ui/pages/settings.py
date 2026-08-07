@@ -1,19 +1,49 @@
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QMessageBox,QFormLayout,
-    QLineEdit,QComboBox,QCheckBox,QSpinBox,QGroupBox,QTableWidget,QTableWidgetItem
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
-from creator_intelligence.services.backup import BackupService
+
 from creator_intelligence.core.config import ConfigService
 from creator_intelligence.core.health import HealthService
-from creator_intelligence.utils.paths import DB_PATH, BACKUP_DIR
+from creator_intelligence.core.versioning import APPLICATION_VERSION
+from creator_intelligence.services.backup import BackupService
+from creator_intelligence.services.update_checker import RELEASES_PAGE_URL, UpdateStatus
+from creator_intelligence.ui.update_worker import UpdateCheckWorker, UpdateDownloadWorker
+from creator_intelligence.utils.paths import BACKUP_DIR, DB_PATH
+
 
 class SettingsPage(QWidget):
-    def __init__(self, db):
+    def __init__(self, db, context=None):
         super().__init__()
         self.db = db
-        self.config_service = ConfigService()
+        self.context = context
+        self.onboarding = context.services.get("onboarding") if context else None
+        self.update_checker = context.services.get("update_checker") if context else None
+        self.update_release = None
+        self.update_worker = None
+        self.download_worker = None
+        workspace = context.services.get("workspace") if context else None
+        config_path = workspace.paths.config / "settings.json" if workspace else None
+        backup_dir = workspace.paths.backups if workspace else BACKUP_DIR
+        database_path = workspace.paths.database if workspace else DB_PATH
+        self.config_service = ConfigService(config_path)
         self.config = self.config_service.load()
-        self.backups = BackupService(DB_PATH, BACKUP_DIR, self.config.backup_retention)
+        self.backups = BackupService(database_path, backup_dir, self.config.backup_retention)
+        self.database_path = database_path
 
         layout=QVBoxLayout(self)
         title=QLabel("Settings and Maintenance")
@@ -45,13 +75,53 @@ class SettingsPage(QWidget):
         form.addRow(save)
         layout.addWidget(group)
 
+        updates = QGroupBox("Software updates")
+        update_form = QFormLayout(updates)
+        update_form.addRow("Installed version", QLabel(APPLICATION_VERSION))
+        self.auto_updates = QCheckBox("Check automatically after the installed app starts")
+        self.auto_updates.setChecked(self.config.auto_check_updates)
+        self.update_channel = QComboBox()
+        self.update_channel.addItem("Stable releases", "stable")
+        self.update_channel.addItem("Preview releases", "preview")
+        channel_index = self.update_channel.findData(self.config.update_channel)
+        self.update_channel.setCurrentIndex(max(0, channel_index))
+        self.update_status = QLabel(
+            "Automatic checks use GitHub Releases once per day and never block startup."
+        )
+        self.update_status.setWordWrap(True)
+        update_actions = QHBoxLayout()
+        self.check_update_button = QPushButton("Check now")
+        self.check_update_button.clicked.connect(self.check_updates)
+        self.open_update_button = QPushButton("View release")
+        self.open_update_button.clicked.connect(self.open_update)
+        self.open_update_button.setEnabled(False)
+        self.download_update_button = QPushButton("Download verified installer")
+        self.download_update_button.clicked.connect(self.download_update)
+        self.download_update_button.setEnabled(False)
+        self.skip_update_button = QPushButton("Skip this version")
+        self.skip_update_button.clicked.connect(self.skip_update)
+        self.skip_update_button.setEnabled(False)
+        update_actions.addWidget(self.check_update_button)
+        update_actions.addWidget(self.open_update_button)
+        update_actions.addWidget(self.download_update_button)
+        update_actions.addWidget(self.skip_update_button)
+        update_actions.addStretch()
+        update_form.addRow("Automatic checks", self.auto_updates)
+        update_form.addRow("Update channel", self.update_channel)
+        update_form.addRow("Status", self.update_status)
+        update_form.addRow(update_actions)
+        layout.addWidget(updates)
+
         buttons = QHBoxLayout()
         backup = QPushButton("Create database backup")
         backup.clicked.connect(self.make_backup)
         health = QPushButton("Run startup health checks")
         health.clicked.connect(self.run_health)
+        onboarding = QPushButton("Open welcome and workspace setup")
+        onboarding.clicked.connect(self.open_onboarding)
         buttons.addWidget(backup)
         buttons.addWidget(health)
+        buttons.addWidget(onboarding)
         buttons.addStretch()
         layout.addLayout(buttons)
 
@@ -62,13 +132,17 @@ class SettingsPage(QWidget):
         self.run_health()
 
     def save_settings(self):
-        self.config.channel_name = self.channel.text().strip() or "SimonWolfy"
+        self.config.channel_name = self.channel.text().strip() or "My Channel"
         self.config.timezone = self.timezone.text().strip() or "America/Chicago"
         self.config.currency = self.currency.currentText()
         self.config.auto_backup_on_start = self.auto_start.isChecked()
         self.config.auto_backup_before_write = self.auto_write.isChecked()
         self.config.backup_retention = self.retention.value()
+        self.config.auto_check_updates = self.auto_updates.isChecked()
+        self.config.update_channel = str(self.update_channel.currentData())
         self.config_service.save(self.config)
+        if self.update_checker:
+            self.update_checker.set_channel(self.config.update_channel)
         self.backups.retention = self.config.backup_retention
         QMessageBox.information(self,"Saved","Settings were saved.")
 
@@ -77,9 +151,86 @@ class SettingsPage(QWidget):
         QMessageBox.information(self,"Backup complete",f"Created:\n{path}")
 
     def run_health(self):
-        checks = HealthService(DB_PATH).run()
+        checks = HealthService(self.database_path).run()
         self.health_table.setRowCount(len(checks))
         for row, check in enumerate(checks):
             values = [check.name, "PASS" if check.ok else "FAIL", check.message]
             for col, value in enumerate(values):
                 self.health_table.setItem(row,col,QTableWidgetItem(value))
+
+    def open_onboarding(self):
+        if not self.onboarding:
+            QMessageBox.information(self,"Welcome setup","Restart the application to open first-run setup.")
+            return
+        from creator_intelligence.ui.dialogs.onboarding import OnboardingWizard
+        OnboardingWizard(self.onboarding,self).exec()
+
+    def check_updates(self):
+        if not self.update_checker:
+            self.update_status.setText("Update checking is unavailable in this session.")
+            return
+        if self.update_worker is not None and self.update_worker.running:
+            return
+        self.update_checker.set_channel(str(self.update_channel.currentData()))
+        self.update_status.setText("Checking GitHub Releases…")
+        self.check_update_button.setEnabled(False)
+        self.update_worker = UpdateCheckWorker(self.update_checker, force=True, parent=self)
+        self.update_worker.result_ready.connect(self._update_check_finished)
+        self.update_worker.start()
+
+    def _update_check_finished(self, result):
+        self.check_update_button.setEnabled(True)
+        self.update_status.setText(result.message)
+        self.update_release = result.release if result.status == UpdateStatus.AVAILABLE else None
+        available = self.update_release is not None
+        self.open_update_button.setEnabled(available)
+        self.skip_update_button.setEnabled(available)
+        self.download_update_button.setEnabled(
+            available and bool(self.update_checker and self.update_checker.packaged)
+        )
+        if available and self.update_checker and not self.update_checker.packaged:
+            self.download_update_button.setToolTip(
+                "Verified installer downloads are available in the installed Windows app."
+            )
+
+    def open_update(self):
+        url = self.update_release.page_url if self.update_release else RELEASES_PAGE_URL
+        QDesktopServices.openUrl(QUrl(url))
+
+    def skip_update(self):
+        if not self.update_checker or not self.update_release:
+            return
+        if self.update_checker.skip(self.update_release.version):
+            self.update_status.setText(f"Version {self.update_release.version} will be skipped.")
+            self.skip_update_button.setEnabled(False)
+        else:
+            self.update_status.setText("The skip preference could not be saved.")
+
+    def download_update(self):
+        if not self.update_checker or not self.update_release:
+            return
+        if self.download_worker is not None and self.download_worker.running:
+            return
+        self.download_update_button.setEnabled(False)
+        self.update_status.setText("Downloading and verifying the installer…")
+        self.download_worker = UpdateDownloadWorker(
+            self.update_checker, self.update_release, parent=self
+        )
+        self.download_worker.download_ready.connect(self._download_finished)
+        self.download_worker.download_failed.connect(self._download_failed)
+        self.download_worker.start()
+
+    def _download_finished(self, path):
+        self.update_status.setText(f"Verified installer downloaded: {path.name}")
+        self.download_update_button.setEnabled(True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        QMessageBox.information(
+            self,
+            "Update ready",
+            "The installer passed its SHA-256 check. The folder is open so you can run it when ready.",
+        )
+
+    def _download_failed(self, message):
+        self.update_status.setText("The installer could not be downloaded and verified.")
+        self.download_update_button.setEnabled(True)
+        QMessageBox.warning(self, "Update download", message)

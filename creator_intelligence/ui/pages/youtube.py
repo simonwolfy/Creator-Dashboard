@@ -1,6 +1,6 @@
 import pandas as pd
 from PySide6.QtWidgets import (
-    QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTableView,QTabWidget,QComboBox,QPushButton,
+    QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTableView,QTabWidget,QComboBox,QPushButton,QCheckBox,
     QMessageBox,QFormLayout,QLineEdit,QPlainTextEdit,QDialog,QDialogButtonBox,QAbstractItemView
 )
 from creator_intelligence.ui.pages.twitch import FrameModel
@@ -41,6 +41,7 @@ class YouTubePage(QWidget):
         self.tabs.addTab(self._audience(),"Audience")
         self.tabs.addTab(self._geography(),"Geography")
         self.tabs.addTab(self._metadata(),"Metadata editor")
+        self.tabs.addTab(self._api_setup(),"API setup")
         layout.addWidget(self.tabs)
         self.refresh_all()
 
@@ -106,6 +107,57 @@ class YouTubePage(QWidget):
         layout.addWidget(edit)
         self.metadata_table=QTableView(); layout.addWidget(self.metadata_table)
         return page
+
+    def _api_setup(self):
+        page=QWidget(); form=QFormLayout(page)
+        self.youtube_api_key=QLineEdit(); self.youtube_api_key.setEchoMode(QLineEdit.Password)
+        self.youtube_channel_id=QLineEdit(); self.youtube_sync_enabled=QCheckBox("Enable title sync")
+        form.addRow("YouTube Data API key",self.youtube_api_key)
+        form.addRow("Channel ID",self.youtube_channel_id)
+        form.addRow(self.youtube_sync_enabled)
+        save=QPushButton("Save YouTube API setup"); save.clicked.connect(self.save_api_setup)
+        form.addRow(save)
+        sync=QPushButton("Sync YouTube now"); sync.clicked.connect(self.sync_youtube_now)
+        form.addRow(sync)
+        disconnect=QPushButton("Disconnect and clear credentials"); disconnect.clicked.connect(self.disconnect_youtube)
+        form.addRow(disconnect)
+        self.youtube_api_status=QLabel(); self.youtube_api_status.setWordWrap(True)
+        form.addRow("Status",self.youtube_api_status)
+        config=self.service.social.display_configuration("youtube")
+        self.youtube_api_key.setText(config.get("api_key") or "")
+        self.youtube_channel_id.setText(config.get("channel_id") or "")
+        self.youtube_sync_enabled.setChecked(bool(config.get("enabled")))
+        self.refresh_api_status()
+        return page
+
+    def save_api_setup(self):
+        self.service.social.save_configuration("youtube",{
+            "api_key":self.youtube_api_key.text(),"channel_id":self.youtube_channel_id.text()
+        },self.youtube_sync_enabled.isChecked())
+        self.refresh_api_status()
+        QMessageBox.information(self,"YouTube API setup","YouTube credentials saved. Packaging sync will use this setup.")
+
+    def refresh_api_status(self):
+        status=self.service.social.connection_status("youtube")
+        self.youtube_api_status.setText(
+            f"Configured · Sync: {status['sync_status']}" if status["configured"]
+            else "Missing YouTube Data API key or channel ID"
+        )
+
+    def sync_youtube_now(self):
+        self.service.social.save_configuration("youtube",{
+            "api_key":self.youtube_api_key.text(),"channel_id":self.youtube_channel_id.text()
+        },self.youtube_sync_enabled.isChecked())
+        try:
+            result=self.service.social.sync("youtube")
+        except Exception as exc:
+            QMessageBox.critical(self,"YouTube sync",str(exc)); self.refresh_api_status(); return
+        self.refresh_api_status(); self.refresh_all()
+        QMessageBox.information(self,"YouTube sync",f"Found {result['seen']} video(s); updated {result['changed']}.")
+
+    def disconnect_youtube(self):
+        if QMessageBox.question(self,"Disconnect YouTube","Clear the API key from the operating-system vault?")!=QMessageBox.StandardButton.Yes:return
+        self.service.social.disconnect("youtube");self.youtube_api_key.clear();self.youtube_sync_enabled.setChecked(False);self.refresh_api_status()
 
     def refresh_all(self):
         fmt=self.current_format()

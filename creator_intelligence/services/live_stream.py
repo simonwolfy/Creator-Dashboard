@@ -7,6 +7,7 @@ import math
 import random
 import sqlite3
 import uuid
+from creator_intelligence.core.credential_vault import CredentialVault
 
 @dataclass
 class LiveSnapshot:
@@ -23,10 +24,12 @@ class LiveSnapshot:
     recording_active: bool | None = None
 
 class LiveStreamService:
-    def __init__(self, db, notifications=None):
+    def __init__(self, db, notifications=None, credential_vault=None):
         self.db = db
         self.notifications = notifications
+        self.vault = credential_vault or CredentialVault.for_database(db)
         self._ensure_schema()
+        self._migrate_credentials()
 
     def _ensure_schema(self):
         statements = [
@@ -158,9 +161,26 @@ class LiveStreamService:
         for sql in statements:
             self.db.execute(sql)
 
-    def settings(self):
+    def _migrate_credentials(self):
+        self.db.execute("PRAGMA secure_delete=ON")
+        frame=self.db.frame("SELECT twitch_access_token,twitch_refresh_token,obs_password FROM live_integration_settings WHERE id=1")
+        if frame.empty:return
+        row=frame.iloc[0]
+        had_secrets=any(row.get(key) for key in ("twitch_access_token","twitch_refresh_token","obs_password"))
+        self.vault.save("twitch",{"twitch_access_token":row.get("twitch_access_token"),"twitch_refresh_token":row.get("twitch_refresh_token")})
+        self.vault.save("obs",{"obs_password":row.get("obs_password")})
+        self.db.execute("UPDATE live_integration_settings SET twitch_access_token=NULL,twitch_refresh_token=NULL,obs_password=NULL WHERE id=1")
+        if had_secrets:
+            self.db.execute("VACUUM")
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def settings(self, reveal=True):
         frame = self.db.frame("SELECT * FROM live_integration_settings WHERE id=1")
-        return frame.iloc[0].to_dict()
+        result=frame.iloc[0].to_dict()
+        result=(self.vault.reveal("twitch",result) if reveal else self.vault.masked("twitch",result))
+        return self.vault.reveal("obs",result) if reveal else self.vault.masked("obs",result)
+
+    def display_settings(self):return self.settings(reveal=False)
 
     def update_settings(self, **kwargs):
         allowed = {
@@ -173,6 +193,9 @@ class LiveStreamService:
             "raid_marker_min_viewers"
         }
         filtered = {k:v for k,v in kwargs.items() if k in allowed}
+        twitch_secrets={k:filtered.pop(k) for k in list(filtered) if k in {"twitch_access_token","twitch_refresh_token"}}
+        obs_secrets={k:filtered.pop(k) for k in list(filtered) if k=="obs_password"}
+        self.vault.save("twitch",twitch_secrets);self.vault.save("obs",obs_secrets)
         if not filtered:
             return
         filtered["updated_at"] = datetime.now().isoformat()
@@ -181,6 +204,13 @@ class LiveStreamService:
             f"{column}=?" for column in columns
         ) + " WHERE id=1"
         self.db.execute(sql, [filtered[column] for column in columns])
+
+    def disconnect_integration(self,provider):
+        provider=str(provider).lower()
+        if provider not in {"twitch","obs"}:raise ValueError(provider)
+        self.vault.delete(provider)
+        field="twitch_enabled" if provider=="twitch" else "obs_enabled"
+        self.db.execute(f"UPDATE live_integration_settings SET {field}=0,updated_at=? WHERE id=1",(datetime.now().isoformat(),))
 
     def active_session(self):
         frame = self.db.frame(

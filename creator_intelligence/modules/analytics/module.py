@@ -2,6 +2,7 @@ from creator_intelligence.core.contracts import ModuleMetadata, ServiceBinding, 
 from creator_intelligence.services.analytics import AnalyticsService
 from creator_intelligence.services.twitch_intelligence import TwitchIntelligenceService
 from creator_intelligence.services.youtube_intelligence import YouTubeIntelligenceService
+from creator_intelligence.services.social_platforms import SocialPlatformService
 
 def _home_page(registry):
     from creator_intelligence.ui.pages.home import HomePage
@@ -14,6 +15,10 @@ def _twitch_page(registry):
 def _youtube_page(registry):
     from creator_intelligence.ui.pages.youtube import YouTubePage
     return YouTubePage(registry.resolve("youtube_intelligence"))
+
+def _social_page(registry, platform):
+    from creator_intelligence.ui.pages.social_platform import SocialPlatformPage
+    return SocialPlatformPage(registry.resolve("social_platforms"), platform)
 
 class AnalyticsModule:
     metadata = ModuleMetadata(
@@ -38,6 +43,10 @@ class AnalyticsModule:
             "youtube_intelligence", lambda ctx: YouTubeIntelligenceService(ctx.db),
             module_id=self.metadata.module_id
         ))
+        registry.register_service(ServiceBinding(
+            "social_platforms", lambda ctx: SocialPlatformService(ctx.db),
+            module_id=self.metadata.module_id
+        ))
         registry.register_navigation(NavigationItem(
             "Home", lambda: _home_page(registry), order=10,
             module_id=self.metadata.module_id,
@@ -48,6 +57,14 @@ class AnalyticsModule:
         ))
         registry.register_navigation(NavigationItem(
             "YouTube", lambda: _youtube_page(registry), order=30,
+            module_id=self.metadata.module_id,
+        ))
+        registry.register_navigation(NavigationItem(
+            "Instagram", lambda: _social_page(registry, "instagram"), order=35,
+            module_id=self.metadata.module_id,
+        ))
+        registry.register_navigation(NavigationItem(
+            "TikTok", lambda: _social_page(registry, "tiktok"), order=40,
             module_id=self.metadata.module_id,
         ))
 

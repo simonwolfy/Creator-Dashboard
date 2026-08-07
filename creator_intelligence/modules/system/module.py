@@ -15,7 +15,7 @@ def _modules_page(registry):
 
 def _settings_page(registry):
     from creator_intelligence.ui.pages.settings import SettingsPage
-    return SettingsPage(registry.context.db)
+    return SettingsPage(registry.context.db,registry.context)
 
 class SystemModule:
     metadata = ModuleMetadata(

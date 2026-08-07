@@ -69,6 +69,12 @@ class PublishingPage(QWidget):
             ("Mark metadata ready",lambda:self.update_readiness("metadata_status","Ready")),
             ("Mark uploaded",lambda:self.update_readiness("upload_status","Uploaded")),
             ("Generate recommendations",self.generate_recommendations),
+            ("Match package outcomes",self.refresh_outcome_feedback),
+            ("Approve package",lambda:self.package_decision("Approved")),
+            ("Reject package",lambda:self.package_decision("Rejected")),
+            ("Link published post",self.link_selected_package),
+            ("Use experiment variant",self.select_variant),
+            ("Reject experiment variant",self.reject_variant),
             ("Refresh",self.refresh)
         ]
         for label,handler in actions:
@@ -91,8 +97,20 @@ class PublishingPage(QWidget):
         self.tabs.addTab(self.slots_table,"Recurring slots")
         self.insights_table=QTableView()
         self.tabs.addTab(self.insights_table,"Timing insights")
+        self.outcomes_table=QTableView()
+        self.outcomes_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tabs.addTab(self.outcomes_table,"Package outcomes")
+        self.experiments_table=QTableView()
+        self.experiments_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tabs.addTab(self.experiments_table,"Packaging experiments")
+        self.variants_table=QTableView()
+        self.variants_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tabs.addTab(self.variants_table,"Selected experiment variants")
+        self.patterns_table=QTableView()
+        self.tabs.addTab(self.patterns_table,"Winning patterns")
         layout.addWidget(self.tabs)
         self.items_table.clicked.connect(lambda _:self.refresh_dependencies())
+        self.experiments_table.clicked.connect(lambda _:self.refresh_variants())
         self.refresh()
 
     def selected_item_id(self):
@@ -106,7 +124,73 @@ class PublishingPage(QWidget):
         self.recommendations_table.setModel(FrameModel(self.service.recommendations()))
         self.slots_table.setModel(FrameModel(self.service.slots()))
         self.insights_table.setModel(FrameModel(self.service.timing_insights()))
+        self.outcomes_table.setModel(FrameModel(self.service.outcome_dashboard()))
+        self.experiments_table.setModel(FrameModel(self.service.experiment_dashboard()))
+        self.patterns_table.setModel(FrameModel(self.service.experiment_patterns()))
+        self.refresh_variants()
         self.refresh_dependencies()
+
+    def selected_experiment_id(self):
+        index=self.experiments_table.currentIndex()
+        if not index.isValid(): return None
+        return str(self.experiments_table.model().frame.iloc[index.row()]["id"])
+
+    def selected_variant_id(self):
+        index=self.variants_table.currentIndex()
+        if not index.isValid(): return None
+        return str(self.variants_table.model().frame.iloc[index.row()]["id"])
+
+    def refresh_variants(self):
+        experiment_id=self.selected_experiment_id()
+        if not experiment_id:
+            import pandas as pd
+            self.variants_table.setModel(FrameModel(pd.DataFrame()))
+            return
+        self.variants_table.setModel(FrameModel(self.service.experiment_variants(experiment_id)))
+
+    def select_variant(self):
+        variant_id=self.selected_variant_id()
+        if variant_id:
+            self.service.select_experiment_variant(variant_id)
+            self.refresh()
+
+    def reject_variant(self):
+        variant_id=self.selected_variant_id()
+        if variant_id:
+            self.service.reject_experiment_variant(variant_id)
+            self.refresh()
+
+    def selected_package_id(self):
+        index=self.outcomes_table.currentIndex()
+        if not index.isValid(): return None
+        return str(self.outcomes_table.model().frame.iloc[index.row()]["id"])
+
+    def refresh_outcome_feedback(self):
+        result=self.service.refresh_outcomes()
+        summary=self.service.outcome_summary()
+        QMessageBox.information(
+            self,"Publishing outcomes",
+            f"Matched {result['matched']} package(s) and captured {result['snapshots']} checkpoint(s).\n"
+            f"{summary['matched']} matched, {summary['pending']} pending, {summary['measured']} measured."
+        )
+        self.refresh()
+
+    def package_decision(self,status):
+        package_id=self.selected_package_id()
+        if package_id:
+            self.service.set_package_decision(package_id,status)
+            self.refresh()
+
+    def link_selected_package(self):
+        package_id=self.selected_package_id()
+        if not package_id: return
+        source_id,ok=QInputDialog.getText(self,"Link published post","Synced platform post ID:")
+        if not ok or not source_id.strip(): return
+        try:
+            self.service.link_package(package_id,source_id.strip())
+        except Exception as exc:
+            QMessageBox.warning(self,"Cannot link post",str(exc)); return
+        self.refresh()
 
     def refresh_dependencies(self):
         item_id=self.selected_item_id()

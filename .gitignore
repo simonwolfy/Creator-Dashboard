@@ -1,0 +1,96 @@
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local runtime data
+/backups/
+/logs/
+/cache/
+/temp/
+/exports/
+/imports/
+/assets/
+/clips/
+/reports/
+/thumbnails/
+/models/
+/data/
+/workspaces/
+workspace.json
+workspace.local.json
+config/settings.json
+config/update_state.json
+config/ffmpeg.json
+config/*.local.json
+
+# Creator-owned media and generated artifacts
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.srt
+*.vtt
+*.ass
+*.lrc
+*.part
+*.tmp
+
+# Local databases and analytics exports
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+*.parquet
+*.feather
+*.arrow
+*.csv
+*.tsv
+*.jsonl
+*.log
+*.bak
+
+# OAuth, API credentials, and environment secrets
+.env
+.env.*
+!.env.example
+client_secret*.json
+client_secrets*.json
+credentials*.json
+token*.json
+*twitch*token*
+*youtube*token*
+*oauth*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+
+# Build artifacts
+build/
+dist/
+release/
+*.egg-info/
+*.zip
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

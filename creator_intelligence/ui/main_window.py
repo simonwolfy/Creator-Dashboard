@@ -1,7 +1,23 @@
 import logging
-from PySide6.QtWidgets import QMainWindow,QWidget,QHBoxLayout,QListWidget,QStackedWidget,QStatusBar,QLabel,QVBoxLayout
-from PySide6.QtCore import QSize
-from creator_intelligence.core.bootstrap import bootstrap_application
+
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QMainWindow,
+    QMessageBox,
+    QStackedWidget,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
+)
+
+from creator_intelligence.core.versioning import APPLICATION_VERSION
+from creator_intelligence.services.update_checker import UpdateStatus
+from creator_intelligence.ui.update_worker import UpdateCheckWorker
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +42,25 @@ QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 5px; }
 #metricSubtitle { color:#8993b4; }
 """
 
+NAV_KEY_ROLE = Qt.ItemDataRole.UserRole
+
+
+class ReorderableNavigation(QListWidget):
+    orderChanged = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        self.orderChanged.emit()
+
+
 class ModuleFailurePage(QWidget):
     def __init__(self, label, error):
         super().__init__()
@@ -38,55 +73,148 @@ class ModuleFailurePage(QWidget):
         layout.addWidget(message)
         layout.addStretch()
 
+
 class MainWindow(QMainWindow):
-    def __init__(self, db):
+    def __init__(self, runtime, application_core=None):
         super().__init__()
-        self.db = db
-        self.context, self.registry = bootstrap_application(db)
-        self.setWindowTitle("Creator Intelligence 3.0 — Modular Creator OS")
-        self.resize(1600,960)
-        self.setMinimumSize(QSize(1180,740))
+        self.runtime = runtime
+        self.application_core = application_core
+        self.db = runtime.db
+        self.context = runtime.context
+        self.registry = runtime.registry
+        self.settings = QSettings("Creator Intelligence", "Creator OS")
+        self.setWindowTitle(f"Creator Intelligence {APPLICATION_VERSION} — Creator OS")
+        self.resize(1600, 960)
+        self.setMinimumSize(QSize(1180, 740))
         self.setStyleSheet(STYLE)
 
-        container=QWidget()
-        layout=QHBoxLayout(container)
-        layout.setContentsMargins(0,0,0,0)
-        nav=QListWidget()
-        nav.setFixedWidth(245)
-        stack=QStackedWidget()
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.nav = ReorderableNavigation()
+        self.nav.setFixedWidth(245)
+        self.stack = QStackedWidget()
+        self.pages_by_key: dict[str, QWidget] = {}
 
-        for item in self.registry.build_navigation():
+        navigation = list(self.registry.build_navigation())
+        saved_order = self.settings.value("navigation/order", [], list)
+        saved_positions = {key: index for index, key in enumerate(saved_order)}
+        navigation.sort(
+            key=lambda item: (
+                saved_positions.get(self._navigation_key(item), len(saved_positions) + item.order),
+                item.order,
+                item.label,
+            )
+        )
+
+        for item in navigation:
+            key = self._navigation_key(item)
             try:
                 page = item.factory()
             except Exception as exc:
                 log.exception("Failed to create page %s", item.label)
                 page = ModuleFailurePage(item.label, exc)
-            nav.addItem(item.label)
-            stack.addWidget(page)
+            self._add_navigation_item(item.label, key)
+            self.pages_by_key[key] = page
+            self.stack.addWidget(page)
 
-        if nav.count() == 0:
-            nav.addItem("No modules")
-            stack.addWidget(ModuleFailurePage(
+        if self.nav.count() == 0:
+            page = ModuleFailurePage(
                 "Application modules",
-                "No application modules loaded. Check config/modules.json and the logs."
-            ))
+                "No application modules loaded. Check config/modules.json and the logs.",
+            )
+            self._add_navigation_item("No modules", "system:no-modules")
+            self.pages_by_key["system:no-modules"] = page
+            self.stack.addWidget(page)
 
-        nav.currentRowChanged.connect(stack.setCurrentIndex)
-        nav.setCurrentRow(0)
-        layout.addWidget(nav)
-        layout.addWidget(stack,1)
+        self.nav.currentRowChanged.connect(self._show_current_navigation_page)
+        self.nav.orderChanged.connect(self._navigation_reordered)
+        self.nav.setCurrentRow(0)
+        layout.addWidget(self.nav)
+        layout.addWidget(self.stack, 1)
         self.setCentralWidget(container)
 
-        status=QStatusBar()
+        status = QStatusBar()
         loaded = len(self.registry.modules)
         failed = len(self.registry.failures)
+        health_issues = len([check for check in runtime.health_checks if not check.ok])
         status.showMessage(
-            f"Database: {db.path} | Modules loaded: {loaded} | Failed: {failed}"
+            f"Workspace: {runtime.workspace.paths.root} | "
+            f"Modules: {loaded} | Failed: {failed} | Health issues: {health_issues}"
         )
         self.setStatusBar(status)
-        self.registry.emit("application_started")
 
-    def closeEvent(self,event):
-        self.registry.emit("application_closing")
+        self.update_checker = self.context.services.get("update_checker")
+        self._update_worker = None
+        if (
+            self.update_checker is not None
+            and getattr(runtime.settings, "auto_check_updates", True)
+            and self.update_checker.should_check()
+        ):
+            QTimer.singleShot(1500, self._start_automatic_update_check)
+
+    def _start_automatic_update_check(self) -> None:
+        if self._update_worker is not None and self._update_worker.running:
+            return
+        self._update_worker = UpdateCheckWorker(self.update_checker, force=False, parent=self)
+        self._update_worker.result_ready.connect(self._handle_automatic_update_result)
+        self._update_worker.start()
+
+    def _handle_automatic_update_result(self, result) -> None:
+        if result.status != UpdateStatus.AVAILABLE or result.release is None:
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Creator Intelligence update available")
+        box.setText(f"Version {result.release.version} is ready.")
+        box.setInformativeText(
+            "Your workspace stays in its current location. You can view the release, "
+            "install it later, or skip this version."
+        )
+        view_button = box.addButton("View update", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        skip_button = box.addButton("Skip this version", QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+        if box.clickedButton() is view_button:
+            QDesktopServices.openUrl(QUrl(result.release.page_url))
+        elif box.clickedButton() is skip_button:
+            self.update_checker.skip(result.release.version)
+
+    @staticmethod
+    def _navigation_key(item) -> str:
+        # A module may expose multiple pages, so module_id alone is not unique.
+        module = str(item.module_id or "unowned")
+        return f"{module}:{item.label}"
+
+    def _add_navigation_item(self, label: str, key: str):
+        self.nav.addItem(label)
+        item = self.nav.item(self.nav.count() - 1)
+        item.setData(NAV_KEY_ROLE, key)
+        return item
+
+    def _show_current_navigation_page(self, row: int) -> None:
+        item = self.nav.item(row) if row >= 0 else None
+        key = item.data(NAV_KEY_ROLE) if item else None
+        page = self.pages_by_key.get(str(key)) if key is not None else None
+        if page is not None:
+            self.stack.setCurrentWidget(page)
+
+    def _navigation_reordered(self) -> None:
+        ordered_keys = [
+            str(self.nav.item(index).data(NAV_KEY_ROLE))
+            for index in range(self.nav.count())
+        ]
+        self.settings.setValue("navigation/order", ordered_keys)
+        self.settings.sync()
+        self._show_current_navigation_page(self.nav.currentRow())
+
+    def closeEvent(self, event):
+        if self.application_core is not None:
+            try:
+                self.application_core.stop()
+            except Exception:
+                log.exception("Application shutdown pipeline failed")
+        else:
+            self.registry.emit("application_closing")
         log.info("Application closed normally")
         event.accept()

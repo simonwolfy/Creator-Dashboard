@@ -1,1 +1,3 @@
-__version__ = "4.7.0-phase7e2"
+from creator_intelligence.core.versioning import APPLICATION_VERSION
+
+__version__ = APPLICATION_VERSION
