@@ -7,6 +7,7 @@ import sqlite3
 import pandas as pd
 
 from creator_intelligence.core.credential_vault import MemoryCredentialBackend
+from creator_intelligence.services.live_stream import LiveStreamService
 from creator_intelligence.services.local_whisper_production import (
     LocalWhisperProductionService,
 )
@@ -381,6 +382,23 @@ def test_twitch_title_sync_is_incremental_and_idempotent(tmp_path):
     assert status["records_changed"] == 0
 
 
+def test_twitch_title_fetch_reads_connected_token_from_credential_vault(tmp_path, monkeypatch):
+    service, _, _ = make_service(tmp_path)
+    LiveStreamService(service.db).update_settings(
+        twitch_enabled=1, twitch_client_id="client", twitch_broadcaster_id="broadcaster",
+        twitch_access_token="vault-token", twitch_refresh_token="vault-refresh",
+    )
+    captured = {}
+
+    def request_payload(request):
+        captured.update(dict(request.header_items()))
+        return {"data": [], "pagination": {}}
+
+    monkeypatch.setattr(service, "_json_request", request_payload)
+    assert service._fetch_twitch_titles(None) == []
+    assert captured["Authorization"] == "Bearer vault-token"
+
+
 def test_youtube_title_sync_updates_profile_and_performance(tmp_path):
     service, _, _ = make_service(tmp_path)
 
@@ -437,6 +455,30 @@ def test_youtube_api_pages_results_and_classifies_shorts(tmp_path, monkeypatch):
 
     assert [record["source_video_id"] for record in records] == ["one", "two"]
     assert [record["content_type"] for record in records] == ["short", "video"]
+
+
+def test_youtube_title_fetch_accepts_google_oauth_without_api_key(tmp_path, monkeypatch):
+    service, _, _ = make_service(tmp_path)
+    service.save_title_sync_configuration("youtube", {
+        "access_token": "youtube-oauth", "refresh_token": "youtube-refresh",
+        "channel_id": "channel",
+    })
+    captured = []
+    responses = iter([
+        {"items": [{"id": {"videoId": "one"}, "snippet": {"title": "One"}}]},
+        {"items": [{
+            "id": "one", "statistics": {"viewCount": "10"},
+            "contentDetails": {"duration": "PT45S"},
+        }]},
+    ])
+
+    def request_payload(request):
+        captured.append(dict(request.header_items()))
+        return next(responses)
+
+    monkeypatch.setattr(service, "_json_request", request_payload)
+    assert service._fetch_youtube_titles(None)[0]["source_video_id"] == "one"
+    assert all(headers["Authorization"] == "Bearer youtube-oauth" for headers in captured)
 
 
 def test_youtube_content_performance_guides_title_and_description_packaging(tmp_path):

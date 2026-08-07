@@ -356,7 +356,9 @@ class CreatorPackagingIntelligenceMixin:
         settings = self.db.frame("SELECT * FROM live_integration_settings WHERE id=1")
         if settings.empty:
             raise ValueError("Configure Twitch credentials in Live Stream > Connections and rules.")
-        config = settings.iloc[0].to_dict()
+        config = CredentialVault.for_database(self.db).reveal(
+            "twitch", settings.iloc[0].to_dict()
+        )
         required = (config.get("twitch_client_id"), config.get("twitch_access_token"), config.get("twitch_broadcaster_id"))
         if not all(required):
             raise ValueError("Configure Twitch client ID, OAuth token, and broadcaster ID first.")
@@ -382,16 +384,23 @@ class CreatorPackagingIntelligenceMixin:
 
     def _fetch_youtube_titles(self, since: str | None):
         config = self._title_sync_configuration("youtube")
-        api_key, channel_id = config.get("api_key"), config.get("channel_id")
-        if not api_key or not channel_id:
-            raise ValueError("YouTube API key and channel ID are required.")
+        api_key, access_token = config.get("api_key"), config.get("access_token")
+        channel_id = config.get("channel_id")
+        if not channel_id or not (api_key or access_token):
+            raise ValueError("Connect YouTube or provide an API key and channel ID first.")
         params = {"part": "snippet", "channelId": channel_id, "type": "video",
-                  "order": "date", "maxResults": 50, "key": api_key}
+                  "order": "date", "maxResults": 50}
+        if api_key:
+            params["key"] = api_key
+        headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
         if since:
             params["publishedAfter"] = since
         snippets = {}
         while True:
-            search = self._json_request(Request("https://www.googleapis.com/youtube/v3/search?" + urlencode(params)))
+            search = self._json_request(Request(
+                "https://www.googleapis.com/youtube/v3/search?" + urlencode(params),
+                headers=headers,
+            ))
             snippets.update({item["id"]["videoId"]: item.get("snippet", {}) for item in search.get("items", [])})
             page_token = search.get("nextPageToken")
             if not page_token:
@@ -403,8 +412,13 @@ class CreatorPackagingIntelligenceMixin:
         video_ids = list(snippets)
         for offset in range(0, len(video_ids), 50):
             detail_params = {"part": "statistics,contentDetails",
-                             "id": ",".join(video_ids[offset:offset + 50]), "key": api_key}
-            details = self._json_request(Request("https://www.googleapis.com/youtube/v3/videos?" + urlencode(detail_params)))
+                             "id": ",".join(video_ids[offset:offset + 50])}
+            if api_key:
+                detail_params["key"] = api_key
+            details = self._json_request(Request(
+                "https://www.googleapis.com/youtube/v3/videos?" + urlencode(detail_params),
+                headers=headers,
+            ))
             for item in details.get("items", []):
                 video_id = item.get("id")
                 snippet, stats = snippets.get(video_id, {}), item.get("statistics", {})

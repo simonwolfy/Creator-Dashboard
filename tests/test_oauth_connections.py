@@ -64,7 +64,7 @@ def test_youtube_desktop_oauth_imports_client_and_discovers_channel(tmp_path, mo
         "access_token": "youtube-access", "refresh_token": "youtube-refresh", "expires_in": 3600,
     })
     monkeypatch.setattr(service, "_json_request", lambda request: {"items": [{
-        "id": "UC123", "snippet": {"title": "Simon's Channel"},
+        "id": "UC123", "snippet": {"title": "Example Channel"},
     }]})
     result = service.complete_oauth("youtube", {"code": "code", "state": flow["state"]}, flow)
     config = service.configuration("youtube")
@@ -92,7 +92,7 @@ def test_tiktok_desktop_oauth_uses_pkce_and_discovers_user(tmp_path, monkeypatch
 
     monkeypatch.setattr(service, "_post_form", token_request)
     monkeypatch.setattr(service, "_json_request", lambda request: {
-        "data": {"user": {"open_id": "tt-user", "display_name": "Simon"}},
+        "data": {"user": {"open_id": "tt-user", "display_name": "Example Creator"}},
     })
     service.complete_oauth("tiktok", {"code": "code", "state": flow["state"]}, flow)
     assert captured["code_verifier"] == flow["code_verifier"]
@@ -114,12 +114,12 @@ def test_instagram_oauth_discovers_account_and_keeps_tokens_in_vault(tmp_path, m
     def graph_request(request):
         if "access_token?" in request.full_url:
             return {"access_token": "ig-long", "expires_in": 5_000_000}
-        return {"id": "ig-user", "username": "simonwolfy"}
+        return {"id": "ig-user", "username": "example_creator"}
 
     monkeypatch.setattr(service, "_json_request", graph_request)
     service.complete_oauth("instagram", {"code": "code", "state": flow["state"]}, flow)
     assert service.configuration("instagram")["access_token"] == "ig-long"
-    assert service.configuration("instagram")["account_name"] == "simonwolfy"
+    assert service.configuration("instagram")["account_name"] == "example_creator"
     stored = db.frame("SELECT config_json FROM integration_settings WHERE integration_id='instagram_title_sync'").iloc[0, 0]
     assert "ig-long" not in stored and "meta-secret" not in stored
 
@@ -139,7 +139,7 @@ def test_twitch_device_sign_in_fills_broadcaster_and_tokens(tmp_path, monkeypatc
 
     monkeypatch.setattr(service, "_post_form", post_form)
     monkeypatch.setattr(service, "_json_request", lambda request: {"data": [{
-        "id": "123456", "login": "simonwolfy", "display_name": "SimonWolfy",
+        "id": "123456", "login": "example_creator", "display_name": "Example Creator",
     }]})
     connection = service.begin_twitch_connection("twitch-client")
     result = service.poll_twitch_connection(connection)
