@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pandas as pd
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QTableWidget, QWidget
 
 from creator_intelligence.core.config import AppConfig
 from creator_intelligence.core.contracts import ModuleMetadata, NavigationItem
@@ -17,7 +17,12 @@ from creator_intelligence.ui.main_window import (
     MainWindow,
 )
 from creator_intelligence.ui.pages.goals import GoalsPage
-from creator_intelligence.ui.table_utils import friendly_header
+from creator_intelligence.ui.table_utils import (
+    MINIMUM_COLUMN_WIDTH,
+    configure_readable_table,
+    friendly_header,
+    resize_readable_columns,
+)
 from creator_intelligence.ui.theme import (
     DEFAULT_ACCENT,
     build_stylesheet,
@@ -31,6 +36,44 @@ def test_table_headers_are_human_readable():
     assert friendly_header("content_type") == "Content type"
     assert friendly_header("planned_publish_at") == "Planned publish time"
     assert friendly_header("average_viewers") == "Average viewers"
+
+
+def test_empty_tables_keep_readable_header_widths():
+    app = QApplication.instance() or QApplication([])
+    table = QTableWidget(0, 6)
+    table.setHorizontalHeaderLabels(
+        ["Title", "Type", "Platform", "Status", "Editor", "Due / Updated"]
+    )
+    table.resizeColumnsToContents()
+
+    configure_readable_table(table)
+
+    assert all(
+        table.columnWidth(column) >= MINIMUM_COLUMN_WIDTH
+        for column in range(table.columnCount())
+    )
+    due_width = table.horizontalHeader().fontMetrics().horizontalAdvance("Due / Updated")
+    assert table.columnWidth(5) > due_width
+    table.close()
+    app.processEvents()
+
+
+def test_readable_widths_are_restored_after_a_refresh_resize():
+    app = QApplication.instance() or QApplication([])
+    table = QTableWidget(0, 2)
+    table.setHorizontalHeaderLabels(["Title", "Scheduled publish time"])
+    configure_readable_table(table)
+    table.setColumnWidth(0, 20)
+    table.setColumnWidth(1, 20)
+
+    resize_readable_columns(table)
+
+    assert table.columnWidth(0) >= MINIMUM_COLUMN_WIDTH
+    assert table.columnWidth(1) > table.horizontalHeader().fontMetrics().horizontalAdvance(
+        "Scheduled publish time"
+    )
+    table.close()
+    app.processEvents()
 
 
 def test_light_and_dark_styles_use_selected_accent():

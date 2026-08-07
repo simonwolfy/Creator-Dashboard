@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from creator_intelligence.ui.table_utils import resize_readable_columns
 
 
 class MetricCard(QFrame):
@@ -139,4 +140,4 @@ class CreatorDashboardPage(QWidget):
                 item = QTableWidgetItem("" if value is None else str(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 table.setItem(row_index, column_index, item)
-        table.resizeColumnsToContents()
+        resize_readable_columns(table)

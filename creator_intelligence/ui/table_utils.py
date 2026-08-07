@@ -21,6 +21,10 @@ HEADER_LABELS = {
     "upload_status": "Upload status",
 }
 
+MINIMUM_COLUMN_WIDTH = 100
+MAXIMUM_COLUMN_WIDTH = 360
+HEADER_HORIZONTAL_PADDING = 36
+
 
 def friendly_header(value: object) -> str:
     raw = str(value or "").strip()
@@ -43,8 +47,28 @@ def configure_readable_table(table: QTableView) -> None:
     table.verticalHeader().setDefaultSectionSize(32)
     header = table.horizontalHeader()
     header.setMinimumHeight(38)
-    header.setMinimumSectionSize(90)
+    header.setMinimumSectionSize(MINIMUM_COLUMN_WIDTH)
     header.setDefaultSectionSize(160)
     header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     header.setSectionsMovable(True)
     header.setStretchLastSection(False)
+    resize_readable_columns(table)
+
+
+def resize_readable_columns(table: QTableView) -> None:
+    """Fit cell content without ever collapsing a visible header label."""
+    model = table.model()
+    if model is None:
+        return
+    table.resizeColumnsToContents()
+    header = table.horizontalHeader()
+    metrics = header.fontMetrics()
+    for column in range(model.columnCount()):
+        label = model.headerData(
+            column,
+            Qt.Orientation.Horizontal,
+            Qt.ItemDataRole.DisplayRole,
+        )
+        label_width = metrics.horizontalAdvance(str(label or "")) + HEADER_HORIZONTAL_PADDING
+        width = max(MINIMUM_COLUMN_WIDTH, label_width, table.columnWidth(column))
+        table.setColumnWidth(column, min(width, MAXIMUM_COLUMN_WIDTH))
