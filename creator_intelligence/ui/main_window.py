@@ -1,17 +1,23 @@
 import logging
 
-from PySide6.QtCore import QSettings, QSize, Qt, Signal
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QMainWindow,
+    QMessageBox,
     QStackedWidget,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
+
+from creator_intelligence.core.versioning import APPLICATION_VERSION
+from creator_intelligence.services.update_checker import UpdateStatus
+from creator_intelligence.ui.update_worker import UpdateCheckWorker
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +83,7 @@ class MainWindow(QMainWindow):
         self.context = runtime.context
         self.registry = runtime.registry
         self.settings = QSettings("Creator Intelligence", "Creator OS")
-        self.setWindowTitle("Creator Intelligence 5.0 — Creator OS")
+        self.setWindowTitle(f"Creator Intelligence {APPLICATION_VERSION} — Creator OS")
         self.resize(1600, 960)
         self.setMinimumSize(QSize(1180, 740))
         self.setStyleSheet(STYLE)
@@ -137,6 +143,42 @@ class MainWindow(QMainWindow):
             f"Modules: {loaded} | Failed: {failed} | Health issues: {health_issues}"
         )
         self.setStatusBar(status)
+
+        self.update_checker = self.context.services.get("update_checker")
+        self._update_worker = None
+        if (
+            self.update_checker is not None
+            and getattr(runtime.settings, "auto_check_updates", True)
+            and self.update_checker.should_check()
+        ):
+            QTimer.singleShot(1500, self._start_automatic_update_check)
+
+    def _start_automatic_update_check(self) -> None:
+        if self._update_worker is not None and self._update_worker.running:
+            return
+        self._update_worker = UpdateCheckWorker(self.update_checker, force=False, parent=self)
+        self._update_worker.result_ready.connect(self._handle_automatic_update_result)
+        self._update_worker.start()
+
+    def _handle_automatic_update_result(self, result) -> None:
+        if result.status != UpdateStatus.AVAILABLE or result.release is None:
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Creator Intelligence update available")
+        box.setText(f"Version {result.release.version} is ready.")
+        box.setInformativeText(
+            "Your workspace stays in its current location. You can view the release, "
+            "install it later, or skip this version."
+        )
+        view_button = box.addButton("View update", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        skip_button = box.addButton("Skip this version", QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+        if box.clickedButton() is view_button:
+            QDesktopServices.openUrl(QUrl(result.release.page_url))
+        elif box.clickedButton() is skip_button:
+            self.update_checker.skip(result.release.version)
 
     @staticmethod
     def _navigation_key(item) -> str:

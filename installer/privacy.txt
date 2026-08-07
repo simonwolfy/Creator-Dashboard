@@ -5,3 +5,5 @@ Provider credentials are stored in the operating system credential vault. They a
 Uninstalling Creator Intelligence removes the application but preserves your selected workspace. You may delete that workspace separately when you no longer need its data.
 
 FFmpeg is optional and is not bundled. The app can detect an existing installation, guide you to a local binary folder, or offer a Winget installation from its FFmpeg settings page.
+
+Full privacy notice: https://github.com/simonwolfy/Creator-Dashboard/blob/main/PRIVACY.md

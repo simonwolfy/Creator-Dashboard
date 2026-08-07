@@ -18,7 +18,8 @@ class SensitiveDataFilter(logging.Filter):
     @classmethod
     def redact(cls,value):
         text=str(value)
-        for pattern,replacement in cls.PATTERNS:text=pattern.sub(replacement,text)
+        for pattern,replacement in cls.PATTERNS:
+            text=pattern.sub(replacement,text)
         return text
     def filter(self,record):
         record.msg=self.redact(record.msg)
@@ -60,3 +61,13 @@ def configure_logging(log_dir: Path | None = None, level: int = logging.INFO) ->
         "fontTools",
     ):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
+
+def shutdown_logging() -> None:
+    """Close only handlers installed by Creator Intelligence."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if not getattr(handler, "creator_intelligence_managed", False):
+            continue
+        root.removeHandler(handler)
+        handler.close()

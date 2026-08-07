@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   windows-release:
@@ -23,23 +25,163 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-build.txt
+      - name: Verify fresh-checkout workspace isolation
+        shell: pwsh
+        run: |
+          $runtimePaths = @("data", "backups", "logs", "cache", "temp", "exports", "imports", "workspaces", "workspace.json")
+          foreach ($path in $runtimePaths) {
+            if (Test-Path -LiteralPath $path) { throw "Fresh checkout already contains runtime path: $path" }
+          }
+          python -m creator_intelligence.core.release_smoke
+          foreach ($path in $runtimePaths) {
+            if (Test-Path -LiteralPath $path) { throw "Source startup wrote runtime data into the checkout: $path" }
+          }
       - name: Regression tests
         run: python -m pytest
+      - name: Verify source release contract
+        run: python -m creator_intelligence.core.release_verification --source
+      - name: Verify release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python -m creator_intelligence.core.release_verification --tag "${{ github.ref_name }}"
       - name: Privacy and history release gate
         run: python -m creator_intelligence.core.privacy_audit --history
       - name: Build standalone app
         run: python -m PyInstaller --noconfirm --clean CreatorIntelligence.spec
+      - name: Sign standalone app for public tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD)) {
+            throw "Tagged public releases require the Windows Authenticode signing secrets."
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP "creator-intelligence-signing.pfx"
+          [IO.File]::WriteAllBytes(
+            $pfxPath,
+            [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERTIFICATE_BASE64)
+          )
+          "WINDOWS_SIGNING_PFX=$pfxPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $password = ConvertTo-SecureString $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $importedCertificates = @(
+            Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          )
+          $importedThumbprints = @($importedCertificates | ForEach-Object { $_.Thumbprint } | Sort-Object -Unique)
+          "WINDOWS_SIGNING_IMPORTED_THUMBPRINTS=$($importedThumbprints -join ',')" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $codeSigningCertificates = @(
+            $importedCertificates | Where-Object {
+              $candidate = $_
+              $ekuOids = @($candidate.EnhancedKeyUsageList | ForEach-Object { $_.ObjectId.Value })
+              $candidate.HasPrivateKey -and $ekuOids -contains "1.3.6.1.5.5.7.3.3"
+            }
+          )
+          if ($codeSigningCertificates.Count -ne 1) {
+            throw "The PFX must contain exactly one private-key code-signing certificate."
+          }
+          $certificate = $codeSigningCertificates[0]
+          "WINDOWS_SIGNING_THUMBPRINT=$($certificate.Thumbprint)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signTool) { throw "signtool.exe was not found on the Windows runner." }
+          "WINDOWS_SIGNTOOL=$($signTool.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          & $signTool.FullName sign /sha1 $certificate.Thumbprint /s My /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist\CreatorIntelligence\CreatorIntelligence.exe
+          if ($LASTEXITCODE -ne 0) { throw "Signing the standalone app failed." }
+          if ((Get-AuthenticodeSignature dist\CreatorIntelligence\CreatorIntelligence.exe).Status -ne "Valid") {
+            throw "The standalone app Authenticode signature is not valid."
+          }
+      - name: Audit standalone bundle contents
+        run: python -m creator_intelligence.core.release_verification --bundle dist\CreatorIntelligence
+      - name: Smoke test standalone app and packaged OAuth runtime
+        run: dist\CreatorIntelligence\CreatorIntelligence.exe --release-smoke-test
       - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
+        run: choco install innosetup --version=6.7.1 --no-progress -y
       - name: Build installer
-        run: ISCC.exe installer\CreatorIntelligence.iss
+        shell: pwsh
+        run: |
+          $version = python -m creator_intelligence.core.release_verification --print-version
+          $releaseRank = python -m creator_intelligence.core.release_verification --print-release-rank
+          ISCC.exe "/DMyAppVersion=$version" "/DMyAppReleaseRank=$releaseRank" installer\CreatorIntelligence.iss
+      - name: Sign installer for public tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem release -File -Filter *.exe
+          if (@($installer).Count -ne 1) { throw "Expected exactly one installer to sign." }
+          & $env:WINDOWS_SIGNTOOL sign /sha1 $env:WINDOWS_SIGNING_THUMBPRINT /s My /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $installer.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Signing the installer failed." }
+          if ((Get-AuthenticodeSignature $installer.FullName).Status -ne "Valid") {
+            throw "The installer Authenticode signature is not valid."
+          }
+      - name: Install, reject downgrade, upgrade N-1 workspace, reinstall, and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installers = @(Get-ChildItem release -File -Filter *.exe -ErrorAction Stop)
+          if ($installers.Count -ne 1) { throw "Expected exactly one installer, found $($installers.Count)." }
+          $installer = $installers[0]
+          $installDir = Join-Path $env:RUNNER_TEMP "CreatorIntelligenceInstalled"
+          $upgradeWorkspace = Join-Path $env:RUNNER_TEMP "CreatorIntelligenceExternalWorkspace"
+          python -m creator_intelligence.core.release_smoke --prepare-n-minus-one $upgradeWorkspace
+          $arguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir")
+          $first = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
+          if ($first.ExitCode -ne 0) { throw "Clean installation failed with exit code $($first.ExitCode)." }
+          & (Join-Path $installDir "CreatorIntelligence.exe") --release-smoke-test
+
+          $rankKey = "HKCU:\Software\Creator Intelligence"
+          Set-ItemProperty -Path $rankKey -Name ReleaseRank -Value ("9" * 21)
+          $downgrade = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
+          if ($downgrade.ExitCode -eq 0) { throw "The installer accepted a simulated downgrade." }
+          $releaseRank = python -m creator_intelligence.core.release_verification --print-release-rank
+          Set-ItemProperty -Path $rankKey -Name ReleaseRank -Value $releaseRank
+
+          & (Join-Path $installDir "CreatorIntelligence.exe") --release-upgrade-smoke-test $upgradeWorkspace
+          $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
+          if ($upgrade.ExitCode -ne 0) { throw "Reinstallation failed with exit code $($upgrade.ExitCode)." }
+          & (Join-Path $installDir "CreatorIntelligence.exe") --release-smoke-test
+          $uninstallers = @(Get-ChildItem $installDir -File -Filter unins*.exe)
+          if ($uninstallers.Count -ne 1) { throw "Expected exactly one uninstaller." }
+          $uninstall = Start-Process -FilePath $uninstallers[0].FullName -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstall failed with exit code $($uninstall.ExitCode)." }
+          if (Test-Path (Join-Path $installDir "CreatorIntelligence.exe")) {
+            throw "The installed app remained after uninstall."
+          }
+          python -m creator_intelligence.core.release_smoke --verify-upgraded-workspace $upgradeWorkspace
       - name: Create checksums
         shell: pwsh
         run: |
-          Get-ChildItem release -File | ForEach-Object {
+          Get-ChildItem release -File -Filter *.exe | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($_.Name)" | Set-Content "$($_.FullName).sha256"
+            "$hash  $($_.Name)" | Set-Content "$($_.FullName).sha256" -Encoding ascii
           }
+      - name: Create release provenance manifest
+        run: python -m creator_intelligence.core.release_verification --write-manifest release --commit "${{ github.sha }}"
+      - name: Verify installer artifacts
+        run: python -m creator_intelligence.core.release_verification --artifacts release
+      - name: Remove temporary signing certificate
+        if: always() && startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_SIGNING_IMPORTED_THUMBPRINTS) {
+            foreach ($thumbprint in ($env:WINDOWS_SIGNING_IMPORTED_THUMBPRINTS -split ',')) {
+              if ($thumbprint -match '^[0-9A-Fa-f]{40}$') {
+                Remove-Item "Cert:\CurrentUser\My\$thumbprint" -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
+          if ($env:WINDOWS_SIGNING_PFX) {
+            Remove-Item $env:WINDOWS_SIGNING_PFX -Force -ErrorAction SilentlyContinue
+          }
+      - name: Attest public-repository installer provenance
+        if: github.event.repository.private == false
+        uses: actions/attest@v4
+        with:
+          subject-path: release/*.exe
       - uses: actions/upload-artifact@v4
         with:
           name: creator-intelligence-windows
@@ -48,4 +190,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" release/* --generate-notes --verify-tag
+        shell: pwsh
+        run: |
+          $version = python -m creator_intelligence.core.release_verification --print-version
+          $assets = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
+          $releaseArguments = @("release", "create", "${{ github.ref_name }}") + $assets
+          $releaseArguments += @("--draft", "--generate-notes", "--verify-tag")
+          if ($version.Contains("-")) { $releaseArguments += "--prerelease" }
+          gh @releaseArguments

@@ -44,3 +44,5 @@ python -m pytest
 See [`docs/APPLICATION_CORE.md`](docs/APPLICATION_CORE.md) for the Phase 8.1A architecture.
 See [`docs/FIRST_RUN_ONBOARDING.md`](docs/FIRST_RUN_ONBOARDING.md) for fresh-install and existing-workspace behavior.
 See [`docs/SECURE_ACCOUNTS.md`](docs/SECURE_ACCOUNTS.md) for operating-system credential storage and migration behavior.
+See [`docs/PUBLIC_RELEASE_CHECKLIST.md`](docs/PUBLIC_RELEASE_CHECKLIST.md) for automated and credentialed Windows release verification.
+See [`PRIVACY.md`](PRIVACY.md) for the public product privacy notice.

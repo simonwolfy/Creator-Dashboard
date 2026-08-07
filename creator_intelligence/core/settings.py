@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, fields, is_dataclass
 import json
+from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -64,6 +64,8 @@ class SettingsManager:
             raise SettingsValidationError("theme must be dark, light, or system.")
         if hasattr(value, "currency") and len(str(value.currency)) != 3:
             raise SettingsValidationError("currency must be a three-letter code.")
+        if hasattr(value, "update_channel") and value.update_channel not in {"stable", "preview"}:
+            raise SettingsValidationError("update_channel must be stable or preview.")
 
     def get(self, value: T, key: str, default: Any = None) -> Any:
         return getattr(value, key, default)

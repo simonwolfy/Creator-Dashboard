@@ -9,11 +9,12 @@ from creator_intelligence.core.config import ConfigService
 from creator_intelligence.core.diagnostics import DiagnosticsService, DiagnosticsSnapshot
 from creator_intelligence.core.health import HealthService
 from creator_intelligence.core.lifecycle import ApplicationLifecycle, LifecycleReport
-from creator_intelligence.core.logging import configure_logging
+from creator_intelligence.core.logging import configure_logging, shutdown_logging
 from creator_intelligence.core.versioning import APPLICATION_VERSION
 from creator_intelligence.core.workspace import WorkspaceManager
 from creator_intelligence.data.database import Database
 from creator_intelligence.services.backup import BackupService
+from creator_intelligence.services.update_checker import UpdateChecker
 from creator_intelligence.utils.paths import PROJECT_ROOT
 
 
@@ -59,8 +60,9 @@ class CreatorIntelligenceApplication:
         self.lifecycle.add_startup_step("Create startup backup", self._create_backup, required=False)
         self.lifecycle.add_startup_step("Load application modules", self._load_modules)
         self.lifecycle.add_startup_step("Run startup diagnostics", self._run_diagnostics, required=False)
-        self.lifecycle.add_shutdown_step("Emit application closing", self._emit_closing)
+        self.lifecycle.add_shutdown_step("Close application logging", shutdown_logging)
         self.lifecycle.add_shutdown_step("Clear transient services", self._clear_services)
+        self.lifecycle.add_shutdown_step("Emit application closing", self._emit_closing)
 
     def start(self) -> ApplicationRuntime:
         report = self.lifecycle.start()
@@ -154,6 +156,15 @@ class CreatorIntelligenceApplication:
         self._context, self._registry = bootstrap_application(self._db, settings=self._settings)
         self._context.set("application", self)
         self._context.set("workspace", self.workspace)
+        self._context.set(
+            "update_checker",
+            UpdateChecker(
+                current_version=self.VERSION,
+                state_path=self.workspace.paths.config / "update_state.json",
+                download_dir=self.workspace.paths.temp / "updates",
+                channel=getattr(self._settings, "update_channel", "stable"),
+            ),
+        )
         return f"{len(self._registry.modules)} modules loaded"
 
     def _run_diagnostics(self) -> str:

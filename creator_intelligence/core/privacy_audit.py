@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import argparse
 import re
 import subprocess
-from typing import Iterable
-
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
 
 FORBIDDEN_RUNTIME_SUFFIXES = {
     ".db", ".sqlite", ".sqlite3", ".mp4", ".mkv", ".mov", ".webm",
@@ -31,7 +30,10 @@ CREATOR_IDENTITY_PATTERNS = (
 
 SOURCE_SUFFIXES = {".py", ".toml", ".json", ".yaml", ".yml", ".md"}
 ALLOWED_IDENTITY_PATHS = {
+    "PRIVACY.md",
     "README.md",
+    # The installed app must name its public release repository to check for updates.
+    "creator_intelligence/services/update_checker.py",
     "docs/PRIVACY_AND_SHARING.md",
 }
 

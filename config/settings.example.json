@@ -8,5 +8,7 @@
   "backup_retention": 30,
   "prediction_training_window_days": 0,
   "exclude_outliers": false,
-  "short_duration_threshold_seconds": 180
+  "short_duration_threshold_seconds": 180,
+  "auto_check_updates": true,
+  "update_channel": "stable"
 }

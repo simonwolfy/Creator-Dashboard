@@ -1,16 +1,29 @@
+import logging
 import sys
 import traceback
-import logging
 from pathlib import Path
+
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from creator_intelligence.core.application import CreatorIntelligenceApplication
 from creator_intelligence.core.onboarding import OnboardingService
-from creator_intelligence.ui.main_window import MainWindow
 from creator_intelligence.ui.dialogs.onboarding import OnboardingWizard
+from creator_intelligence.ui.main_window import MainWindow
 
 
-def main():
+def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--release-smoke-test" in arguments:
+        from creator_intelligence.core.release_smoke import run_release_smoke
+
+        return run_release_smoke()
+    if "--release-upgrade-smoke-test" in arguments:
+        from creator_intelligence.core.release_smoke import run_upgrade_smoke
+
+        index = arguments.index("--release-upgrade-smoke-test")
+        if index + 1 >= len(arguments):
+            raise SystemExit("--release-upgrade-smoke-test requires a workspace path")
+        return run_upgrade_smoke(Path(arguments[index + 1]))
     app = QApplication(sys.argv)
     app.setApplicationName("Creator Intelligence")
     app.setApplicationVersion(CreatorIntelligenceApplication.VERSION)

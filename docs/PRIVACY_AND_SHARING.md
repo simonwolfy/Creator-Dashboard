@@ -59,3 +59,14 @@ with `git filter-repo`, force-push all affected branches and tags, and require
 fresh clones. Treat any local paths and creator analytics in those databases as
 previously disclosed. The audit prints paths and finding categories only, never
 stored values.
+
+## Update-check privacy
+
+In the installed Windows app, automatic update checking is enabled by default and
+runs at most once per day after startup. It makes an unauthenticated HTTPS request
+to the public GitHub Releases API with the application version in the user-agent.
+It does not send channel statistics, transcripts, media, workspace paths, account
+identifiers, provider credentials, or OAuth tokens. The last-check time, selected
+skip version, and non-secret release metadata are stored in the workspace's
+`config/update_state.json`. Automatic checks can be disabled in **Settings →
+Software updates**.

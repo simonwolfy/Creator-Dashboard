@@ -19,6 +19,8 @@ class AppConfig:
     prediction_training_window_days: int = 0
     exclude_outliers: bool = False
     short_duration_threshold_seconds: int = 180
+    auto_check_updates: bool = True
+    update_channel: str = "stable"
 
 
 class ConfigService:

@@ -12,22 +12,23 @@ venv/
 env/
 
 # Local runtime data
-backups/
-logs/
-cache/
-temp/
-exports/
-imports/
-assets/
-clips/
-reports/
-thumbnails/
-models/
-data/
-workspaces/
+/backups/
+/logs/
+/cache/
+/temp/
+/exports/
+/imports/
+/assets/
+/clips/
+/reports/
+/thumbnails/
+/models/
+/data/
+/workspaces/
 workspace.json
 workspace.local.json
 config/settings.json
+config/update_state.json
 config/ffmpeg.json
 config/*.local.json
 

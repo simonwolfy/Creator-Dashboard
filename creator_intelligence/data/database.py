@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import pandas as pd
 
 from creator_intelligence.core.exceptions import DatabaseError, MigrationError
 from creator_intelligence.data.google_drive_folder_migration import GOOGLE_DRIVE_FOLDER_MIGRATIONS
-from creator_intelligence.data.google_drive_metadata_migration import GOOGLE_DRIVE_METADATA_MIGRATIONS
+from creator_intelligence.data.google_drive_metadata_migration import (
+    GOOGLE_DRIVE_METADATA_MIGRATIONS,
+)
 from creator_intelligence.data.google_drive_migrations import GOOGLE_DRIVE_MIGRATIONS
 from creator_intelligence.data.migration_manager import MigrationManager, MigrationRecord
 from creator_intelligence.data.migrations import MIGRATIONS
@@ -72,11 +75,15 @@ class Database:
             return self.migration_manager.pending(con)
 
     def frame(self, sql: str, params: Iterable[Any] = ()) -> pd.DataFrame:
+        connection = None
         try:
-            with sqlite3.connect(self.path) as con:
-                return pd.read_sql_query(sql, con, params=tuple(params))
+            connection = sqlite3.connect(self.path)
+            return pd.read_sql_query(sql, connection, params=tuple(params))
         except Exception as exc:
             raise DatabaseError(str(exc)) from exc
+        finally:
+            if connection is not None:
+                connection.close()
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> int:
         try:
