@@ -346,11 +346,11 @@ class SocialPlatformService:
             "content_id": str(record.get("source_video_id") or record.get("id")),
             "title": title, "description": record.get("description"),
             "publish_time": record.get("published_at"),
-            "duration_seconds": self._number(record.get("duration_seconds"), float),
-            "views": self._number(record.get("views"), int),
-            "likes": self._number(record.get("likes"), int),
-            "comments": self._number(record.get("comments"), int),
-            "shares": self._number(record.get("shares"), int),
+            "duration_seconds": self._number_or_zero(record.get("duration_seconds"), float),
+            "views": self._number_or_zero(record.get("views"), int),
+            "likes": self._number_or_zero(record.get("likes"), int),
+            "comments": self._number_or_zero(record.get("comments"), int),
+            "shares": self._number_or_zero(record.get("shares"), int),
         }
         available = [name for name in values if name in columns]
         update = [name for name in available if name != "content_id"]
@@ -475,6 +475,11 @@ class SocialPlatformService:
     @staticmethod
     def _number(value, cast):
         return cast(value) if value not in (None, "") else None
+
+    @classmethod
+    def _number_or_zero(cls, value, cast):
+        number = cls._number(value, cast)
+        return number if number is not None else cast(0)
 
     @staticmethod
     def _normalized(value):

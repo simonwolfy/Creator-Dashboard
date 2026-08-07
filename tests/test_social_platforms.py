@@ -121,7 +121,9 @@ def test_youtube_sync_mirrors_content_tab_table(tmp_path):
     db = DB(tmp_path / "youtube-mirror.db")
     db.execute("""CREATE TABLE youtube_content(
         content_id TEXT PRIMARY KEY,title TEXT,description TEXT,publish_time TEXT,
-        duration_seconds REAL,views INTEGER,likes INTEGER,comments INTEGER,shares INTEGER)""")
+        duration_seconds REAL NOT NULL DEFAULT 0,views INTEGER NOT NULL DEFAULT 0,
+        likes INTEGER NOT NULL DEFAULT 0,comments INTEGER NOT NULL DEFAULT 0,
+        shares INTEGER NOT NULL DEFAULT 0)""")
     service = SocialPlatformService(db)
     service.save_configuration("youtube", {"api_key": "key", "channel_id": "channel"})
     service.sync("youtube", fetcher=lambda platform, cursor: [{
@@ -132,3 +134,6 @@ def test_youtube_sync_mirrors_content_tab_table(tmp_path):
     assert row["title"] == "A Better Clip Title"
     assert row["description"] == "Description"
     assert int(row["views"]) == 1000
+    assert int(row["likes"]) == 0
+    assert int(row["comments"]) == 0
+    assert int(row["shares"]) == 0
