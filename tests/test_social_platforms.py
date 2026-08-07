@@ -92,6 +92,7 @@ def test_oauth_urls_and_token_exchange_use_saved_configuration(tmp_path, monkeyp
     })
     assert "instagram_business_manage_insights" in service.authorization_url("instagram")
     monkeypatch.setattr(service, "_post_form", lambda url, values: {"access_token": "new", "user_id": 7})
+    monkeypatch.setattr(service, "_json_request", lambda request: {})
     service.exchange_authorization_code("instagram", "code")
     assert service.configuration("instagram")["access_token"] == "new"
 

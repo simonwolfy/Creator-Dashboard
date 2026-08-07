@@ -1,12 +1,13 @@
 import pandas as pd
 from PySide6.QtWidgets import (
     QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTableView,QTabWidget,QComboBox,QPushButton,QCheckBox,
-    QMessageBox,QFormLayout,QLineEdit,QPlainTextEdit,QDialog,QDialogButtonBox,QAbstractItemView
+    QMessageBox,QFormLayout,QLineEdit,QPlainTextEdit,QDialog,QDialogButtonBox,QAbstractItemView,QFileDialog
 )
 from creator_intelligence.ui.pages.twitch import FrameModel
 from creator_intelligence.ui.widgets import MetricCard
 from creator_intelligence.ui.charts import Chart
 from creator_intelligence.services.reporting import ReportingService
+from creator_intelligence.ui.oauth_connect import run_browser_oauth, show_connection_result
 from creator_intelligence.utils.paths import EXPORT_DIR
 
 class YouTubePage(QWidget):
@@ -115,6 +116,17 @@ class YouTubePage(QWidget):
         form.addRow("YouTube Data API key",self.youtube_api_key)
         form.addRow("Channel ID",self.youtube_channel_id)
         form.addRow(self.youtube_sync_enabled)
+        oauth_help=QLabel(
+            "Recommended: create Google OAuth credentials as a Desktop app, download the JSON file, "
+            "then import it once. Connect YouTube will fill the channel ID and tokens."
+        )
+        oauth_help.setWordWrap(True);form.addRow(oauth_help)
+        self.youtube_oauth_client=QLabel("No Google OAuth desktop client imported")
+        self.youtube_oauth_client.setWordWrap(True);form.addRow("Google sign-in",self.youtube_oauth_client)
+        import_oauth=QPushButton("Import Google OAuth client JSON")
+        import_oauth.clicked.connect(self.import_youtube_oauth);form.addRow(import_oauth)
+        connect=QPushButton("Connect YouTube")
+        connect.clicked.connect(self.connect_youtube);form.addRow(connect)
         save=QPushButton("Save YouTube API setup"); save.clicked.connect(self.save_api_setup)
         form.addRow(save)
         sync=QPushButton("Sync YouTube now"); sync.clicked.connect(self.sync_youtube_now)
@@ -127,8 +139,33 @@ class YouTubePage(QWidget):
         self.youtube_api_key.setText(config.get("api_key") or "")
         self.youtube_channel_id.setText(config.get("channel_id") or "")
         self.youtube_sync_enabled.setChecked(bool(config.get("enabled")))
+        if config.get("oauth_client_id"):
+            self.youtube_oauth_client.setText(f"Desktop OAuth client imported · {config.get('oauth_client_id')}")
         self.refresh_api_status()
         return page
+
+    def import_youtube_oauth(self):
+        path,_=QFileDialog.getOpenFileName(self,"Choose Google OAuth client JSON","","JSON files (*.json)")
+        if not path:return
+        try:self.service.social.import_youtube_oauth_client(path)
+        except Exception as exc:QMessageBox.critical(self,"Google OAuth setup",str(exc));return
+        config=self.service.social.display_configuration("youtube")
+        self.youtube_oauth_client.setText(f"Desktop OAuth client imported · {config.get('oauth_client_id')}")
+        self.youtube_sync_enabled.setChecked(True)
+        QMessageBox.information(self,"Google OAuth setup","Desktop OAuth credentials imported securely. You can now connect YouTube.")
+
+    def connect_youtube(self):
+        self.service.social.save_configuration("youtube",{
+            "api_key":self.youtube_api_key.text(),"channel_id":self.youtube_channel_id.text()
+        },True)
+        try:result=run_browser_oauth(self,self.service.social,"youtube")
+        except Exception as exc:QMessageBox.critical(self,"Connect YouTube",str(exc));return
+        if result:
+            config=self.service.social.display_configuration("youtube")
+            self.youtube_channel_id.setText(config.get("channel_id") or "")
+            self.youtube_sync_enabled.setChecked(True)
+            self.refresh_api_status();self.refresh_all()
+            show_connection_result(self,"youtube",result)
 
     def save_api_setup(self):
         self.service.social.save_configuration("youtube",{
@@ -139,10 +176,11 @@ class YouTubePage(QWidget):
 
     def refresh_api_status(self):
         status=self.service.social.connection_status("youtube")
-        self.youtube_api_status.setText(
-            f"Configured · Sync: {status['sync_status']}" if status["configured"]
-            else "Missing YouTube Data API key or channel ID"
-        )
+        if status["configured"]:
+            account=f" · {status['account_name']}" if status.get("account_name") else ""
+            self.youtube_api_status.setText(f"Connected{account} · Sync: {status['sync_status']}")
+        else:
+            self.youtube_api_status.setText("Not connected · Use Google sign-in or provide an API key and channel ID")
 
     def sync_youtube_now(self):
         self.service.social.save_configuration("youtube",{
@@ -157,7 +195,9 @@ class YouTubePage(QWidget):
 
     def disconnect_youtube(self):
         if QMessageBox.question(self,"Disconnect YouTube","Clear the API key from the operating-system vault?")!=QMessageBox.StandardButton.Yes:return
-        self.service.social.disconnect("youtube");self.youtube_api_key.clear();self.youtube_sync_enabled.setChecked(False);self.refresh_api_status()
+        try:self.service.social.revoke_and_disconnect("youtube")
+        except Exception as exc:QMessageBox.warning(self,"Could not revoke YouTube access",str(exc));return
+        self.youtube_api_key.clear();self.youtube_sync_enabled.setChecked(False);self.refresh_api_status()
 
     def refresh_all(self):
         fmt=self.current_format()

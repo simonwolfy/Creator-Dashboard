@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from urllib.parse import parse_qs, urlparse
+
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,QInputDialog,
     QMessageBox, QPushButton, QTableView, QVBoxLayout, QWidget,
 )
 
 from creator_intelligence.ui.pages.twitch import FrameModel
+from creator_intelligence.ui.oauth_connect import run_browser_oauth, show_connection_result
 from creator_intelligence.ui.widgets import MetricCard
 
 
@@ -25,6 +28,7 @@ class SocialPlatformPage(QWidget):
         super().__init__()
         self.service = service
         self.platform = platform
+        self.manual_flow = None
         layout = QVBoxLayout(self)
         title = QLabel(f"{platform.title()} Intelligence")
         title.setObjectName("pageTitle")
@@ -48,14 +52,22 @@ class SocialPlatformPage(QWidget):
             field = QLineEdit()
             if "secret" in key or "token" in key or "api_key" in key:
                 field.setEchoMode(QLineEdit.EchoMode.Password)
+            if key in {"access_token", "refresh_token", "account_id", "user_id"}:
+                field.setReadOnly(True)
+                field.setPlaceholderText("Filled automatically after sign-in")
             self.fields[key] = field
             form.addRow(label, field)
-        buttons = QHBoxLayout()
+        if "redirect_uri" in self.fields:
+            default_port = 49153 if platform == "instagram" else 49152
+            self.fields["redirect_uri"].setPlaceholderText(f"http://127.0.0.1:{default_port}/callback/")
+        primary_buttons = QHBoxLayout()
+        connect = QPushButton(f"Connect {platform.title()}")
+        connect.clicked.connect(self.connect_account)
         save = QPushButton("Save API setup")
         save.clicked.connect(self.save)
         authorize = QPushButton("Copy OAuth authorization URL")
         authorize.clicked.connect(self.copy_authorization_url)
-        exchange = QPushButton("Exchange authorization code")
+        exchange = QPushButton("Enter callback URL")
         exchange.clicked.connect(self.exchange_code)
         token_refresh = QPushButton("Refresh access token")
         token_refresh.clicked.connect(self.refresh_token)
@@ -65,15 +77,20 @@ class SocialPlatformPage(QWidget):
         refresh.clicked.connect(self.refresh)
         disconnect = QPushButton("Disconnect / revoke and clear credentials")
         disconnect.clicked.connect(self.disconnect)
-        buttons.addWidget(save)
-        buttons.addWidget(authorize)
-        buttons.addWidget(exchange)
-        buttons.addWidget(token_refresh)
-        buttons.addWidget(sync)
-        buttons.addWidget(refresh)
-        buttons.addWidget(disconnect)
-        buttons.addStretch()
-        form.addRow(buttons)
+        primary_buttons.addWidget(connect)
+        primary_buttons.addWidget(sync)
+        primary_buttons.addWidget(refresh)
+        primary_buttons.addWidget(disconnect)
+        primary_buttons.addStretch()
+        form.addRow(primary_buttons)
+        advanced = QGroupBox("Advanced manual setup")
+        advanced_buttons = QHBoxLayout(advanced)
+        advanced_buttons.addWidget(save)
+        advanced_buttons.addWidget(authorize)
+        advanced_buttons.addWidget(exchange)
+        advanced_buttons.addWidget(token_refresh)
+        advanced_buttons.addStretch()
+        form.addRow(advanced)
         self.status = QLabel()
         self.status.setWordWrap(True)
         form.addRow("Status", self.status)
@@ -113,7 +130,8 @@ class SocialPlatformPage(QWidget):
             card.update_value(value)
         status = self.service.connection_status(self.platform)
         if status["configured"]:
-            message = f"Configured · Sync: {status['sync_status']}"
+            account = f" as {status['account_name']}" if status.get("account_name") else ""
+            message = f"Connected{account} · Sync: {status['sync_status']}"
         else:
             names = [LABELS[self.platform].get(field, field) for field in status["missing"]]
             message = "Missing: " + ", ".join(names)
@@ -124,20 +142,55 @@ class SocialPlatformPage(QWidget):
         self.status.setText(message)
         self.table.setModel(FrameModel(self.service.content(self.platform)))
 
+    def connect_account(self):
+        if "redirect_uri" in self.fields and not self.fields["redirect_uri"].text().strip():
+            port = 49153 if self.platform == "instagram" else 49152
+            self.fields["redirect_uri"].setText(f"http://127.0.0.1:{port}/callback/")
+        self.enabled.setChecked(True)
+        self.save(silent=True)
+        redirect = self.fields.get("redirect_uri")
+        try:
+            result = run_browser_oauth(
+                self, self.service, self.platform,
+                redirect.text().strip() if redirect else None,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, f"Connect {self.platform.title()}", str(exc)); return
+        if result:
+            self.load(); self.refresh()
+            show_connection_result(self, self.platform, result)
+
     def copy_authorization_url(self):
         self.save(silent=True)
         try:
-            url = self.service.authorization_url(self.platform)
+            redirect = self.fields.get("redirect_uri")
+            self.manual_flow = self.service.begin_oauth(
+                self.platform, redirect.text().strip() if redirect else None,
+            )
+            url = self.manual_flow["authorization_url"]
         except Exception as exc:
             QMessageBox.critical(self, "OAuth setup", str(exc)); return
         QApplication.clipboard().setText(url)
-        QMessageBox.information(self, "OAuth setup", "Authorization URL copied. Open it in your browser, approve access, then paste the returned code here.")
+        QMessageBox.information(self, "OAuth setup", "Authorization URL copied. Open it in your browser, approve access, then paste the complete callback URL here.")
 
     def exchange_code(self):
-        code, ok = QInputDialog.getText(self, "OAuth authorization", "Authorization code:")
-        if not ok or not code.strip(): return
+        if not self.manual_flow:
+            QMessageBox.information(self, "OAuth authorization", "Create the authorization URL first."); return
+        callback_url, ok = QInputDialog.getMultiLineText(
+            self, "OAuth authorization", "Complete callback URL:"
+        )
+        if not ok or not callback_url.strip(): return
+        callback = {
+            key: values[0]
+            for key, values in parse_qs(urlparse(callback_url.strip()).query).items()
+            if values
+        }
+        if not callback:
+            QMessageBox.critical(self, "OAuth authorization", "Paste the complete callback URL, including its code and state values."); return
         try:
-            self.service.exchange_authorization_code(self.platform, code.strip())
+            self.service.complete_oauth(
+                self.platform, callback, self.manual_flow,
+            )
         except Exception as exc:
             QMessageBox.critical(self, "OAuth authorization", str(exc)); return
         self.load(); self.refresh()

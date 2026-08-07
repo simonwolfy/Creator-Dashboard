@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QLineEdit,QSpinBox,QDoubleSpinBox,QCheckBox,QMessageBox,QInputDialog
 )
 from creator_intelligence.ui.pages.twitch import FrameModel
+from creator_intelligence.ui.oauth_connect import run_twitch_device_oauth, show_connection_result
 from creator_intelligence.services.live_stream import LiveSimulationAdapter
 
 class MetricCard(QGroupBox):
@@ -117,6 +118,18 @@ class LiveStreamPage(QWidget):
         form.addRow("Twitch client ID",self.twitch_client_id)
         form.addRow("Broadcaster ID",self.twitch_broadcaster_id)
         form.addRow("OAuth access token",self.twitch_access_token)
+        twitch_help=QLabel(
+            "Paste only the Client ID from the Twitch developer console. Connect Twitch will open "
+            "a secure device sign-in and fill the broadcaster ID and tokens automatically."
+        )
+        twitch_help.setWordWrap(True)
+        form.addRow(twitch_help)
+        connect_twitch=QPushButton("Connect Twitch")
+        connect_twitch.clicked.connect(self.connect_twitch)
+        form.addRow(connect_twitch)
+        self.twitch_status=QLabel()
+        self.twitch_status.setWordWrap(True)
+        form.addRow("Twitch status",self.twitch_status)
         form.addRow("Enable OBS",self.obs_enabled)
         form.addRow("OBS host",self.obs_host)
         form.addRow("OBS port",self.obs_port)
@@ -233,6 +246,14 @@ class LiveStreamPage(QWidget):
         self.twitch_client_id.setText(settings["twitch_client_id"] or "")
         self.twitch_broadcaster_id.setText(settings["twitch_broadcaster_id"] or "")
         self.twitch_access_token.setText(settings["twitch_access_token"] or "")
+        connected = bool(
+            settings.get("twitch_enabled") and settings.get("twitch_client_id")
+            and settings.get("twitch_broadcaster_id") and settings.get("twitch_access_token")
+        )
+        self.twitch_status.setText(
+            f"Connected · Broadcaster ID {settings.get('twitch_broadcaster_id')}"
+            if connected else "Not connected · A Client ID is required to start sign-in"
+        )
         self.obs_enabled.setChecked(bool(settings["obs_enabled"]))
         self.obs_host.setText(settings["obs_host"] or "127.0.0.1")
         self.obs_port.setValue(int(settings["obs_port"] or 4455))
@@ -262,6 +283,20 @@ class LiveStreamPage(QWidget):
         )
         QMessageBox.information(self,"Settings saved","Live integration settings were saved.")
 
+    def connect_twitch(self):
+        try:
+            result=run_twitch_device_oauth(self,self.service,self.twitch_client_id.text().strip())
+        except Exception as exc:
+            QMessageBox.critical(self,"Connect Twitch",str(exc));return
+        if result:
+            self.load_settings()
+            show_connection_result(self,"twitch",result)
+
     def disconnect_integration(self,provider):
         if QMessageBox.question(self,"Disconnect",f"Clear {provider.title()} credentials from the operating-system vault?")!=QMessageBox.StandardButton.Yes:return
+        warning=None
+        if provider=="twitch":
+            try:self.service.revoke_twitch_access()
+            except Exception as exc:warning=str(exc)
         self.service.disconnect_integration(provider);self.load_settings()
+        if warning:QMessageBox.warning(self,"Disconnected locally",f"Credentials were cleared, but Twitch could not be reached to revoke the token: {warning}")

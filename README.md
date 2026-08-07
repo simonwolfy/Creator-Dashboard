@@ -175,16 +175,26 @@ and other media-processing features.
 
 ### 2. Connect or import platform data
 
-- **YouTube:** enter the YouTube Data API key and channel ID, save them, and use
-  **Sync content**. Synced content titles and performance statistics can contribute
-  to future packaging recommendations.
-- **Twitch:** configure Twitch credentials under the live-stream connection area,
-  or import Twitch analytics files through **Import Center**.
-- **Instagram and TikTok:** enter credentials issued by approved provider apps,
-  authorize the account, exchange the returned code when requested, and sync.
-  Available statistics depend on provider permissions and app approval.
+- **YouTube:** import a Google OAuth client JSON created as a **Desktop app**, click
+  **Connect YouTube**, approve access in the browser, and sync. The channel ID and
+  tokens are filled automatically. An API key and channel ID remain available as
+  a public-data fallback.
+- **Twitch:** paste the Client ID from a Twitch app registered as **Public**, then
+  click **Connect Twitch** under **Live Stream > Connections and rules**. Twitch's
+  device page fills the broadcaster ID and tokens automatically. No Client Secret
+  or redirect URL is used.
+- **Instagram:** enter the Meta app ID, app secret, and registered redirect URI,
+  then click **Connect Instagram**. A local development callback can use
+  `http://127.0.0.1:49153/callback/`; an approved HTTPS redirect uses the guided
+  callback-URL fallback.
+- **TikTok:** enter the client key and client secret, register
+  `http://127.0.0.1:49152/callback/` as the Desktop Login Kit redirect, then click
+  **Connect TikTok**. The PKCE browser flow fills the open ID and tokens.
 - **Google Drive:** select a Google OAuth desktop client JSON file, connect in the
   browser, test the connection, then choose folders under **Drive Folders**.
+
+See [Platform account connections](docs/PLATFORM_ACCOUNT_CONNECTIONS.md) for the
+provider-console setup and requested permissions.
 
 Use test or development provider applications while the project is in alpha.
 Never commit credential JSON files or paste tokens into GitHub issues.

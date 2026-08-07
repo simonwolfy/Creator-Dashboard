@@ -42,8 +42,10 @@ tested without broadcasting.
 - channel.chat.message
 
 The adapter also validates whether the required local credentials are
-configured. Network transport, browser OAuth, token refresh, and EventSub
-WebSocket reconnection remain isolated behind the adapter.
+configured. Twitch's device-code sign-in fills the broadcaster ID, saves access
+and refresh tokens in the operating-system vault, and supports token refresh.
+Network transport and EventSub WebSocket reconnection remain isolated behind the
+adapter.
 
 ## OBS integration foundation
 

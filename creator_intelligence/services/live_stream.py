@@ -7,6 +7,9 @@ import math
 import random
 import sqlite3
 import uuid
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from creator_intelligence.core.credential_vault import CredentialVault
 
 @dataclass
@@ -24,6 +27,10 @@ class LiveSnapshot:
     recording_active: bool | None = None
 
 class LiveStreamService:
+    TWITCH_SCOPES = (
+        "user:read:chat", "moderator:read:followers", "channel:read:subscriptions", "bits:read",
+    )
+
     def __init__(self, db, notifications=None, credential_vault=None):
         self.db = db
         self.notifications = notifications
@@ -205,12 +212,111 @@ class LiveStreamService:
         ) + " WHERE id=1"
         self.db.execute(sql, [filtered[column] for column in columns])
 
+    def begin_twitch_connection(self, client_id: str) -> dict[str, Any]:
+        client_id = str(client_id or "").strip()
+        if not client_id:
+            raise ValueError("Paste the Twitch Client ID first.")
+        payload = self._post_form("https://id.twitch.tv/oauth2/device", {
+            "client_id": client_id, "scopes": " ".join(self.TWITCH_SCOPES),
+        })
+        required = ("device_code", "user_code", "verification_uri")
+        if any(not payload.get(key) for key in required):
+            raise RuntimeError("Twitch did not return a complete device sign-in response.")
+        payload["client_id"] = client_id
+        return payload
+
+    def poll_twitch_connection(self, connection: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            payload = self._post_form("https://id.twitch.tv/oauth2/token", {
+                "client_id": connection.get("client_id"),
+                "scopes": " ".join(self.TWITCH_SCOPES),
+                "device_code": connection.get("device_code"),
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            })
+        except HTTPError as exc:
+            try:
+                error = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                error = {}
+            message = str(error.get("message") or error.get("error") or exc)
+            if message.lower() in {"authorization_pending", "slow_down"}:
+                return None
+            raise RuntimeError(self.vault.redact(message)) from None
+        access_token = payload.get("access_token") or ""
+        if not access_token:
+            return None
+        identity = self._json_request(Request(
+            "https://api.twitch.tv/helix/users",
+            headers={
+                "Client-Id": str(connection.get("client_id") or ""),
+                "Authorization": f"Bearer {access_token}",
+            },
+        ))
+        users = identity.get("data") or []
+        if not users:
+            raise RuntimeError("Twitch sign-in succeeded but no broadcaster account was returned.")
+        user = users[0]
+        self.update_settings(
+            twitch_enabled=1,
+            twitch_client_id=str(connection.get("client_id") or ""),
+            twitch_broadcaster_id=str(user.get("id") or ""),
+            twitch_access_token=access_token,
+            twitch_refresh_token=payload.get("refresh_token") or "",
+            twitch_token_expires_at=(
+                datetime.now() + timedelta(seconds=int(payload.get("expires_in") or 0))
+            ).isoformat(),
+        )
+        return {
+            "connected": True, "broadcaster_id": str(user.get("id") or ""),
+            "account_name": str(user.get("display_name") or user.get("login") or ""),
+        }
+
+    def refresh_twitch_connection(self) -> dict[str, Any]:
+        settings = self.settings()
+        if not settings.get("twitch_refresh_token"):
+            raise ValueError("Reconnect Twitch to obtain a refresh token.")
+        payload = self._post_form("https://id.twitch.tv/oauth2/token", {
+            "client_id": settings.get("twitch_client_id"),
+            "grant_type": "refresh_token", "refresh_token": settings.get("twitch_refresh_token"),
+        })
+        self.update_settings(
+            twitch_access_token=payload.get("access_token") or "",
+            twitch_refresh_token=payload.get("refresh_token") or "",
+            twitch_token_expires_at=(
+                datetime.now() + timedelta(seconds=int(payload.get("expires_in") or 0))
+            ).isoformat(),
+        )
+        return {"refreshed": True, "expires_in": payload.get("expires_in")}
+
+    def revoke_twitch_access(self) -> None:
+        settings = self.settings()
+        token = settings.get("twitch_access_token")
+        client_id = settings.get("twitch_client_id")
+        if token and client_id:
+            self._post_form("https://id.twitch.tv/oauth2/revoke", {
+                "client_id": client_id, "token": token,
+            })
+
     def disconnect_integration(self,provider):
         provider=str(provider).lower()
         if provider not in {"twitch","obs"}:raise ValueError(provider)
         self.vault.delete(provider)
         field="twitch_enabled" if provider=="twitch" else "obs_enabled"
         self.db.execute(f"UPDATE live_integration_settings SET {field}=0,updated_at=? WHERE id=1",(datetime.now().isoformat(),))
+
+    @staticmethod
+    def _json_request(request: Request) -> dict[str, Any]:
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    @classmethod
+    def _post_form(cls, url: str, values: dict[str, Any]) -> dict[str, Any]:
+        request = Request(
+            url,
+            data=urlencode({key: value for key, value in values.items() if value is not None}).encode("utf-8"),
+            method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        return cls._json_request(request)
 
     def active_session(self):
         frame = self.db.frame(

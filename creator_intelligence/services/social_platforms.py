@@ -2,21 +2,32 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from creator_intelligence.core.credential_vault import CredentialVault
+from creator_intelligence.services.desktop_oauth import oauth_state, pkce_pair
 
 
 class SocialPlatformService:
     """Shared credentials, sync state, and published-content analytics."""
 
     FIELDS = {
-        "youtube": ("api_key", "channel_id"),
-        "instagram": ("app_id", "app_secret", "access_token", "account_id", "redirect_uri"),
-        "tiktok": ("client_key", "client_secret", "access_token", "refresh_token", "user_id", "redirect_uri"),
+        "youtube": (
+            "api_key", "channel_id", "oauth_client_id", "oauth_client_secret",
+            "access_token", "refresh_token", "token_expires_at", "account_name",
+        ),
+        "instagram": (
+            "app_id", "app_secret", "access_token", "account_id", "redirect_uri",
+            "token_expires_at", "account_name",
+        ),
+        "tiktok": (
+            "client_key", "client_secret", "access_token", "refresh_token", "user_id",
+            "redirect_uri", "token_expires_at", "account_name",
+        ),
     }
 
     def __init__(self, db, credential_vault=None):
@@ -97,7 +108,14 @@ class SocialPlatformService:
 
     def save_configuration(self, platform: str, values: dict[str, Any], enabled: bool = True) -> None:
         platform = self._platform(platform)
-        clean = {field: str(values.get(field) or "").strip() for field in self.FIELDS[platform]}
+        current = self.configuration(platform) if not self.db.frame(
+            "SELECT 1 FROM integration_settings WHERE integration_id=?",
+            (f"{platform}_title_sync",),
+        ).empty else {}
+        clean = {
+            field: str(values.get(field) if field in values else current.get(field) or "").strip()
+            for field in self.FIELDS[platform]
+        }
         public = self.vault.protect(platform,clean)
         now = datetime.now().isoformat()
         self.db.execute(
@@ -119,8 +137,15 @@ class SocialPlatformService:
 
     def revoke_and_disconnect(self, platform: str) -> dict[str, Any]:
         platform=self._platform(platform)
-        if platform=="tiktok":
-            config=self.configuration(platform)
+        config=self.configuration(platform)
+        if platform=="youtube" and (config.get("refresh_token") or config.get("access_token")):
+            try:
+                self._post_form("https://oauth2.googleapis.com/revoke", {
+                    "token": config.get("refresh_token") or config.get("access_token")
+                })
+            except Exception as exc:
+                raise RuntimeError(self.vault.redact(exc)) from None
+        elif platform=="tiktok":
             try:
                 self._post_form("https://open.tiktokapis.com/v2/oauth/revoke/",{
                     "client_key":config.get("client_key"),"client_secret":config.get("client_secret"),
@@ -132,7 +157,18 @@ class SocialPlatformService:
     def connection_status(self, platform: str) -> dict[str, Any]:
         platform = self._platform(platform)
         config = self.configuration(platform)
-        missing = [field for field in self.FIELDS[platform] if not config.get(field)]
+        if platform == "youtube":
+            missing = []
+            if not config.get("channel_id"):
+                missing.append("channel_id")
+            if not (config.get("access_token") or config.get("api_key")):
+                missing.append("google_sign_in_or_api_key")
+        elif platform == "instagram":
+            required = ("app_id", "app_secret", "access_token", "account_id")
+            missing = [field for field in required if not config.get(field)]
+        else:
+            required = ("client_key", "client_secret", "access_token", "refresh_token", "user_id")
+            missing = [field for field in required if not config.get(field)]
         sync = self.db.frame(
             "SELECT * FROM creator_title_sync_state WHERE platform=?", (platform,)
         )
@@ -145,6 +181,7 @@ class SocialPlatformService:
             "last_synced_at": sync_row.get("last_synced_at"),
             "last_error": sync_row.get("last_error") or config.get("last_error"),
             "credential_storage": "Operating-system credential vault",
+            "account_name": config.get("account_name"),
         }
 
     def content(self, platform: str):
@@ -172,51 +209,164 @@ class SocialPlatformService:
                 "watch_time": float(frame["watch_time"].sum()),
                 "engagement_rate": engagements / views * 100 if views else 0.0}
 
-    def authorization_url(self, platform: str, state: str = "creator-intelligence") -> str:
+    def import_youtube_oauth_client(self, path: str | Path) -> dict[str, str]:
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ValueError("That file is not a valid Google OAuth client JSON file.") from exc
+        client = payload.get("installed") if isinstance(payload, dict) else None
+        if not isinstance(client, dict) or not client.get("client_id"):
+            raise ValueError("Choose OAuth credentials created as a Google Desktop app.")
+        values = {
+            "oauth_client_id": client.get("client_id"),
+            "oauth_client_secret": client.get("client_secret") or "",
+        }
+        self.save_configuration("youtube", values, True)
+        return values
+
+    def begin_oauth(
+        self, platform: str, redirect_uri: str | None = None, *, state: str | None = None,
+    ) -> dict[str, str]:
         platform = self._platform(platform)
         config = self.configuration(platform)
-        if platform == "instagram":
-            params = {"client_id": config.get("app_id"), "redirect_uri": config.get("redirect_uri"),
+        state = state or oauth_state()
+        if platform == "youtube":
+            if not config.get("oauth_client_id"):
+                raise ValueError("Import a Google Desktop OAuth client JSON file first.")
+            if not redirect_uri:
+                raise ValueError("YouTube sign-in needs a local callback address.")
+            verifier, challenge = pkce_pair()
+            params = {
+                "client_id": config.get("oauth_client_id"), "redirect_uri": redirect_uri,
+                "response_type": "code", "scope": "https://www.googleapis.com/auth/youtube.readonly",
+                "access_type": "offline", "include_granted_scopes": "true", "prompt": "consent",
+                "state": state, "code_challenge": challenge, "code_challenge_method": "S256",
+            }
+            base = "https://accounts.google.com/o/oauth2/v2/auth"
+        elif platform == "instagram":
+            target = redirect_uri or config.get("redirect_uri")
+            if not config.get("app_id") or not config.get("app_secret") or not target:
+                raise ValueError("Save the Meta app ID, app secret, and OAuth redirect URI first.")
+            verifier = ""
+            params = {"client_id": config.get("app_id"), "redirect_uri": target,
                       "response_type": "code", "scope": "instagram_business_basic,instagram_business_manage_insights",
                       "state": state}
             base = "https://www.instagram.com/oauth/authorize"
         elif platform == "tiktok":
-            params = {"client_key": config.get("client_key"), "redirect_uri": config.get("redirect_uri"),
-                      "response_type": "code", "scope": "user.info.basic,video.list", "state": state}
+            target = redirect_uri or config.get("redirect_uri")
+            if not config.get("client_key") or not config.get("client_secret") or not target:
+                raise ValueError("Save the TikTok client key, client secret, and desktop redirect URI first.")
+            verifier, challenge = pkce_pair(hex_challenge=True)
+            params = {
+                "client_key": config.get("client_key"), "redirect_uri": target,
+                "response_type": "code", "scope": "user.info.basic,video.list", "state": state,
+                "code_challenge": challenge, "code_challenge_method": "S256",
+            }
             base = "https://www.tiktok.com/v2/auth/authorize/"
         else:
-            raise ValueError("YouTube uses its API key setup for public channel synchronization.")
-        if not all(params.values()):
-            raise ValueError("Save the app credentials and redirect URI before starting OAuth.")
-        return base + "?" + urlencode(params)
+            raise ValueError(platform)
+        return {
+            "platform": platform, "authorization_url": base + "?" + urlencode(params),
+            "redirect_uri": str(params["redirect_uri"]), "state": state, "code_verifier": verifier,
+        }
 
-    def exchange_authorization_code(self, platform: str, code: str) -> dict[str, Any]:
+    def authorization_url(self, platform: str, state: str | None = None) -> str:
         platform = self._platform(platform)
         config = self.configuration(platform)
-        if platform == "instagram":
+        return self.begin_oauth(
+            platform, config.get("redirect_uri"), state=state,
+        )["authorization_url"]
+
+    def complete_oauth(self, platform: str, callback: dict[str, str], flow: dict[str, str]) -> dict[str, Any]:
+        platform = self._platform(platform)
+        if callback.get("error"):
+            raise ValueError(callback.get("error_description") or callback["error"])
+        if not callback.get("state") or callback.get("state") != flow.get("state"):
+            raise ValueError("The sign-in response did not match this connection request. Please try again.")
+        code = callback.get("code") or ""
+        if not code:
+            raise ValueError("The provider did not return an authorization code.")
+        return self.exchange_authorization_code(
+            platform, code, redirect_uri=flow.get("redirect_uri"),
+            code_verifier=flow.get("code_verifier"),
+        )
+
+    def exchange_authorization_code(
+        self, platform: str, code: str, *, redirect_uri: str | None = None,
+        code_verifier: str | None = None,
+    ) -> dict[str, Any]:
+        platform = self._platform(platform)
+        config = self.configuration(platform)
+        target = redirect_uri or config.get("redirect_uri")
+        if platform == "youtube":
+            payload = self._post_form("https://oauth2.googleapis.com/token", {
+                "client_id": config.get("oauth_client_id"),
+                "client_secret": config.get("oauth_client_secret"), "code": code,
+                "code_verifier": code_verifier, "grant_type": "authorization_code",
+                "redirect_uri": target,
+            })
+            config.update(
+                access_token=payload.get("access_token") or "",
+                refresh_token=payload.get("refresh_token") or config.get("refresh_token") or "",
+                token_expires_at=self._expires_at(payload.get("expires_in")),
+            )
+            identity = self._youtube_identity(config)
+            config.update(identity)
+        elif platform == "instagram":
             payload = self._post_form("https://api.instagram.com/oauth/access_token", {
                 "client_id": config.get("app_id"), "client_secret": config.get("app_secret"),
-                "grant_type": "authorization_code", "redirect_uri": config.get("redirect_uri"), "code": code,
+                "grant_type": "authorization_code", "redirect_uri": target, "code": code,
             })
             config["access_token"] = payload.get("access_token") or ""
-            config["user_id"] = str(payload.get("user_id") or "")
+            config["account_id"] = str(payload.get("user_id") or payload.get("id") or "")
+            try:
+                long_lived = self._json_request(Request(
+                    "https://graph.instagram.com/access_token?" + urlencode({
+                        "grant_type": "ig_exchange_token", "client_secret": config.get("app_secret"),
+                        "access_token": config.get("access_token"),
+                    })
+                ))
+                config["access_token"] = long_lived.get("access_token") or config["access_token"]
+                config["token_expires_at"] = self._expires_at(long_lived.get("expires_in"))
+            except Exception:
+                config["token_expires_at"] = self._expires_at(payload.get("expires_in"))
+            identity = self._instagram_identity(config)
+            config.update(identity)
         elif platform == "tiktok":
             payload = self._post_form("https://open.tiktokapis.com/v2/oauth/token/", {
                 "client_key": config.get("client_key"), "client_secret": config.get("client_secret"),
-                "code": code, "grant_type": "authorization_code", "redirect_uri": config.get("redirect_uri"),
+                "code": code, "code_verifier": code_verifier,
+                "grant_type": "authorization_code", "redirect_uri": target,
             })
             config.update(access_token=payload.get("access_token") or "",
                           refresh_token=payload.get("refresh_token") or "",
-                          user_id=payload.get("open_id") or config.get("user_id") or "")
+                          user_id=payload.get("open_id") or config.get("user_id") or "",
+                          token_expires_at=self._expires_at(payload.get("expires_in")))
+            identity = self._tiktok_identity(config)
+            config.update(identity)
         else:
-            raise ValueError("Authorization-code exchange is not used for this YouTube setup.")
+            raise ValueError(platform)
+        if target and platform != "youtube":
+            config["redirect_uri"] = target
         self.save_configuration(platform, config, True)
-        return {"connected": True, "expires_in": payload.get("expires_in")}
+        return {
+            "connected": True, "expires_in": payload.get("expires_in"),
+            "account_id": config.get("channel_id") or config.get("account_id") or config.get("user_id"),
+            "account_name": config.get("account_name"),
+        }
 
     def refresh_access_token(self, platform: str) -> dict[str, Any]:
         platform = self._platform(platform)
         config = self.configuration(platform)
-        if platform == "instagram":
+        if platform == "youtube":
+            if not config.get("refresh_token"):
+                raise ValueError("Reconnect YouTube to obtain a refresh token.")
+            payload = self._post_form("https://oauth2.googleapis.com/token", {
+                "client_id": config.get("oauth_client_id"),
+                "client_secret": config.get("oauth_client_secret"),
+                "grant_type": "refresh_token", "refresh_token": config.get("refresh_token"),
+            })
+        elif platform == "instagram":
             payload = self._json_request(Request(
                 "https://graph.instagram.com/refresh_access_token?" + urlencode({
                     "grant_type": "ig_refresh_token", "access_token": config.get("access_token")
@@ -232,8 +382,61 @@ class SocialPlatformService:
         config["access_token"] = payload.get("access_token") or config.get("access_token") or ""
         if payload.get("refresh_token"):
             config["refresh_token"] = payload["refresh_token"]
+        config["token_expires_at"] = self._expires_at(payload.get("expires_in"))
         self.save_configuration(platform, config, True)
         return {"refreshed": True, "expires_in": payload.get("expires_in")}
+
+    def _youtube_identity(self, config: dict[str, Any]) -> dict[str, str]:
+        payload = self._json_request(Request(
+            "https://www.googleapis.com/youtube/v3/channels?" + urlencode({
+                "part": "id,snippet", "mine": "true",
+            }),
+            headers={"Authorization": f"Bearer {config.get('access_token')}"},
+        ))
+        items = payload.get("items") or []
+        if not items:
+            raise ValueError("The selected Google account does not have a YouTube channel.")
+        item = items[0]
+        return {
+            "channel_id": str(item.get("id") or ""),
+            "account_name": str((item.get("snippet") or {}).get("title") or ""),
+        }
+
+    def _instagram_identity(self, config: dict[str, Any]) -> dict[str, str]:
+        identity = {
+            "account_id": str(config.get("account_id") or ""),
+            "account_name": str(config.get("account_name") or ""),
+        }
+        try:
+            payload = self._json_request(Request(
+                "https://graph.instagram.com/me?" + urlencode({
+                    "fields": "id,user_id,username", "access_token": config.get("access_token"),
+                })
+            ))
+        except Exception:
+            return identity
+        identity["account_id"] = str(payload.get("user_id") or payload.get("id") or identity["account_id"])
+        identity["account_name"] = str(payload.get("username") or identity["account_name"])
+        return identity
+
+    def _tiktok_identity(self, config: dict[str, Any]) -> dict[str, str]:
+        payload = self._json_request(Request(
+            "https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,avatar_url,display_name",
+            headers={"Authorization": f"Bearer {config.get('access_token')}"},
+        ))
+        user = ((payload.get("data") or {}).get("user") or {})
+        user_id = str(user.get("open_id") or config.get("user_id") or "")
+        if not user_id:
+            raise ValueError("TikTok did not return an account ID. Confirm that user.info.basic is approved.")
+        return {"user_id": user_id, "account_name": str(user.get("display_name") or "")}
+
+    @staticmethod
+    def _expires_at(expires_in: Any) -> str:
+        try:
+            seconds = max(0, int(expires_in or 0))
+        except (TypeError, ValueError):
+            seconds = 0
+        return (datetime.now() + timedelta(seconds=seconds)).isoformat() if seconds else ""
 
     def sync(self, platform: str, fetcher=None) -> dict[str, Any]:
         platform = self._platform(platform)
@@ -248,7 +451,8 @@ class SocialPlatformService:
                 records = list((fetcher or self._fetch_records)(platform, cursor))
             except Exception as first_error:
                 token_error = "401" in str(first_error) or "expired" in str(first_error).lower()
-                if fetcher is not None or platform == "youtube" or not token_error:
+                can_refresh = bool(self.configuration(platform).get("refresh_token"))
+                if fetcher is not None or not token_error or not can_refresh:
                     raise
                 self.refresh_access_token(platform)
                 records = list(self._fetch_records(platform, cursor))
@@ -370,13 +574,17 @@ class SocialPlatformService:
     def _fetch_youtube(self, cursor: str | None):
         config = self.configuration("youtube")
         params = {"part": "snippet", "channelId": config["channel_id"], "type": "video",
-                  "order": "date", "maxResults": 50, "key": config["api_key"]}
+                  "order": "date", "maxResults": 50}
+        if config.get("api_key"):
+            params["key"] = config["api_key"]
+        headers = ({"Authorization": f"Bearer {config.get('access_token')}"}
+                   if config.get("access_token") else {})
         if cursor:
             params["publishedAfter"] = cursor
         snippets = {}
         while True:
             payload = self._json_request(Request(
-                "https://www.googleapis.com/youtube/v3/search?" + urlencode(params)
+                "https://www.googleapis.com/youtube/v3/search?" + urlencode(params), headers=headers,
             ))
             snippets.update({item["id"]["videoId"]: item.get("snippet", {})
                              for item in payload.get("items", [])})
@@ -386,11 +594,14 @@ class SocialPlatformService:
         records = []
         ids = list(snippets)
         for offset in range(0, len(ids), 50):
+            detail_params = {
+                "part": "statistics,contentDetails", "id": ",".join(ids[offset:offset + 50]),
+            }
+            if config.get("api_key"):
+                detail_params["key"] = config["api_key"]
             detail = self._json_request(Request(
-                "https://www.googleapis.com/youtube/v3/videos?" + urlencode({
-                    "part": "statistics,contentDetails", "id": ",".join(ids[offset:offset + 50]),
-                    "key": config["api_key"],
-                })
+                "https://www.googleapis.com/youtube/v3/videos?" + urlencode(detail_params),
+                headers=headers,
             ))
             for item in detail.get("items", []):
                 snippet = snippets[item["id"]]

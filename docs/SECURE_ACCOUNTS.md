@@ -17,10 +17,10 @@ checkpointed so the previous bytes do not remain in the active database or its
 WAL. Database backups created after migration therefore contain no provider
 secrets.
 
-Disconnect controls clear local vault entries. TikTok disconnect also calls the
-official OAuth v2 revoke endpoint before deleting the local values. Other
-providers retain their own account-side permission controls; clearing local
-credentials prevents Creator Intelligence from using the account.
+Disconnect controls clear local vault entries. Twitch, YouTube, and TikTok use
+their provider revocation endpoints before deleting local values. Instagram
+retains its account-side permission controls; clearing local credentials prevents
+Creator Intelligence from using the account.
 
 The logging layer redacts bearer headers, named token/secret/password values,
 and recognizable hosted-service key formats before writing to console or file.
