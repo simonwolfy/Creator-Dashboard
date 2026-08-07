@@ -130,7 +130,8 @@ def test_n_minus_one_workspace_upgrade_is_backed_up_and_preserves_data(tmp_path)
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
     assert latest_version not in applied
-    assert "video_asset_metadata" not in tables
+    assert "video_asset_metadata" in tables
+    assert "content_pipeline" not in tables
 
     assert run_upgrade_smoke(root) == 0
     assert verify_upgraded_workspace(root) == 0

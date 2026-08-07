@@ -13,6 +13,7 @@ class AppConfig:
     timezone: str = "America/Chicago"
     currency: str = "USD"
     theme: str = "dark"
+    accent_color: str = "#7137c8"
     auto_backup_on_start: bool = True
     auto_backup_before_write: bool = True
     backup_retention: int = 30

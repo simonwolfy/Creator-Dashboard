@@ -15,11 +15,18 @@ from creator_intelligence.data.migration_manager import MigrationManager
 
 def test_settings_are_versioned_and_round_trip(tmp_path: Path):
     service = ConfigService(tmp_path / "settings.json")
-    expected = AppConfig(channel_name="Tester", backup_retention=7)
+    expected = AppConfig(
+        channel_name="Tester",
+        backup_retention=7,
+        theme="light",
+        accent_color="#2563eb",
+    )
     service.save(expected)
     loaded = service.load()
     assert loaded.channel_name == "Tester"
     assert loaded.backup_retention == 7
+    assert loaded.theme == "light"
+    assert loaded.accent_color == "#2563eb"
     assert '"schema_version": 1' in service.path.read_text(encoding="utf-8")
 
 
@@ -27,6 +34,8 @@ def test_invalid_settings_are_rejected(tmp_path: Path):
     service = ConfigService(tmp_path / "settings.json")
     with pytest.raises(SettingsValidationError):
         service.save(AppConfig(backup_retention=0))
+    with pytest.raises(SettingsValidationError, match="accent_color"):
+        service.save(AppConfig(accent_color="purple"))
 
 
 def test_migrations_apply_once_and_report_history():

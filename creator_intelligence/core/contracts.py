@@ -19,6 +19,7 @@ class NavigationItem:
     order: int = 100
     icon: str | None = None
     module_id: str | None = None
+    group: str | None = None
 
 @dataclass
 class ServiceBinding:

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QAbstractTableModel, Qt, QDate
 from creator_intelligence.ui.widgets import MetricCard
 from creator_intelligence.ui.charts import Chart
+from creator_intelligence.ui.table_utils import friendly_header
 from creator_intelligence.services.reporting import ReportingService
 from creator_intelligence.utils.paths import EXPORT_DIR
 
@@ -28,7 +29,7 @@ class FrameModel(QAbstractTableModel):
             return str(value)
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole:
-            return str(self.frame.columns[section]) if orientation == Qt.Horizontal else str(section+1)
+            return friendly_header(self.frame.columns[section]) if orientation == Qt.Horizontal else str(section+1)
 
 class TwitchPage(QWidget):
     def __init__(self, service, db):

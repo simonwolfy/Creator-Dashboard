@@ -1,74 +1,105 @@
 import logging
 
-from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QHBoxLayout,
     QLabel,
-    QListWidget,
     QMainWindow,
     QMessageBox,
     QStackedWidget,
     QStatusBar,
+    QTableView,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from creator_intelligence.core.versioning import APPLICATION_VERSION
 from creator_intelligence.services.update_checker import UpdateStatus
+from creator_intelligence.ui.table_utils import configure_readable_table
+from creator_intelligence.ui.theme import build_stylesheet, normalize_accent
 from creator_intelligence.ui.update_worker import UpdateCheckWorker
 
 log = logging.getLogger(__name__)
 
-STYLE = """
-QMainWindow,QWidget { background:#0d1018; color:#eef1ff; font-size:13px; }
-QListWidget { background:#131827; border:none; padding:10px; font-size:15px; }
-QListWidget::item { padding:13px; border-radius:8px; }
-QListWidget::item:selected { background:#6f36c9; }
-QPushButton { background:#7137c8; border:none; padding:9px 14px; border-radius:7px; font-weight:600; }
-QPushButton:hover { background:#8248d8; }
-QLineEdit,QComboBox,QSpinBox,QDoubleSpinBox,QDateEdit,QDateTimeEdit,QPlainTextEdit {
- background:#171d2d; border:1px solid #333d5d; padding:7px; border-radius:6px;
-}
-QTableView,QTableWidget { background:#121725; gridline-color:#29314b; alternate-background-color:#171d2d; }
-QHeaderView::section { background:#202841; padding:7px; border:none; }
-QGroupBox { border:1px solid #303a5e; border-radius:8px; margin-top:8px; padding-top:12px; }
-QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 5px; }
-#pageTitle { font-size:27px; font-weight:700; padding:8px 0 14px 0; }
-#metricCard { background:#151b2d; border:1px solid #303a5e; border-radius:12px; padding:8px; }
-#metricTitle { color:#abb4d5; font-weight:600; }
-#metricValue { font-size:24px; font-weight:700; }
-#metricSubtitle { color:#8993b4; }
-"""
-
 NAV_KEY_ROLE = Qt.ItemDataRole.UserRole
+NAV_GROUP_ROLE = Qt.ItemDataRole.UserRole + 1
+
+NAVIGATION_GROUP_ORDER = (
+    "Overview",
+    "Platforms",
+    "Content",
+    "Intelligence",
+    "Production",
+    "System",
+)
+
+NAVIGATION_LABEL_GROUPS = {
+    "Home": "Overview",
+    "Dashboard": "Overview",
+    "Live Stream": "Overview",
+    "Twitch": "Platforms",
+    "YouTube": "Platforms",
+    "Instagram": "Platforms",
+    "TikTok": "Platforms",
+    "Google Drive": "Platforms",
+    "Drive Folders": "Platforms",
+    "Cross-platform": "Platforms",
+    "Asset Library": "Content",
+    "Folder Watcher": "Content",
+    "Content Pipeline": "Content",
+    "Transcripts": "Content",
+    "Import Center": "Content",
+    "Import Watcher": "Content",
+    "Notifications": "Content",
+    "Highlights": "Intelligence",
+    "Highlight Scoring": "Intelligence",
+    "Highlight Learning": "Intelligence",
+    "Scene Intelligence": "Intelligence",
+    "Visual Scene Detection": "Intelligence",
+    "Content Recommendations": "Intelligence",
+    "Opportunity & Workload": "Intelligence",
+    "Creator Planner": "Intelligence",
+    "Creator Intelligence": "Intelligence",
+    "Predictions": "Intelligence",
+    "Production": "Production",
+    "Publishing": "Production",
+    "Packaging Review": "Production",
+    "Editor Workspace": "Production",
+    "Review & Revision": "Production",
+    "FFmpeg Manager": "Production",
+    "Video Processing": "Production",
+    "Video Metadata": "Production",
+    "Proxy Engine": "Production",
+    "Thumbnail Engine": "Production",
+    "Processing Scheduler": "Production",
+    "Goals": "System",
+    "Data Quality": "System",
+    "Modules": "System",
+    "Settings": "System",
+}
 
 
-class ReorderableNavigation(QListWidget):
-    orderChanged = Signal()
-
+class HierarchicalNavigation(QTreeWidget):
     def __init__(self):
         super().__init__()
-        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
-
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        self.orderChanged.emit()
+        self.setHeaderHidden(True)
+        self.setRootIsDecorated(True)
+        self.setIndentation(17)
+        self.setUniformRowHeights(True)
 
 
 class ModuleFailurePage(QWidget):
     def __init__(self, label, error):
         super().__init__()
+        self.error_message = str(error)
         layout = QVBoxLayout(self)
         title = QLabel(f"{label} could not be loaded")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        message = QLabel(str(error))
+        message = QLabel(self.error_message)
         message.setWordWrap(True)
         layout.addWidget(message)
         layout.addStretch()
@@ -86,50 +117,60 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"Creator Intelligence {APPLICATION_VERSION} — Creator OS")
         self.resize(1600, 960)
         self.setMinimumSize(QSize(1180, 740))
-        self.setStyleSheet(STYLE)
+        self.theme = str(getattr(runtime.settings, "theme", "dark"))
+        self.accent_color = normalize_accent(
+            str(getattr(runtime.settings, "accent_color", "#7137c8"))
+        )
+        self.setStyleSheet(build_stylesheet(self.theme, self.accent_color))
 
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.nav = ReorderableNavigation()
-        self.nav.setFixedWidth(245)
+        self.nav = HierarchicalNavigation()
+        self.nav.setFixedWidth(260)
         self.stack = QStackedWidget()
         self.pages_by_key: dict[str, QWidget] = {}
 
         navigation = list(self.registry.build_navigation())
-        saved_order = self.settings.value("navigation/order", [], list)
-        saved_positions = {key: index for index, key in enumerate(saved_order)}
-        navigation.sort(
-            key=lambda item: (
-                saved_positions.get(self._navigation_key(item), len(saved_positions) + item.order),
-                item.order,
-                item.label,
-            )
-        )
-
+        grouped_navigation: dict[str, list] = {}
         for item in navigation:
-            key = self._navigation_key(item)
-            try:
-                page = item.factory()
-            except Exception as exc:
-                log.exception("Failed to create page %s", item.label)
-                page = ModuleFailurePage(item.label, exc)
-            self._add_navigation_item(item.label, key)
-            self.pages_by_key[key] = page
-            self.stack.addWidget(page)
+            grouped_navigation.setdefault(self._navigation_group(item), []).append(item)
 
-        if self.nav.count() == 0:
+        known_groups = [group for group in NAVIGATION_GROUP_ORDER if group in grouped_navigation]
+        extra_groups = sorted(set(grouped_navigation) - set(known_groups))
+        for group_name in [*known_groups, *extra_groups]:
+            group_item = self._add_navigation_group(group_name)
+            for item in sorted(
+                grouped_navigation[group_name], key=lambda entry: (entry.order, entry.label.lower())
+            ):
+                key = self._navigation_key(item)
+                try:
+                    page = item.factory()
+                except Exception as exc:
+                    log.exception("Failed to create page %s", item.label)
+                    page = ModuleFailurePage(item.label, exc)
+                self._add_navigation_item(group_item, item.label, key)
+                self.pages_by_key[key] = page
+                self.stack.addWidget(page)
+                self._configure_page_tables(page)
+                appearance_signal = getattr(page, "appearance_changed", None)
+                if appearance_signal is not None:
+                    appearance_signal.connect(self.apply_appearance)
+
+        if self.nav.topLevelItemCount() == 0:
             page = ModuleFailurePage(
                 "Application modules",
                 "No application modules loaded. Check config/modules.json and the logs.",
             )
-            self._add_navigation_item("No modules", "system:no-modules")
+            group_item = self._add_navigation_group("System")
+            self._add_navigation_item(group_item, "No modules", "system:no-modules")
             self.pages_by_key["system:no-modules"] = page
             self.stack.addWidget(page)
 
-        self.nav.currentRowChanged.connect(self._show_current_navigation_page)
-        self.nav.orderChanged.connect(self._navigation_reordered)
-        self.nav.setCurrentRow(0)
+        self.nav.currentItemChanged.connect(self._show_current_navigation_page)
+        self.nav.itemExpanded.connect(lambda _item: self._save_navigation_state())
+        self.nav.itemCollapsed.connect(lambda _item: self._save_navigation_state())
+        self._restore_navigation_state()
         layout.addWidget(self.nav)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(container)
@@ -186,27 +227,91 @@ class MainWindow(QMainWindow):
         module = str(item.module_id or "unowned")
         return f"{module}:{item.label}"
 
-    def _add_navigation_item(self, label: str, key: str):
-        self.nav.addItem(label)
-        item = self.nav.item(self.nav.count() - 1)
-        item.setData(NAV_KEY_ROLE, key)
+    def _navigation_group(self, item) -> str:
+        explicit = str(getattr(item, "group", "") or "").strip()
+        if explicit:
+            return explicit
+        if item.label in NAVIGATION_LABEL_GROUPS:
+            return NAVIGATION_LABEL_GROUPS[item.label]
+        module_id = str(item.module_id or "").split(":", 1)[0]
+        metadata = self.registry.modules.get(module_id)
+        category = str(getattr(metadata, "category", "system")).lower()
+        return {
+            "analytics": "Platforms",
+            "content": "Content",
+            "imports": "Content",
+            "media": "Intelligence",
+            "intelligence": "Intelligence",
+            "ai": "Intelligence",
+            "production": "Production",
+            "system": "System",
+            "storage": "System",
+        }.get(category, "System")
+
+    def _add_navigation_group(self, label: str) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([label])
+        item.setData(0, NAV_GROUP_ROLE, label)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        font = item.font(0)
+        font.setBold(True)
+        item.setFont(0, font)
+        self.nav.addTopLevelItem(item)
         return item
 
-    def _show_current_navigation_page(self, row: int) -> None:
-        item = self.nav.item(row) if row >= 0 else None
-        key = item.data(NAV_KEY_ROLE) if item else None
+    @staticmethod
+    def _add_navigation_item(parent: QTreeWidgetItem, label: str, key: str):
+        item = QTreeWidgetItem([label])
+        item.setData(0, NAV_KEY_ROLE, key)
+        parent.addChild(item)
+        return item
+
+    def _show_current_navigation_page(self, item, _previous=None) -> None:
+        key = item.data(0, NAV_KEY_ROLE) if item else None
         page = self.pages_by_key.get(str(key)) if key is not None else None
         if page is not None:
             self.stack.setCurrentWidget(page)
+            self.settings.setValue("navigation/current", str(key))
+            self.settings.sync()
 
-    def _navigation_reordered(self) -> None:
-        ordered_keys = [
-            str(self.nav.item(index).data(NAV_KEY_ROLE))
-            for index in range(self.nav.count())
-        ]
-        self.settings.setValue("navigation/order", ordered_keys)
+    def _restore_navigation_state(self) -> None:
+        expanded = self.settings.value("navigation/expanded_groups", ["Overview"], list)
+        expanded_groups = {str(value) for value in expanded}
+        selected_key = str(self.settings.value("navigation/current", ""))
+        selected_item = None
+        first_item = None
+        for index in range(self.nav.topLevelItemCount()):
+            group = self.nav.topLevelItem(index)
+            group_name = str(group.data(0, NAV_GROUP_ROLE))
+            group.setExpanded(group_name in expanded_groups)
+            for child_index in range(group.childCount()):
+                child = group.child(child_index)
+                if first_item is None:
+                    first_item = child
+                if str(child.data(0, NAV_KEY_ROLE)) == selected_key:
+                    selected_item = child
+                    group.setExpanded(True)
+        self.nav.setCurrentItem(selected_item or first_item)
+
+    def _save_navigation_state(self) -> None:
+        expanded = []
+        for index in range(self.nav.topLevelItemCount()):
+            group = self.nav.topLevelItem(index)
+            if group.isExpanded():
+                expanded.append(str(group.data(0, NAV_GROUP_ROLE)))
+        self.settings.setValue("navigation/expanded_groups", expanded)
         self.settings.sync()
-        self._show_current_navigation_page(self.nav.currentRow())
+
+    @staticmethod
+    def _configure_page_tables(page: QWidget) -> None:
+        for table in page.findChildren(QTableView):
+            configure_readable_table(table)
+
+    def apply_appearance(self, theme: str, accent_color: str) -> None:
+        self.theme = str(theme)
+        self.accent_color = normalize_accent(accent_color)
+        self.setStyleSheet(build_stylesheet(self.theme, self.accent_color))
+        self.runtime.settings.theme = self.theme
+        self.runtime.settings.accent_color = self.accent_color
 
     def closeEvent(self, event):
         if self.application_core is not None:

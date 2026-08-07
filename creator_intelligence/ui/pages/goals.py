@@ -11,10 +11,10 @@ class GoalsPage(QWidget):
         row=QHBoxLayout()
         self.period=QLineEdit(datetime.now().strftime("%Y-%m"))
         self.platform=QComboBox(); self.platform.addItems(["Twitch","YouTube","Combined"])
-        self.metric=QComboBox(); self.metric.addItems(["average_viewers","followers","stream_hours","views","subscribers","revenue","shorts_published","videos_published"])
+        self.metric_selector=QComboBox(); self.metric_selector.addItems(["average_viewers","followers","stream_hours","views","subscribers","revenue","shorts_published","videos_published"])
         self.target=QDoubleSpinBox(); self.target.setRange(0,100000000); self.target.setDecimals(2)
         button=QPushButton("Save goal"); button.clicked.connect(self.save)
-        for label,w in [("Period",self.period),("Platform",self.platform),("Metric",self.metric),("Target",self.target)]:
+        for label,w in [("Period",self.period),("Platform",self.platform),("Metric",self.metric_selector),("Target",self.target)]:
             row.addWidget(QLabel(label)); row.addWidget(w)
         row.addWidget(button); layout.addLayout(row)
         self.view=QTableView(); layout.addWidget(self.view); self.refresh()
@@ -23,7 +23,7 @@ class GoalsPage(QWidget):
         self.db.execute("""INSERT INTO creator_goals(period,metric,target,platform,created_at)
             VALUES(?,?,?,?,datetime('now'))
             ON CONFLICT(period,metric,platform) DO UPDATE SET target=excluded.target""",
-            (self.period.text(),self.metric.currentText(),self.target.value(),self.platform.currentText()))
+            (self.period.text(),self.metric_selector.currentText(),self.target.value(),self.platform.currentText()))
         self.refresh()
 
     def refresh(self):

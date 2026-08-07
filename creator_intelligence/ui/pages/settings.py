@@ -1,8 +1,9 @@
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QColorDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -22,11 +23,14 @@ from creator_intelligence.core.health import HealthService
 from creator_intelligence.core.versioning import APPLICATION_VERSION
 from creator_intelligence.services.backup import BackupService
 from creator_intelligence.services.update_checker import RELEASES_PAGE_URL, UpdateStatus
+from creator_intelligence.ui.theme import ACCENT_PRESETS, DEFAULT_ACCENT, normalize_accent
 from creator_intelligence.ui.update_worker import UpdateCheckWorker, UpdateDownloadWorker
 from creator_intelligence.utils.paths import BACKUP_DIR, DB_PATH
 
 
 class SettingsPage(QWidget):
+    appearance_changed = Signal(str, str)
+
     def __init__(self, db, context=None):
         super().__init__()
         self.db = db
@@ -49,6 +53,47 @@ class SettingsPage(QWidget):
         title=QLabel("Settings and Maintenance")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
+
+        appearance = QGroupBox("Appearance")
+        appearance_form = QFormLayout(appearance)
+        self.theme_selector = QComboBox()
+        self.theme_selector.addItem("Dark", "dark")
+        self.theme_selector.addItem("Light", "light")
+        self.theme_selector.addItem("Use Windows setting", "system")
+        theme_index = self.theme_selector.findData(self.config.theme)
+        self.theme_selector.setCurrentIndex(max(0, theme_index))
+
+        self.custom_accent = normalize_accent(
+            getattr(self.config, "accent_color", DEFAULT_ACCENT)
+        )
+        self.accent_selector = QComboBox()
+        for preset_name, preset_color in ACCENT_PRESETS:
+            self.accent_selector.addItem(preset_name, preset_color)
+        self.accent_selector.addItem("Custom", "custom")
+        accent_index = self.accent_selector.findData(self.custom_accent)
+        if accent_index < 0:
+            accent_index = self.accent_selector.findData("custom")
+        self.accent_selector.setCurrentIndex(accent_index)
+        self.choose_accent_button = QPushButton("Choose custom color")
+        self.choose_accent_button.clicked.connect(self.choose_custom_accent)
+        self.accent_preview = QLabel()
+        self.accent_preview.setObjectName("accentPreview")
+        self.accent_preview.setFixedSize(44, 28)
+        accent_row = QHBoxLayout()
+        accent_row.addWidget(self.accent_selector)
+        accent_row.addWidget(self.choose_accent_button)
+        accent_row.addWidget(self.accent_preview)
+        accent_row.addStretch()
+        self.accent_selector.currentIndexChanged.connect(self._update_accent_preview)
+        appearance_form.addRow("Theme", self.theme_selector)
+        appearance_form.addRow("Button and highlight color", accent_row)
+        appearance_note = QLabel(
+            "Appearance changes apply when settings are saved and are remembered for the next launch."
+        )
+        appearance_note.setWordWrap(True)
+        appearance_form.addRow(appearance_note)
+        layout.addWidget(appearance)
+        self._update_accent_preview()
 
         group = QGroupBox("Creator settings")
         form = QFormLayout(group)
@@ -135,6 +180,8 @@ class SettingsPage(QWidget):
         self.config.channel_name = self.channel.text().strip() or "My Channel"
         self.config.timezone = self.timezone.text().strip() or "America/Chicago"
         self.config.currency = self.currency.currentText()
+        self.config.theme = str(self.theme_selector.currentData())
+        self.config.accent_color = self._selected_accent()
         self.config.auto_backup_on_start = self.auto_start.isChecked()
         self.config.auto_backup_before_write = self.auto_write.isChecked()
         self.config.backup_retention = self.retention.value()
@@ -144,7 +191,30 @@ class SettingsPage(QWidget):
         if self.update_checker:
             self.update_checker.set_channel(self.config.update_channel)
         self.backups.retention = self.config.backup_retention
+        self.appearance_changed.emit(self.config.theme, self.config.accent_color)
         QMessageBox.information(self,"Saved","Settings were saved.")
+
+    def _selected_accent(self) -> str:
+        selected = str(self.accent_selector.currentData())
+        return self.custom_accent if selected == "custom" else normalize_accent(selected)
+
+    def _update_accent_preview(self, _index=None) -> None:
+        color = self._selected_accent()
+        self.accent_preview.setStyleSheet(
+            f"background-color: {color}; border-radius: 6px; min-width: 44px; min-height: 28px;"
+        )
+
+    def choose_custom_accent(self) -> None:
+        selected = QColorDialog.getColor(
+            QColor(self.custom_accent), self, "Choose interface accent color"
+        )
+        if not selected.isValid():
+            return
+        self.custom_accent = selected.name().lower()
+        custom_index = self.accent_selector.findData("custom")
+        self.accent_selector.setItemText(custom_index, f"Custom ({self.custom_accent})")
+        self.accent_selector.setCurrentIndex(custom_index)
+        self._update_accent_preview()
 
     def make_backup(self):
         path = self.backups.create("manual")

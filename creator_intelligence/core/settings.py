@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any, TypeVar
@@ -62,6 +63,10 @@ class SettingsManager:
             raise SettingsValidationError("short_duration_threshold_seconds must be positive.")
         if hasattr(value, "theme") and value.theme not in {"dark", "light", "system"}:
             raise SettingsValidationError("theme must be dark, light, or system.")
+        if hasattr(value, "accent_color") and not re.fullmatch(
+            r"#[0-9a-fA-F]{6}", str(value.accent_color)
+        ):
+            raise SettingsValidationError("accent_color must be a six-digit hex color.")
         if hasattr(value, "currency") and len(str(value.currency)) != 3:
             raise SettingsValidationError("currency must be a three-letter code.")
         if hasattr(value, "update_channel") and value.update_channel not in {"stable", "preview"}:
