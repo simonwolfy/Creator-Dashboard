@@ -136,12 +136,6 @@ class HierarchicalNavigation(QTreeWidget):
         if item is None:
             event.ignore()
             return
-        original_parent = item.parent()
-        original_index = (
-            self.indexOfTopLevelItem(item)
-            if original_parent is None
-            else original_parent.indexOfChild(item)
-        )
 
         destination = self.drop_destination(
             item,
@@ -153,20 +147,65 @@ class HierarchicalNavigation(QTreeWidget):
             return
 
         destination_parent, destination_index = destination
-        if original_parent is None:
-            self.takeTopLevelItem(original_index)
-            if original_index < destination_index:
-                destination_index -= 1
-            self.insertTopLevelItem(destination_index, item)
-        else:
-            original_parent.takeChild(original_index)
-            if original_index < destination_index:
-                destination_index -= 1
-            destination_parent.insertChild(destination_index, item)
-        self.setCurrentItem(item)
+        if not self.move_item(item, destination_parent, destination_index):
+            event.ignore()
+            return
         event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
         self.orderChanged.emit()
+
+    def move_item(self, item, destination_parent, destination_index: int) -> bool:
+        """Move an item without allowing Qt to discard it between tree owners."""
+        original_parent = item.parent()
+        if (original_parent is None) != (destination_parent is None):
+            return False
+        if original_parent is not None and destination_parent is not original_parent:
+            return False
+        original_index = (
+            self.indexOfTopLevelItem(item)
+            if original_parent is None
+            else original_parent.indexOfChild(item)
+        )
+        if original_index < 0:
+            return False
+
+        moved_item = (
+            self.takeTopLevelItem(original_index)
+            if original_parent is None
+            else original_parent.takeChild(original_index)
+        )
+        if moved_item is None:
+            return False
+        if original_index < destination_index:
+            destination_index -= 1
+
+        try:
+            if destination_parent is None:
+                destination_index = max(
+                    0, min(destination_index, self.topLevelItemCount())
+                )
+                self.insertTopLevelItem(destination_index, moved_item)
+            else:
+                destination_index = max(
+                    0, min(destination_index, destination_parent.childCount())
+                )
+                destination_parent.insertChild(destination_index, moved_item)
+        except Exception:
+            if moved_item.treeWidget() is None:
+                if original_parent is None:
+                    self.insertTopLevelItem(original_index, moved_item)
+                else:
+                    original_parent.insertChild(original_index, moved_item)
+            return False
+
+        if moved_item.treeWidget() is not self:
+            if original_parent is None:
+                self.insertTopLevelItem(original_index, moved_item)
+            else:
+                original_parent.insertChild(original_index, moved_item)
+            return False
+        self.setCurrentItem(moved_item)
+        return True
 
 
 class ModuleFailurePage(QWidget):

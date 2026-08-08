@@ -301,6 +301,34 @@ def test_navigation_drop_destinations_keep_items_in_scope():
     app.processEvents()
 
 
+def test_navigation_reordering_never_loses_tabs_or_folders():
+    app = QApplication.instance() or QApplication([])
+    navigation = HierarchicalNavigation()
+    first_group = QTreeWidgetItem(["First"])
+    second_group = QTreeWidgetItem(["Second"])
+    first_tab = QTreeWidgetItem(["First tab"])
+    second_tab = QTreeWidgetItem(["Second tab"])
+    first_group.addChildren([first_tab, second_tab])
+    navigation.addTopLevelItems([first_group, second_group])
+
+    for _ in range(25):
+        assert navigation.move_item(first_tab, first_group, 2)
+        assert navigation.move_item(first_tab, first_group, 0)
+        assert navigation.move_item(second_group, None, 0)
+        assert navigation.move_item(second_group, None, 2)
+
+    assert navigation.topLevelItemCount() == 2
+    assert first_group.childCount() == 2
+    assert {
+        first_group.child(index).text(0)
+        for index in range(first_group.childCount())
+    } == {"First tab", "Second tab"}
+    assert not navigation.move_item(first_tab, second_group, 0)
+    assert first_group.childCount() == 2
+    navigation.close()
+    app.processEvents()
+
+
 def test_theme_switch_can_repolish_goals_page():
     app = QApplication.instance() or QApplication([])
 
