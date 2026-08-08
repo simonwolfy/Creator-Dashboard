@@ -2,15 +2,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+import hashlib
 import json
 import math
 import random
 import re
+import threading
 import uuid
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from creator_intelligence.core.credential_vault import CredentialVault
+from creator_intelligence.services.connection_lifecycle import (
+    ConnectionState,
+    ConnectionStatus,
+)
 
 @dataclass
 class LiveSnapshot:
@@ -28,13 +34,22 @@ class LiveSnapshot:
 
 class LiveStreamService:
     TWITCH_SCOPES = (
-        "user:read:chat", "moderator:read:followers", "channel:read:subscriptions", "bits:read",
+        "user:read:chat",
+        "moderator:read:followers",
+        "channel:read:subscriptions",
     )
+    TWITCH_SCOPE_CAPABILITIES = {
+        "user:read:chat": "Read live chat",
+        "moderator:read:followers": "Read follower totals and follow events",
+        "channel:read:subscriptions": "Read subscriber totals",
+    }
+    TWITCH_VALIDATION_INTERVAL = timedelta(hours=1)
 
     def __init__(self, db, notifications=None, credential_vault=None):
         self.db = db
         self.notifications = notifications
         self.vault = credential_vault or CredentialVault.for_database(db)
+        self._twitch_refresh_lock = threading.Lock()
         self._ensure_schema()
         self._migrate_credentials()
 
@@ -146,6 +161,11 @@ class LiveStreamService:
                 twitch_access_token TEXT,
                 twitch_refresh_token TEXT,
                 twitch_token_expires_at TEXT,
+                twitch_account_name TEXT,
+                twitch_connection_state TEXT DEFAULT 'not_configured',
+                twitch_granted_scopes_json TEXT DEFAULT '[]',
+                twitch_last_validated_at TEXT,
+                twitch_last_error TEXT,
                 obs_enabled INTEGER DEFAULT 0,
                 obs_host TEXT DEFAULT '127.0.0.1',
                 obs_port INTEGER DEFAULT 4455,
@@ -179,6 +199,16 @@ class LiveStreamService:
             )""",
             """CREATE INDEX IF NOT EXISTS idx_live_chat_captured
                ON live_chat_messages(captured_at)""",
+            """CREATE TABLE IF NOT EXISTS live_chat_activity_events(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                message_id TEXT NOT NULL UNIQUE,
+                captured_at TEXT NOT NULL,
+                chatter_hash TEXT,
+                FOREIGN KEY(session_id) REFERENCES live_sessions(id)
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_live_chat_activity_captured
+               ON live_chat_activity_events(captured_at)""",
             """CREATE TABLE IF NOT EXISTS twitch_channel_snapshots(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 captured_at TEXT NOT NULL,
@@ -211,6 +241,23 @@ class LiveStreamService:
         ]
         for sql in statements:
             self.db.execute(sql)
+        columns = set(
+            self.db.frame("PRAGMA table_info('live_integration_settings')").get(
+                "name", []
+            )
+        )
+        additions = {
+            "twitch_account_name": "TEXT",
+            "twitch_connection_state": "TEXT DEFAULT 'not_configured'",
+            "twitch_granted_scopes_json": "TEXT DEFAULT '[]'",
+            "twitch_last_validated_at": "TEXT",
+            "twitch_last_error": "TEXT",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                self.db.execute(
+                    f"ALTER TABLE live_integration_settings ADD COLUMN {name} {declaration}"
+                )
 
     def _migrate_credentials(self):
         self.db.execute("PRAGMA secure_delete=ON")
@@ -256,6 +303,231 @@ class LiveStreamService:
         ) + " WHERE id=1"
         self.db.execute(sql, [filtered[column] for column in columns])
 
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(
+                tzinfo=None
+            )
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _scope_list(value: Any) -> tuple[str, ...]:
+        if isinstance(value, (list, tuple, set)):
+            return tuple(sorted({str(item) for item in value if item}))
+        try:
+            parsed = json.loads(str(value or "[]"))
+        except (TypeError, ValueError):
+            parsed = []
+        return tuple(sorted({str(item) for item in parsed if item}))
+
+    def _set_twitch_connection_metadata(self, **values) -> None:
+        allowed = {
+            "twitch_account_name",
+            "twitch_connection_state",
+            "twitch_granted_scopes_json",
+            "twitch_last_validated_at",
+            "twitch_last_error",
+            "twitch_token_expires_at",
+            "twitch_broadcaster_id",
+            "twitch_client_id",
+            "twitch_enabled",
+        }
+        filtered = {key: value for key, value in values.items() if key in allowed}
+        if not filtered:
+            return
+        filtered["updated_at"] = datetime.now().isoformat()
+        columns = list(filtered)
+        self.db.execute(
+            "UPDATE live_integration_settings SET "
+            + ",".join(f"{column}=?" for column in columns)
+            + " WHERE id=1",
+            [filtered[column] for column in columns],
+        )
+
+    def twitch_connection_status(self) -> dict[str, Any]:
+        settings = self.settings()
+        client_id = str(settings.get("twitch_client_id") or "").strip()
+        broadcaster_id = str(settings.get("twitch_broadcaster_id") or "").strip()
+        access_token = str(settings.get("twitch_access_token") or "").strip()
+        granted = self._scope_list(settings.get("twitch_granted_scopes_json"))
+        stored_state = str(
+            settings.get("twitch_connection_state") or ConnectionState.NOT_CONFIGURED
+        )
+        try:
+            state = ConnectionState(stored_state)
+        except ValueError:
+            state = ConnectionState.ERROR
+
+        if not client_id:
+            state = ConnectionState.NOT_CONFIGURED
+            message = "Add the Twitch Client ID to begin secure device sign-in."
+        elif not broadcaster_id or not access_token:
+            if state != ConnectionState.CONNECTING:
+                state = ConnectionState.DISCONNECTED
+            message = (
+                "Waiting for Twitch approval in the browser."
+                if state == ConnectionState.CONNECTING
+                else "Twitch is disconnected. Connect or reconnect the account."
+            )
+        else:
+            expiry = self._parse_datetime(settings.get("twitch_token_expires_at"))
+            if expiry and expiry <= datetime.now():
+                state = ConnectionState.EXPIRED
+            if state in {ConnectionState.NOT_CONFIGURED, ConnectionState.DISCONNECTED}:
+                state = ConnectionState.CONNECTED
+            missing = [scope for scope in self.TWITCH_SCOPES if granted and scope not in granted]
+            if missing and state == ConnectionState.CONNECTED:
+                state = ConnectionState.LIMITED
+            message = {
+                ConnectionState.CONNECTED: "Connected securely and ready for Twitch tracking.",
+                ConnectionState.LIMITED: "Connected with limited permissions. Reconnect to enable every feature.",
+                ConnectionState.EXPIRED: "The Twitch access token expired. Refresh or reconnect the account.",
+                ConnectionState.REVOKED: "Twitch access was revoked. Reconnect the account.",
+                ConnectionState.ERROR: "The Twitch connection needs attention.",
+                ConnectionState.CONNECTING: "Waiting for Twitch approval in the browser.",
+            }.get(state, "Twitch connection status is unavailable.")
+
+        return ConnectionStatus(
+            provider="twitch",
+            state=state,
+            message=message,
+            account_id=broadcaster_id or None,
+            account_name=str(settings.get("twitch_account_name") or "") or None,
+            granted_scopes=granted,
+            required_scopes=self.TWITCH_SCOPES,
+            expires_at=str(settings.get("twitch_token_expires_at") or "") or None,
+            last_validated_at=str(settings.get("twitch_last_validated_at") or "") or None,
+            last_error=str(settings.get("twitch_last_error") or "") or None,
+        ).as_dict()
+
+    def twitch_capabilities(self) -> list[dict[str, Any]]:
+        status = self.twitch_connection_status()
+        granted = set(status.get("granted_scopes") or [])
+        capabilities = [
+            {
+                "capability": "Live status, viewers, VODs, and clips",
+                "permission": "Standard signed-in Twitch access",
+                "available": bool(status.get("can_sync")),
+            }
+        ]
+        capabilities.extend(
+            {
+                "capability": label,
+                "permission": scope,
+                "available": scope in granted,
+            }
+            for scope, label in self.TWITCH_SCOPE_CAPABILITIES.items()
+        )
+        return capabilities
+
+    def validate_twitch_connection(self) -> dict[str, Any]:
+        settings = self.settings()
+        token = str(settings.get("twitch_access_token") or "").strip()
+        if not token:
+            return self.twitch_connection_status()
+        checked_at = datetime.now().isoformat()
+        request = Request(
+            "https://id.twitch.tv/oauth2/validate",
+            headers={"Authorization": f"OAuth {token}"},
+        )
+        try:
+            payload = self._json_request(request)
+        except HTTPError:
+            state = (
+                ConnectionState.EXPIRED
+                if (
+                    self._parse_datetime(settings.get("twitch_token_expires_at"))
+                    or datetime.max
+                )
+                <= datetime.now()
+                else ConnectionState.REVOKED
+            )
+            self._set_twitch_connection_metadata(
+                twitch_connection_state=state.value,
+                twitch_last_validated_at=checked_at,
+                twitch_last_error="Twitch rejected the saved access token.",
+            )
+            return self.twitch_connection_status()
+        except Exception as exc:
+            safe = self.vault.redact(exc)
+            self._set_twitch_connection_metadata(
+                twitch_connection_state=ConnectionState.ERROR.value,
+                twitch_last_validated_at=checked_at,
+                twitch_last_error=safe,
+            )
+            return self.twitch_connection_status()
+
+        configured_client = str(settings.get("twitch_client_id") or "")
+        configured_user = str(settings.get("twitch_broadcaster_id") or "")
+        token_client = str(payload.get("client_id") or "")
+        token_user = str(payload.get("user_id") or "")
+        mismatch = None
+        if configured_client and token_client != configured_client:
+            mismatch = "The access token belongs to a different Twitch application."
+        elif configured_user and token_user != configured_user:
+            mismatch = "The access token belongs to a different Twitch account."
+        scopes = self._scope_list(payload.get("scopes") or payload.get("scope"))
+        missing = [scope for scope in self.TWITCH_SCOPES if scope not in scopes]
+        state = (
+            ConnectionState.ERROR
+            if mismatch
+            else ConnectionState.LIMITED
+            if missing
+            else ConnectionState.CONNECTED
+        )
+        expires_at = (
+            datetime.now() + timedelta(seconds=int(payload.get("expires_in") or 0))
+        ).isoformat()
+        self._set_twitch_connection_metadata(
+            twitch_enabled=1,
+            twitch_broadcaster_id=token_user or configured_user,
+            twitch_account_name=payload.get("login") or settings.get("twitch_account_name"),
+            twitch_connection_state=state.value,
+            twitch_granted_scopes_json=json.dumps(list(scopes)),
+            twitch_token_expires_at=expires_at,
+            twitch_last_validated_at=checked_at,
+            twitch_last_error=mismatch,
+        )
+        return self.twitch_connection_status()
+
+    def ensure_twitch_connection(self, *, force_validation: bool = False) -> dict[str, Any]:
+        status = self.twitch_connection_status()
+        refreshed = False
+        if status["state"] == ConnectionState.EXPIRED.value and self.settings().get(
+            "twitch_refresh_token"
+        ):
+            try:
+                self.refresh_twitch_connection()
+            except Exception:
+                status = self.twitch_connection_status()
+            else:
+                refreshed = True
+                force_validation = True
+        last_checked = self._parse_datetime(status.get("last_validated_at"))
+        validation_due = not last_checked or datetime.now() - last_checked >= self.TWITCH_VALIDATION_INTERVAL
+        if status["configured"] and (force_validation or validation_due):
+            status = self.validate_twitch_connection()
+        if (
+            status["state"] in {
+                ConnectionState.EXPIRED.value,
+                ConnectionState.REVOKED.value,
+            }
+            and not refreshed
+            and self.settings().get("twitch_refresh_token")
+        ):
+            try:
+                self.refresh_twitch_connection()
+                status = self.validate_twitch_connection()
+            except Exception:
+                status = self.twitch_connection_status()
+        if not status["can_sync"]:
+            raise RuntimeError(status.get("last_error") or status["message"])
+        return status
+
     def begin_twitch_connection(self, client_id: str) -> dict[str, Any]:
         client_id = str(client_id or "").strip()
         if not client_id:
@@ -267,9 +539,24 @@ class LiveStreamService:
         if any(not payload.get(key) for key in required):
             raise RuntimeError("Twitch did not return a complete device sign-in response.")
         payload["client_id"] = client_id
+        payload["requested_at"] = datetime.now().isoformat()
+        self._set_twitch_connection_metadata(
+            twitch_client_id=client_id,
+            twitch_connection_state=ConnectionState.CONNECTING.value,
+            twitch_last_error=None,
+        )
         return payload
 
     def poll_twitch_connection(self, connection: dict[str, Any]) -> dict[str, Any] | None:
+        requested_at = self._parse_datetime(connection.get("requested_at"))
+        if requested_at and datetime.now() >= requested_at + timedelta(
+            seconds=int(connection.get("expires_in") or 1800)
+        ):
+            self._set_twitch_connection_metadata(
+                twitch_connection_state=ConnectionState.ERROR.value,
+                twitch_last_error="The Twitch device sign-in request expired.",
+            )
+            raise RuntimeError("Twitch sign-in expired. Start Connect Twitch again.")
         try:
             payload = self._post_form("https://id.twitch.tv/oauth2/token", {
                 "client_id": connection.get("client_id"),
@@ -283,8 +570,15 @@ class LiveStreamService:
             except Exception:
                 error = {}
             message = str(error.get("message") or error.get("error") or exc)
-            if message.lower() in {"authorization_pending", "slow_down"}:
+            if message.lower() == "slow_down":
+                connection["interval"] = int(connection.get("interval") or 5) + 5
                 return None
+            if message.lower() == "authorization_pending":
+                return None
+            self._set_twitch_connection_metadata(
+                twitch_connection_state=ConnectionState.ERROR.value,
+                twitch_last_error=self.vault.redact(message),
+            )
             raise RuntimeError(self.vault.redact(message)) from None
         access_token = payload.get("access_token") or ""
         if not access_token:
@@ -300,37 +594,82 @@ class LiveStreamService:
         if not users:
             raise RuntimeError("Twitch sign-in succeeded but no broadcaster account was returned.")
         user = users[0]
-        self.update_settings(
+        scopes = self._scope_list(payload.get("scope") or self.TWITCH_SCOPES)
+        missing = [scope for scope in self.TWITCH_SCOPES if scope not in scopes]
+        self.vault.replace(
+            "twitch",
+            {
+                "twitch_access_token": access_token,
+                "twitch_refresh_token": payload.get("refresh_token") or "",
+            },
+        )
+        self._set_twitch_connection_metadata(
             twitch_enabled=1,
             twitch_client_id=str(connection.get("client_id") or ""),
             twitch_broadcaster_id=str(user.get("id") or ""),
-            twitch_access_token=access_token,
-            twitch_refresh_token=payload.get("refresh_token") or "",
+            twitch_account_name=str(user.get("display_name") or user.get("login") or ""),
+            twitch_connection_state=(
+                ConnectionState.LIMITED.value
+                if missing
+                else ConnectionState.CONNECTED.value
+            ),
+            twitch_granted_scopes_json=json.dumps(list(scopes)),
             twitch_token_expires_at=(
                 datetime.now() + timedelta(seconds=int(payload.get("expires_in") or 0))
             ).isoformat(),
+            twitch_last_validated_at=datetime.now().isoformat(),
+            twitch_last_error=None,
         )
         return {
             "connected": True, "broadcaster_id": str(user.get("id") or ""),
             "account_name": str(user.get("display_name") or user.get("login") or ""),
+            "status": self.twitch_connection_status(),
         }
 
     def refresh_twitch_connection(self) -> dict[str, Any]:
-        settings = self.settings()
-        if not settings.get("twitch_refresh_token"):
-            raise ValueError("Reconnect Twitch to obtain a refresh token.")
-        payload = self._post_form("https://id.twitch.tv/oauth2/token", {
-            "client_id": settings.get("twitch_client_id"),
-            "grant_type": "refresh_token", "refresh_token": settings.get("twitch_refresh_token"),
-        })
-        self.update_settings(
-            twitch_access_token=payload.get("access_token") or "",
-            twitch_refresh_token=payload.get("refresh_token") or "",
-            twitch_token_expires_at=(
-                datetime.now() + timedelta(seconds=int(payload.get("expires_in") or 0))
-            ).isoformat(),
-        )
-        return {"refreshed": True, "expires_in": payload.get("expires_in")}
+        with self._twitch_refresh_lock:
+            settings = self.settings()
+            if not settings.get("twitch_refresh_token"):
+                raise ValueError("Reconnect Twitch to obtain a refresh token.")
+            try:
+                payload = self._post_form("https://id.twitch.tv/oauth2/token", {
+                    "client_id": settings.get("twitch_client_id"),
+                    "grant_type": "refresh_token",
+                    "refresh_token": settings.get("twitch_refresh_token"),
+                })
+                access_token = str(payload.get("access_token") or "")
+                refresh_token = str(payload.get("refresh_token") or "")
+                if not access_token or not refresh_token:
+                    raise RuntimeError("Twitch did not return a complete refreshed token pair.")
+            except Exception as exc:
+                safe = self.vault.redact(exc)
+                self._set_twitch_connection_metadata(
+                    twitch_connection_state=ConnectionState.EXPIRED.value,
+                    twitch_last_error=f"Token refresh failed: {safe}",
+                )
+                raise RuntimeError(f"Reconnect Twitch. Token refresh failed: {safe}") from None
+            self.vault.replace(
+                "twitch",
+                {
+                    "twitch_access_token": access_token,
+                    "twitch_refresh_token": refresh_token,
+                },
+            )
+            scopes = self._scope_list(
+                payload.get("scope")
+                or settings.get("twitch_granted_scopes_json")
+                or self.TWITCH_SCOPES
+            )
+            self._set_twitch_connection_metadata(
+                twitch_connection_state=ConnectionState.CONNECTED.value,
+                twitch_granted_scopes_json=json.dumps(list(scopes)),
+                twitch_token_expires_at=(
+                    datetime.now() + timedelta(seconds=int(payload.get("expires_in") or 0))
+                ).isoformat(),
+                twitch_last_validated_at=None,
+                twitch_last_error=None,
+            )
+            return {"refreshed": True, "expires_in": payload.get("expires_in")}
 
     def revoke_twitch_access(self) -> None:
         settings = self.settings()
@@ -345,13 +684,26 @@ class LiveStreamService:
         provider=str(provider).lower()
         if provider not in {"twitch","obs"}:raise ValueError(provider)
         self.vault.delete(provider)
-        field="twitch_enabled" if provider=="twitch" else "obs_enabled"
-        self.db.execute(f"UPDATE live_integration_settings SET {field}=0,updated_at=? WHERE id=1",(datetime.now().isoformat(),))
+        if provider == "twitch":
+            self.db.execute(
+                """UPDATE live_integration_settings SET twitch_enabled=0,
+                   twitch_broadcaster_id=NULL,twitch_account_name=NULL,
+                   twitch_connection_state=?,twitch_granted_scopes_json='[]',
+                   twitch_token_expires_at=NULL,twitch_last_validated_at=NULL,
+                   twitch_last_error=NULL,updated_at=? WHERE id=1""",
+                (ConnectionState.DISCONNECTED.value, datetime.now().isoformat()),
+            )
+        else:
+            self.db.execute(
+                "UPDATE live_integration_settings SET obs_enabled=0,updated_at=? WHERE id=1",
+                (datetime.now().isoformat(),),
+            )
 
     @staticmethod
     def _json_request(request: Request) -> dict[str, Any]:
         with urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+            body = response.read().decode("utf-8")
+            return json.loads(body) if body.strip() else {}
 
     @classmethod
     def _post_form(cls, url: str, values: dict[str, Any]) -> dict[str, Any]:
@@ -367,6 +719,7 @@ class LiveStreamService:
         method: str = "GET", payload: dict[str, Any] | None = None,
         retry: bool = True,
     ) -> dict[str, Any]:
+        self.ensure_twitch_connection()
         settings = self.settings()
         client_id = str(settings.get("twitch_client_id") or "").strip()
         access_token = str(settings.get("twitch_access_token") or "").strip()
@@ -389,13 +742,25 @@ class LiveStreamService:
             return self._json_request(request)
         except HTTPError as exc:
             if exc.code == 401 and retry and settings.get("twitch_refresh_token"):
-                self.refresh_twitch_connection()
-                return self._twitch_request(path, query, method=method, payload=payload, retry=False)
+                try:
+                    self.refresh_twitch_connection()
+                except Exception:
+                    raise RuntimeError(self.twitch_connection_status()["message"]) from None
+                return self._twitch_request(
+                    path, query, method=method, payload=payload, retry=False
+                )
+            if exc.code == 401:
+                self._set_twitch_connection_metadata(
+                    twitch_connection_state=ConnectionState.REVOKED.value,
+                    twitch_last_error="Twitch rejected the saved access token.",
+                )
             try:
                 response = json.loads(exc.read().decode("utf-8"))
                 message = response.get("message") or str(exc)
             except Exception:
                 message = str(exc)
+            if exc.code == 429:
+                message = "Twitch rate limit reached. Wait before syncing again."
             raise RuntimeError(self.vault.redact(message)) from None
 
     def twitch_channel_status(self, *, store: bool = True) -> dict[str, Any]:
@@ -546,6 +911,37 @@ class LiveStreamService:
         active = self.active_session()
         external_id = str(message_id or event.get("message_id") or uuid.uuid4())
         captured_at = datetime.now().isoformat()
+        chatter_name = str(
+            event.get("chatter_user_name")
+            or event.get("chatter_user_login")
+            or "Unknown"
+        )
+        chatter_identifier = str(
+            event.get("chatter_user_id") or event.get("chatter_user_login") or ""
+        )
+        chatter_hash = (
+            hashlib.sha256(chatter_identifier.encode("utf-8")).hexdigest()
+            if chatter_identifier
+            else None
+        )
+        self.db.execute(
+            """INSERT OR IGNORE INTO live_chat_activity_events(
+                session_id,message_id,captured_at,chatter_hash) VALUES(?,?,?,?)""",
+            (
+                active.get("id") if active else None,
+                external_id,
+                captured_at,
+                chatter_hash,
+            ),
+        )
+        result = {
+            "captured_at": captured_at,
+            "chatter_user_name": chatter_name,
+            "message_text": text,
+            "retained": False,
+        }
+        if not bool(self.settings().get("store_raw_chat")):
+            return result
         self.db.execute(
             """INSERT OR IGNORE INTO live_chat_messages(
                 session_id,message_id,captured_at,chatter_user_id,chatter_user_name,
@@ -554,7 +950,7 @@ class LiveStreamService:
             (
                 active.get("id") if active else None, external_id, captured_at,
                 event.get("chatter_user_id"),
-                str(event.get("chatter_user_name") or event.get("chatter_user_login") or "Unknown"),
+                chatter_name,
                 text, event.get("color"), json.dumps(event.get("badges") or []),
                 json.dumps(event, default=str),
             ),
@@ -562,7 +958,11 @@ class LiveStreamService:
         frame = self.db.frame(
             "SELECT * FROM live_chat_messages WHERE message_id=?", (external_id,)
         )
-        return frame.iloc[0].to_dict() if not frame.empty else None
+        if frame.empty:
+            return result
+        stored = frame.iloc[0].to_dict()
+        stored["retained"] = True
+        return stored
 
     def chat_messages(self, session_id=None, limit: int = 500):
         if session_id is None:
@@ -580,30 +980,43 @@ class LiveStreamService:
         one_minute = (datetime.now() - timedelta(minutes=1)).isoformat()
         five_minutes = (datetime.now() - timedelta(minutes=5)).isoformat()
         messages = int(self.db.scalar(
-            "SELECT COUNT(*) FROM live_chat_messages WHERE captured_at>=?", (one_minute,), 0
+            "SELECT COUNT(*) FROM live_chat_activity_events WHERE captured_at>=?",
+            (one_minute,), 0
         ))
         chatters = int(self.db.scalar(
-            """SELECT COUNT(DISTINCT chatter_user_id) FROM live_chat_messages
+            """SELECT COUNT(DISTINCT chatter_hash) FROM live_chat_activity_events
                WHERE captured_at>=?""", (five_minutes,), 0
         ))
         return {"messages_minute": messages, "unique_chatters_5m": chatters}
 
     def subscribe_twitch_eventsub(self, websocket_session_id: str) -> dict[str, Any]:
-        broadcaster_id = str(self.settings().get("twitch_broadcaster_id") or "")
+        self.ensure_twitch_connection()
+        settings = self.settings()
+        broadcaster_id = str(settings.get("twitch_broadcaster_id") or "")
+        granted = set(self._scope_list(settings.get("twitch_granted_scopes_json")))
         subscriptions = [
-            ("stream.online", "1", {"broadcaster_user_id": broadcaster_id}),
-            ("stream.offline", "1", {"broadcaster_user_id": broadcaster_id}),
-            ("channel.update", "2", {"broadcaster_user_id": broadcaster_id}),
+            ("stream.online", "1", {"broadcaster_user_id": broadcaster_id}, None),
+            ("stream.offline", "1", {"broadcaster_user_id": broadcaster_id}, None),
+            ("channel.update", "2", {"broadcaster_user_id": broadcaster_id}, None),
             ("channel.follow", "2", {
                 "broadcaster_user_id": broadcaster_id, "moderator_user_id": broadcaster_id,
-            }),
-            ("channel.raid", "1", {"to_broadcaster_user_id": broadcaster_id}),
+            }, "moderator:read:followers"),
+            ("channel.raid", "1", {"to_broadcaster_user_id": broadcaster_id}, None),
+            ("channel.subscribe", "1", {
+                "broadcaster_user_id": broadcaster_id,
+            }, "channel:read:subscriptions"),
             ("channel.chat.message", "1", {
                 "broadcaster_user_id": broadcaster_id, "user_id": broadcaster_id,
-            }),
+            }, "user:read:chat"),
         ]
         subscribed, errors = [], []
-        for event_type, version, condition in subscriptions:
+        for event_type, version, condition, required_scope in subscriptions:
+            if required_scope and required_scope not in granted:
+                errors.append({
+                    "type": event_type,
+                    "error": f"Missing permission: {required_scope}",
+                })
+                continue
             try:
                 self._twitch_request(
                     "eventsub/subscriptions", method="POST",

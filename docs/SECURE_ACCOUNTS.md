@@ -26,6 +26,11 @@ The logging layer redacts bearer headers, named token/secret/password values,
 and recognizable hosted-service key formats before writing to console or file.
 Connection health reports only configured/missing state and never secret values.
 
+Twitch chat text is not retained by default. Live messages remain in memory for
+the current chat interface while anonymous activity records support message-rate
+and unique-chatter metrics. Full chat retention requires an explicit workspace
+setting.
+
 Security regressions verify vault migration, masking, refresh rotation,
 revocation ordering, local deletion, active-database bytes, generated backups,
 and logging output.

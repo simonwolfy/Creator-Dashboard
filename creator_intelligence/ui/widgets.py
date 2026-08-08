@@ -85,6 +85,43 @@ class StatusBanner(QLabel):
         self.style().polish(self)
 
 
+class ConnectionStatusPanel(QFrame):
+    """Provider-neutral account state summary for platform connection pages."""
+
+    def __init__(self, provider: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("connectionStatusPanel")
+        layout = QVBoxLayout(self)
+        self.state = QLabel(f"{provider}: Not configured")
+        self.state.setObjectName("connectionState")
+        self.message = QLabel()
+        self.message.setWordWrap(True)
+        self.account = QLabel()
+        self.account.setObjectName("connectionAccount")
+        self.permissions = QLabel()
+        self.permissions.setObjectName("connectionPermissions")
+        self.permissions.setWordWrap(True)
+        layout.addWidget(self.state)
+        layout.addWidget(self.message)
+        layout.addWidget(self.account)
+        layout.addWidget(self.permissions)
+
+    def set_status(self, status: dict) -> None:
+        state = str(status.get("state") or "not_configured")
+        label = state.replace("_", " ").title()
+        self.state.setText(f"{str(status.get('provider') or '').title()}: {label}")
+        self.state.setProperty("connectionState", state)
+        self.state.style().unpolish(self.state)
+        self.state.style().polish(self.state)
+        self.message.setText(str(status.get("message") or ""))
+        account = status.get("account_name") or status.get("account_id")
+        self.account.setText(f"Account: {account}" if account else "")
+        missing = status.get("missing_scopes") or []
+        self.permissions.setText(
+            "Missing permissions: " + ", ".join(missing) if missing else ""
+        )
+
+
 def set_button_enabled(
     button: QPushButton,
     enabled: bool,

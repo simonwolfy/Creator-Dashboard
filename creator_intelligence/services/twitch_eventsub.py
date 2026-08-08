@@ -27,10 +27,16 @@ class TwitchEventSubClient(QObject):
         self.url = "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30"
         self._seen_order: deque[str] = deque()
         self._seen_ids: set[str] = set()
+        self._recent_chat: deque[dict[str, Any]] = deque(maxlen=500)
+
+    def recent_chat(self) -> list[dict[str, Any]]:
+        return list(self._recent_chat)
 
     def start(self) -> None:
         if self.wanted and self.socket is not None:
             return
+        if not self.wanted:
+            self._recent_chat.clear()
         status = self.adapter.connect()
         if not status.connected:
             raise ValueError(status.message)
@@ -122,6 +128,12 @@ class TwitchEventSubClient(QObject):
         subscription = payload.get("subscription") or {}
         event = payload.get("event") or {}
         if subscription.get("type") == "channel.chat.message":
+            if result:
+                self._recent_chat.append({
+                    "captured_at": result.get("captured_at"),
+                    "chatter_user_name": result.get("chatter_user_name"),
+                    "message_text": result.get("message_text"),
+                })
             self.chat_received.emit(result or event)
         self.data_changed.emit()
 

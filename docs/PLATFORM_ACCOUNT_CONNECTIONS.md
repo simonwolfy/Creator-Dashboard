@@ -12,12 +12,20 @@ credential vault rather than the workspace database or logs.
    developer account.
 2. Copy the Client ID. A Client Secret and redirect URL are not used by this flow.
 3. In Creator Intelligence, open **Live Stream > Connections and rules**, paste the
-   Client ID, and click **Connect Twitch**.
+   Client ID, and click **Connect / reconnect Twitch**.
 4. Approve the device sign-in in the browser. The broadcaster ID, access token, and
    refresh token are filled automatically.
 
-The connection requests read-only chat, follower, subscription, and bits scopes
-used by live intelligence. Twitch may show those permissions during approval.
+The connection requests only the read-only chat, follower, and subscription
+permissions used by live intelligence. It cannot post chat messages or change the
+channel. Creator Intelligence validates the token when the app starts and hourly,
+rotates the public-client refresh token as required, and displays missing
+permissions as limited capabilities instead of failing the whole connection.
+
+Twitch's public device flow requires no local OAuth callback, so it works the same
+way in the packaged Windows application. Use **Check connection** to validate on
+demand, **Refresh credentials** to rotate an expiring token, and **Disconnect and
+revoke** to remove access and clear the operating-system vault.
 
 Official reference: [Twitch device code grant](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/#device-code-grant-flow).
 

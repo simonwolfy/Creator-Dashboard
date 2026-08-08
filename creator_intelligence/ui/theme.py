@@ -144,6 +144,17 @@ QStatusBar {{ background: {surface}; color: {muted}; }}
 #statusBanner[statusLevel="error"] {{
     background: {error_background}; color: {error_text};
 }}
+#connectionStatusPanel {{
+    background: {surface_alt}; border: 1px solid {border};
+    border-radius: 8px; padding: 8px;
+}}
+#connectionState {{ font-size: 16px; font-weight: 700; }}
+#connectionState[connectionState="connected"] {{ color: {success_text}; }}
+#connectionState[connectionState="limited"] {{ color: {accent_hover}; }}
+#connectionState[connectionState="expired"],
+#connectionState[connectionState="revoked"],
+#connectionState[connectionState="error"] {{ color: {error_text}; }}
+#connectionAccount, #connectionPermissions {{ color: {muted}; }}
 QScrollBar:horizontal, QScrollBar:vertical {{ background: {background}; border: none; }}
 #pageTitle {{ font-size: 27px; font-weight: 700; padding: 8px 0 14px 0; }}
 #metricCard {{ background: {surface}; border: 1px solid {border}; border-radius: 12px; padding: 8px; }}

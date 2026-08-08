@@ -37,10 +37,19 @@ class TwitchLiveAdapter:
                 "Client ID and OAuth access token are required.",
                 datetime.now().isoformat()
             )
+        try:
+            status=self.live_service.ensure_twitch_connection()
+        except Exception as exc:
+            return IntegrationStatus(
+                "Twitch",False,self.live_service.vault.redact(exc),
+                datetime.now().isoformat()
+            )
         self.connected=True
+        missing=status.get("missing_scopes") or []
+        suffix=f" Limited permissions: {', '.join(missing)}." if missing else ""
         return IntegrationStatus(
             "Twitch",True,
-            "Credentials are configured. EventSub and polling transport are ready to initialize.",
+            "Twitch access is valid. EventSub and polling are ready."+suffix,
             datetime.now().isoformat()
         )
 
@@ -80,6 +89,14 @@ class TwitchLiveAdapter:
             )
         if event_type=="channel.chat.message":
             return self.live_service.record_chat_message(event,message_id)
+        if event_type=="channel.subscribe":
+            session=self.live_service.active_session()
+            if not session:return None
+            return self.live_service.add_event(
+                session["id"],"subscription","New subscriber",
+                f'{event.get("user_name") or "A viewer"} subscribed.',
+                "Twitch",external_id=message_id,payload=event,severity="Success"
+            )
         return None
 
 class OBSLiveAdapter:

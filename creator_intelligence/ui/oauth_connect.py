@@ -132,6 +132,7 @@ def run_twitch_device_oauth(parent, service, client_id: str):
             timer.stop()
             dialog.reject()
             return
+        timer.setInterval(max(1, int(connection.get("interval") or 5)) * 1000)
         if result:
             outcome["result"] = result
             timer.stop()

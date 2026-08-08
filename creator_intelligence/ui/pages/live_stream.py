@@ -11,7 +11,12 @@ from creator_intelligence.ui.pages.twitch import FrameModel
 from creator_intelligence.ui.oauth_connect import run_twitch_device_oauth, show_connection_result
 from creator_intelligence.services.live_stream import LiveSimulationAdapter
 from creator_intelligence.services.twitch_eventsub import TwitchEventSubClient
-from creator_intelligence.ui.widgets import FlowLayout
+from creator_intelligence.ui.widgets import (
+    ConnectionStatusPanel,
+    FlowLayout,
+    StatusBanner,
+    set_button_enabled,
+)
 
 class MetricCard(QGroupBox):
     def __init__(self,title):
@@ -30,6 +35,10 @@ class LiveStreamPage(QWidget):
         self.timer.timeout.connect(self.simulation_tick)
         self.twitch_timer=QTimer(self)
         self.twitch_timer.timeout.connect(self.poll_twitch)
+        self.validation_timer=QTimer(self)
+        self.validation_timer.setInterval(60*60*1000)
+        self.validation_timer.timeout.connect(self.validate_twitch_silently)
+        self.validation_timer.start()
         self.eventsub=TwitchEventSubClient(service,self)
         self.eventsub.status_changed.connect(self.set_twitch_tracking_status)
         self.eventsub.failed.connect(self.twitch_tracking_failed)
@@ -41,29 +50,52 @@ class LiveStreamPage(QWidget):
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
-        controls_widget=QWidget()
-        controls=FlowLayout(controls_widget)
+        twitch_group=QGroupBox("Real Twitch tracking")
+        twitch_group_layout=QVBoxLayout(twitch_group)
+        twitch_controls_widget=QWidget()
+        twitch_controls=FlowLayout(twitch_controls_widget)
+        self.start_twitch_button=QPushButton("Start Twitch tracking")
+        self.start_twitch_button.clicked.connect(self.start_twitch_tracking)
+        self.stop_twitch_button=QPushButton("Stop Twitch tracking")
+        self.stop_twitch_button.clicked.connect(self.stop_twitch_tracking)
+        check_twitch=QPushButton("Check Twitch connection")
+        check_twitch.clicked.connect(self.validate_twitch_connection)
+        for button in (self.start_twitch_button,self.stop_twitch_button,check_twitch):
+            twitch_controls.addWidget(button)
+        twitch_group_layout.addWidget(twitch_controls_widget)
+        layout.addWidget(twitch_group)
+
+        simulation_group=QGroupBox("Simulation tools")
+        simulation_group_layout=QVBoxLayout(simulation_group)
+        simulation_controls_widget=QWidget()
+        simulation_controls=FlowLayout(simulation_controls_widget)
         start=QPushButton("Start simulation")
         start.clicked.connect(self.start_simulation)
         tick=QPushButton("Advance simulation")
         tick.clicked.connect(self.simulation_tick)
         auto=QPushButton("Run simulation automatically")
         auto.clicked.connect(self.toggle_auto)
-        marker=QPushButton("Mark moment")
-        marker.clicked.connect(self.manual_marker)
         raid=QPushButton("Simulate raid")
         raid.clicked.connect(self.simulate_raid)
+        for button in (start,tick,auto,raid):
+            simulation_controls.addWidget(button)
+        simulation_group_layout.addWidget(simulation_controls_widget)
+        layout.addWidget(simulation_group)
+
+        session_group=QGroupBox("Session tools")
+        session_group_layout=QVBoxLayout(session_group)
+        session_controls_widget=QWidget()
+        session_controls=FlowLayout(session_controls_widget)
+        marker=QPushButton("Mark moment")
+        marker.clicked.connect(self.manual_marker)
         end=QPushButton("End session")
         end.clicked.connect(self.end_session)
         refresh=QPushButton("Refresh")
         refresh.clicked.connect(self.refresh)
-        start_twitch=QPushButton("Start Twitch tracking")
-        start_twitch.clicked.connect(self.start_twitch_tracking)
-        stop_twitch=QPushButton("Stop Twitch tracking")
-        stop_twitch.clicked.connect(self.stop_twitch_tracking)
-        for button in (start_twitch,stop_twitch,start,tick,auto,marker,raid,end,refresh):
-            controls.addWidget(button)
-        layout.addWidget(controls_widget)
+        for button in (marker,end,refresh):
+            session_controls.addWidget(button)
+        session_group_layout.addWidget(session_controls_widget)
+        layout.addWidget(session_group)
 
         tabs=QTabWidget()
         tabs.addTab(self._dashboard_tab(),"Live dashboard")
@@ -73,6 +105,7 @@ class LiveStreamPage(QWidget):
         tabs.addTab(self._settings_tab(),"Connections and rules")
         layout.addWidget(tabs)
         self.refresh()
+        QTimer.singleShot(1500,self.validate_twitch_silently)
 
     def _dashboard_tab(self):
         page=QWidget(); layout=QVBoxLayout(page)
@@ -126,13 +159,22 @@ class LiveStreamPage(QWidget):
 
     def _settings_tab(self):
         page=QWidget(); layout=QVBoxLayout(page)
+        self.connection_panel=ConnectionStatusPanel("Twitch")
+        layout.addWidget(self.connection_panel)
+        self.connection_notice=StatusBanner("Twitch connection controls are ready.")
+        layout.addWidget(self.connection_notice)
         form=QFormLayout()
         self.simulation_mode=QCheckBox()
         self.twitch_enabled=QCheckBox()
         self.twitch_client_id=QLineEdit()
         self.twitch_broadcaster_id=QLineEdit()
+        self.twitch_broadcaster_id.setReadOnly(True)
+        self.twitch_broadcaster_id.setPlaceholderText("Filled automatically after sign-in")
         self.twitch_access_token=QLineEdit()
         self.twitch_access_token.setEchoMode(QLineEdit.Password)
+        self.twitch_access_token.setReadOnly(True)
+        self.twitch_access_token.setPlaceholderText("Stored in the operating-system credential vault")
+        self.store_raw_chat=QCheckBox("Retain full chat messages in this workspace")
         self.obs_enabled=QCheckBox()
         self.obs_host=QLineEdit()
         self.obs_port=QSpinBox(); self.obs_port.setRange(1,65535)
@@ -148,17 +190,40 @@ class LiveStreamPage(QWidget):
         form.addRow("Broadcaster ID",self.twitch_broadcaster_id)
         form.addRow("OAuth access token",self.twitch_access_token)
         twitch_help=QLabel(
-            "Paste only the Client ID from the Twitch developer console. Connect Twitch will open "
-            "a secure device sign-in and fill the broadcaster ID and tokens automatically."
+            "Paste only the Client ID from a Public Twitch application. Secure device sign-in "
+            "stores tokens in the operating-system credential vault. Requested permissions read "
+            "live chat, follower activity, and subscriber totals; Creator Intelligence cannot "
+            "post chat messages or modify your channel."
         )
         twitch_help.setWordWrap(True)
         form.addRow(twitch_help)
-        connect_twitch=QPushButton("Connect Twitch")
-        connect_twitch.clicked.connect(self.connect_twitch)
-        form.addRow(connect_twitch)
+        connection_buttons=QWidget(); connection_actions=FlowLayout(connection_buttons)
+        self.connect_twitch_button=QPushButton("Connect / reconnect Twitch")
+        self.connect_twitch_button.clicked.connect(self.connect_twitch)
+        self.twitch_client_id.textChanged.connect(
+            lambda _text:self._update_twitch_action_states()
+        )
+        self.validate_twitch_button=QPushButton("Check connection")
+        self.validate_twitch_button.clicked.connect(self.validate_twitch_connection)
+        self.refresh_twitch_button=QPushButton("Refresh credentials")
+        self.refresh_twitch_button.clicked.connect(self.refresh_twitch_credentials)
+        self.disconnect_twitch_button=QPushButton("Disconnect and revoke")
+        self.disconnect_twitch_button.clicked.connect(
+            lambda:self.disconnect_integration("twitch")
+        )
+        for button in (
+            self.connect_twitch_button,self.validate_twitch_button,
+            self.refresh_twitch_button,self.disconnect_twitch_button,
+        ):
+            connection_actions.addWidget(button)
+        form.addRow(connection_buttons)
         self.twitch_status=QLabel()
         self.twitch_status.setWordWrap(True)
         form.addRow("Twitch status",self.twitch_status)
+        self.twitch_capabilities_table=QTableView()
+        self.twitch_capabilities_table.setMaximumHeight(180)
+        form.addRow("Available data",self.twitch_capabilities_table)
+        form.addRow("Chat privacy",self.store_raw_chat)
         form.addRow("Enable OBS",self.obs_enabled)
         form.addRow("OBS host",self.obs_host)
         form.addRow("OBS port",self.obs_port)
@@ -172,20 +237,30 @@ class LiveStreamPage(QWidget):
         save=QPushButton("Save connection and marker settings")
         save.clicked.connect(self.save_settings)
         layout.addWidget(save)
-        disconnect_twitch=QPushButton("Disconnect Twitch and clear credentials")
-        disconnect_twitch.clicked.connect(lambda:self.disconnect_integration("twitch"));layout.addWidget(disconnect_twitch)
         disconnect_obs=QPushButton("Disconnect OBS and clear password")
         disconnect_obs.clicked.connect(lambda:self.disconnect_integration("obs"));layout.addWidget(disconnect_obs)
         return page
 
     def start_simulation(self):
         self.stop_twitch_tracking()
-        if not self.service.active_session():
+        active=self.service.active_session()
+        if active and active.get("source_mode")!="simulation":
+            self.service.end_session(active["id"])
+            active=None
+        self.service.update_settings(simulation_mode=1)
+        if not active:
             self.simulator.start()
         self.refresh()
 
     def simulation_tick(self):
-        if not self.service.active_session():
+        active=self.service.active_session()
+        if active and active.get("source_mode")!="simulation":
+            QMessageBox.warning(
+                self,"Simulation unavailable",
+                "End the real Twitch session before advancing a simulation."
+            )
+            return
+        if not active:
             self.simulator.start()
         # Advance test time one minute per click so rolling calculations are meaningful.
         session=self.service.active_session()
@@ -198,7 +273,14 @@ class LiveStreamPage(QWidget):
         if self.timer.isActive():
             self.timer.stop()
         else:
-            if not self.service.active_session():
+            active=self.service.active_session()
+            if active and active.get("source_mode")!="simulation":
+                QMessageBox.warning(
+                    self,"Simulation unavailable",
+                    "End the real Twitch session before running a simulation."
+                )
+                return
+            if not active:
                 self.simulator.start()
             self.timer.start(1000)
 
@@ -273,13 +355,16 @@ class LiveStreamPage(QWidget):
         self.load_settings()
 
     def refresh_chat(self):
-        self.chat_table.setModel(FrameModel(self.service.chat_messages()))
+        if bool(self.service.settings().get("store_raw_chat")):
+            frame=self.service.chat_messages()
+        else:
+            frame=pd.DataFrame(self.eventsub.recent_chat())
+        self.chat_table.setModel(FrameModel(frame))
 
     def start_twitch_tracking(self):
         try:
+            status=self.service.ensure_twitch_connection(force_validation=True)
             settings=self.service.settings()
-            if not settings.get("twitch_enabled") or not settings.get("twitch_access_token"):
-                raise ValueError("Connect Twitch in Connections and rules first.")
             if self.service.active_session() and self.service.active_session().get("source_mode")!="twitch":
                 raise ValueError("End the simulation session before starting Twitch tracking.")
             self.timer.stop()
@@ -288,14 +373,20 @@ class LiveStreamPage(QWidget):
             interval=max(15,int(settings.get("polling_interval_seconds") or 60))*1000
             self.twitch_timer.start(interval)
             self.poll_twitch()
+            self.connection_notice.set_status(status["message"],"success")
+            self.load_settings()
         except Exception as exc:
-            QMessageBox.critical(self,"Start Twitch tracking",str(exc))
+            safe=self.service.vault.redact(exc)
+            self.connection_notice.set_status(safe,"error")
+            QMessageBox.critical(self,"Start Twitch tracking",safe)
 
     def stop_twitch_tracking(self):
         self.twitch_timer.stop()
         self.eventsub.stop()
         if hasattr(self,"tracking_status"):
             self.tracking_status.setText("Twitch real-time tracking is stopped")
+        if hasattr(self,"stop_twitch_button"):
+            self._update_twitch_action_states()
 
     def poll_twitch(self):
         try:
@@ -317,7 +408,75 @@ class LiveStreamPage(QWidget):
         self.tracking_status.setText(str(message))
 
     def twitch_tracking_failed(self,message):
-        self.tracking_status.setText(f"Twitch tracking needs attention: {message}")
+        safe=self.service.vault.redact(message)
+        self.tracking_status.setText(f"Twitch tracking needs attention: {safe}")
+        if hasattr(self,"connection_notice"):
+            self.connection_notice.set_status(safe,"error")
+
+    def validate_twitch_connection(self):
+        status=self.service.validate_twitch_connection()
+        self.load_settings()
+        level="success" if status.get("can_sync") else "error"
+        self.connection_notice.set_status(status["message"],level)
+
+    def validate_twitch_silently(self):
+        status=self.service.twitch_connection_status()
+        if not status.get("configured"):
+            return
+        try:
+            status=self.service.ensure_twitch_connection()
+        except Exception:
+            status=self.service.twitch_connection_status()
+        if not status.get("can_sync") and self.eventsub.wanted:
+            self.stop_twitch_tracking()
+        self.load_settings()
+
+    def refresh_twitch_credentials(self):
+        try:
+            self.service.refresh_twitch_connection()
+            status=self.service.validate_twitch_connection()
+        except Exception as exc:
+            safe=self.service.vault.redact(exc)
+            self.connection_notice.set_status(safe,"error")
+            QMessageBox.warning(self,"Refresh Twitch credentials",safe)
+            self.load_settings()
+            return
+        self.load_settings()
+        self.connection_notice.set_status(status["message"],"success")
+
+    def _update_twitch_action_states(self):
+        status=self.service.twitch_connection_status()
+        tracking=bool(self.eventsub.wanted or self.twitch_timer.isActive())
+        set_button_enabled(
+            self.start_twitch_button,
+            bool(status.get("can_sync")) and not tracking,
+            "Connect Twitch and resolve any authentication problem first."
+            if not status.get("can_sync") else "Twitch tracking is already running.",
+        )
+        set_button_enabled(
+            self.stop_twitch_button,tracking,"Twitch tracking is already stopped."
+        )
+        if hasattr(self,"validate_twitch_button"):
+            set_button_enabled(
+                self.connect_twitch_button,
+                bool(self.twitch_client_id.text().strip()),
+                "Paste the Twitch Client ID first.",
+            )
+            set_button_enabled(
+                self.validate_twitch_button,
+                bool(status.get("configured")),
+                "Connect Twitch before checking the account.",
+            )
+            has_refresh=bool(self.service.settings().get("twitch_refresh_token"))
+            set_button_enabled(
+                self.refresh_twitch_button,has_refresh,
+                "Reconnect Twitch to obtain a refresh token.",
+            )
+            set_button_enabled(
+                self.disconnect_twitch_button,
+                bool(status.get("can_disconnect")),
+                "Twitch is already disconnected.",
+            )
 
     def load_settings(self):
         settings=self.service.display_settings()
@@ -334,6 +493,19 @@ class LiveStreamPage(QWidget):
             f"Connected · Broadcaster ID {settings.get('twitch_broadcaster_id')}"
             if connected else "Not connected · A Client ID is required to start sign-in"
         )
+        status=self.service.twitch_connection_status()
+        self.connection_panel.set_status(status)
+        details=[]
+        if status.get("last_validated_at"):
+            details.append(f"Last checked {status['last_validated_at']}")
+        if status.get("expires_at"):
+            details.append(f"Access token expires {status['expires_at']}")
+        if status.get("last_error"):
+            details.append(f"Error: {status['last_error']}")
+        self.twitch_status.setText(" | ".join(details) or status["message"])
+        self.twitch_capabilities_table.setModel(
+            FrameModel(pd.DataFrame(self.service.twitch_capabilities()))
+        )
         self.obs_enabled.setChecked(bool(settings["obs_enabled"]))
         self.obs_host.setText(settings["obs_host"] or "127.0.0.1")
         self.obs_port.setValue(int(settings["obs_port"] or 4455))
@@ -343,6 +515,8 @@ class LiveStreamPage(QWidget):
         self.chat_spike.setValue(float(settings["chat_spike_multiplier"] or 2.5))
         self.follow_spike.setValue(int(settings["follow_spike_count"] or 3))
         self.raid_threshold.setValue(int(settings["raid_marker_min_viewers"] or 10))
+        self.store_raw_chat.setChecked(bool(settings.get("store_raw_chat")))
+        self._update_twitch_action_states()
 
     def save_settings(self):
         self.service.update_settings(
@@ -350,7 +524,6 @@ class LiveStreamPage(QWidget):
             twitch_enabled=int(self.twitch_enabled.isChecked()),
             twitch_client_id=self.twitch_client_id.text().strip() or None,
             twitch_broadcaster_id=self.twitch_broadcaster_id.text().strip() or None,
-            twitch_access_token=self.twitch_access_token.text().strip() or None,
             obs_enabled=int(self.obs_enabled.isChecked()),
             obs_host=self.obs_host.text().strip() or "127.0.0.1",
             obs_port=self.obs_port.value(),
@@ -359,7 +532,8 @@ class LiveStreamPage(QWidget):
             viewer_spike_stddev=self.viewer_spike.value(),
             chat_spike_multiplier=self.chat_spike.value(),
             follow_spike_count=self.follow_spike.value(),
-            raid_marker_min_viewers=self.raid_threshold.value()
+            raid_marker_min_viewers=self.raid_threshold.value(),
+            store_raw_chat=int(self.store_raw_chat.isChecked())
         )
         QMessageBox.information(self,"Settings saved","Live integration settings were saved.")
 
@@ -367,16 +541,37 @@ class LiveStreamPage(QWidget):
         try:
             result=run_twitch_device_oauth(self,self.service,self.twitch_client_id.text().strip())
         except Exception as exc:
-            QMessageBox.critical(self,"Connect Twitch",str(exc));return
+            safe=self.service.vault.redact(exc)
+            self.connection_notice.set_status(safe,"error")
+            QMessageBox.critical(self,"Connect Twitch",safe);return
         if result:
             self.load_settings()
+            try:
+                synced=self.service.sync_twitch_content()
+            except Exception as exc:
+                safe=self.service.vault.redact(exc)
+                self.connection_notice.set_status(
+                    f"Twitch connected, but the initial content sync failed: {safe}",
+                    "error",
+                )
+            else:
+                self.connection_notice.set_status(
+                    f"Twitch connected. Initial sync found {synced['videos']} video(s) "
+                    f"and {synced['clips']} clip(s).",
+                    "success",
+                )
             show_connection_result(self,"twitch",result)
 
     def disconnect_integration(self,provider):
         if QMessageBox.question(self,"Disconnect",f"Clear {provider.title()} credentials from the operating-system vault?")!=QMessageBox.StandardButton.Yes:return
         warning=None
         if provider=="twitch":
+            self.stop_twitch_tracking()
             try:self.service.revoke_twitch_access()
-            except Exception as exc:warning=str(exc)
+            except Exception as exc:warning=self.service.vault.redact(exc)
         self.service.disconnect_integration(provider);self.load_settings()
+        if provider=="twitch":
+            self.connection_notice.set_status(
+                "Twitch disconnected and local credentials cleared.","success"
+            )
         if warning:QMessageBox.warning(self,"Disconnected locally",f"Credentials were cleared, but Twitch could not be reached to revoke the token: {warning}")

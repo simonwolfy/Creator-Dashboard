@@ -145,6 +145,8 @@ def test_twitch_device_sign_in_fills_broadcaster_and_tokens(tmp_path, monkeypatc
     result = service.poll_twitch_connection(connection)
     settings = service.settings()
     assert result["broadcaster_id"] == "123456"
+    assert result["status"]["state"] == "connected"
+    assert result["status"]["missing_scopes"] == []
     assert settings["twitch_broadcaster_id"] == "123456"
     assert settings["twitch_access_token"] == "twitch-access"
     row = service.db.frame("SELECT twitch_access_token,twitch_refresh_token FROM live_integration_settings WHERE id=1").iloc[0]
