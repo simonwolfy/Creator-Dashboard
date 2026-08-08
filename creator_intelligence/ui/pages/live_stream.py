@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 from creator_intelligence.ui.pages.twitch import FrameModel
 from creator_intelligence.ui.oauth_connect import run_twitch_device_oauth, show_connection_result
 from creator_intelligence.services.live_stream import LiveSimulationAdapter
+from creator_intelligence.services.twitch_eventsub import TwitchEventSubClient
 
 class MetricCard(QGroupBox):
     def __init__(self,title):
@@ -26,6 +27,13 @@ class LiveStreamPage(QWidget):
         self.simulator=LiveSimulationAdapter(service)
         self.timer=QTimer(self)
         self.timer.timeout.connect(self.simulation_tick)
+        self.twitch_timer=QTimer(self)
+        self.twitch_timer.timeout.connect(self.poll_twitch)
+        self.eventsub=TwitchEventSubClient(service,self)
+        self.eventsub.status_changed.connect(self.set_twitch_tracking_status)
+        self.eventsub.failed.connect(self.twitch_tracking_failed)
+        self.eventsub.chat_received.connect(lambda _message:self.refresh_chat())
+        self.eventsub.data_changed.connect(self.refresh)
 
         layout=QVBoxLayout(self)
         title=QLabel("Live Stream Intelligence")
@@ -47,7 +55,11 @@ class LiveStreamPage(QWidget):
         end.clicked.connect(self.end_session)
         refresh=QPushButton("Refresh")
         refresh.clicked.connect(self.refresh)
-        for button in (start,tick,auto,marker,raid,end,refresh):
+        start_twitch=QPushButton("Start Twitch tracking")
+        start_twitch.clicked.connect(self.start_twitch_tracking)
+        stop_twitch=QPushButton("Stop Twitch tracking")
+        stop_twitch.clicked.connect(self.stop_twitch_tracking)
+        for button in (start_twitch,stop_twitch,start,tick,auto,marker,raid,end,refresh):
             controls.addWidget(button)
         controls.addStretch()
         layout.addLayout(controls)
@@ -55,6 +67,7 @@ class LiveStreamPage(QWidget):
         tabs=QTabWidget()
         tabs.addTab(self._dashboard_tab(),"Live dashboard")
         tabs.addTab(self._timeline_tab(),"Session timeline")
+        tabs.addTab(self._chat_tab(),"Live chat")
         tabs.addTab(self._markers_tab(),"Markers")
         tabs.addTab(self._settings_tab(),"Connections and rules")
         layout.addWidget(tabs)
@@ -79,6 +92,9 @@ class LiveStreamPage(QWidget):
         layout.addLayout(grid)
         self.session_label=QLabel("No active session")
         layout.addWidget(self.session_label)
+        self.tracking_status=QLabel("Twitch real-time tracking is stopped")
+        self.tracking_status.setWordWrap(True)
+        layout.addWidget(self.tracking_status)
         return page
 
     def _timeline_tab(self):
@@ -93,6 +109,18 @@ class LiveStreamPage(QWidget):
         self.marker_table=QTableView()
         self.marker_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         layout.addWidget(self.marker_table)
+        return page
+
+    def _chat_tab(self):
+        page=QWidget(); layout=QVBoxLayout(page)
+        help_text=QLabel(
+            "Read-only live chat from the connected Twitch channel. Messages are kept in this "
+            "workspace so chat activity can improve real-time markers and session analytics."
+        )
+        help_text.setWordWrap(True);layout.addWidget(help_text)
+        self.chat_table=QTableView()
+        self.chat_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        layout.addWidget(self.chat_table)
         return page
 
     def _settings_tab(self):
@@ -150,6 +178,7 @@ class LiveStreamPage(QWidget):
         return page
 
     def start_simulation(self):
+        self.stop_twitch_tracking()
         if not self.service.active_session():
             self.simulator.start()
         self.refresh()
@@ -191,6 +220,7 @@ class LiveStreamPage(QWidget):
 
     def end_session(self):
         self.timer.stop()
+        self.stop_twitch_tracking()
         if self.service.active_session():
             self.service.end_session()
         self.refresh()
@@ -203,6 +233,7 @@ class LiveStreamPage(QWidget):
                 card.value.setText("—")
             self.timeline_table.setModel(FrameModel(pd.DataFrame()))
             self.marker_table.setModel(FrameModel(pd.DataFrame()))
+            self.refresh_chat()
             self.load_settings()
             return
         dashboard=self.service.dashboard(session["id"])
@@ -237,7 +268,55 @@ class LiveStreamPage(QWidget):
         )
         self.timeline_table.setModel(FrameModel(self.service.timeline(session["id"])))
         self.marker_table.setModel(FrameModel(self.service.markers(session["id"])))
+        self.refresh_chat()
         self.load_settings()
+
+    def refresh_chat(self):
+        self.chat_table.setModel(FrameModel(self.service.chat_messages()))
+
+    def start_twitch_tracking(self):
+        try:
+            settings=self.service.settings()
+            if not settings.get("twitch_enabled") or not settings.get("twitch_access_token"):
+                raise ValueError("Connect Twitch in Connections and rules first.")
+            if self.service.active_session() and self.service.active_session().get("source_mode")!="twitch":
+                raise ValueError("End the simulation session before starting Twitch tracking.")
+            self.timer.stop()
+            self.service.update_settings(simulation_mode=0,twitch_enabled=1)
+            self.eventsub.start()
+            interval=max(15,int(settings.get("polling_interval_seconds") or 60))*1000
+            self.twitch_timer.start(interval)
+            self.poll_twitch()
+        except Exception as exc:
+            QMessageBox.critical(self,"Start Twitch tracking",str(exc))
+
+    def stop_twitch_tracking(self):
+        self.twitch_timer.stop()
+        self.eventsub.stop()
+        if hasattr(self,"tracking_status"):
+            self.tracking_status.setText("Twitch real-time tracking is stopped")
+
+    def poll_twitch(self):
+        try:
+            status=self.service.poll_twitch_live()
+        except Exception as exc:
+            self.twitch_tracking_failed(str(exc));return
+        if status.get("is_live"):
+            self.tracking_status.setText(
+                f'Twitch is live Â· {int(status.get("viewers") or 0):,} viewers Â· '
+                f'{status.get("game") or "No category"}'
+            )
+        else:
+            self.tracking_status.setText(
+                "Connected and watching Twitch Â· Channel is currently offline"
+            )
+        self.refresh()
+
+    def set_twitch_tracking_status(self,message):
+        self.tracking_status.setText(str(message))
+
+    def twitch_tracking_failed(self,message):
+        self.tracking_status.setText(f"Twitch tracking needs attention: {message}")
 
     def load_settings(self):
         settings=self.service.display_settings()

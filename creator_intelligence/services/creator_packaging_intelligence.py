@@ -82,8 +82,7 @@ class CreatorPackagingIntelligenceMixin:
                 example_type TEXT NOT NULL DEFAULT 'published',
                 source_video_id TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(platform, content_type, title)
+                updated_at TEXT NOT NULL
             )"""
         )
         self.db.execute(
@@ -132,7 +131,8 @@ class CreatorPackagingIntelligenceMixin:
         if existing.empty and source_video_id:
             existing = self.db.frame(
                 """SELECT * FROM creator_published_titles
-                   WHERE platform=? AND content_type=? AND title=?""",
+                   WHERE platform=? AND content_type=? AND title=?
+                     AND (source_video_id IS NULL OR source_video_id='')""",
                 (platform, content_type, clean),
             )
         before = existing.iloc[0].to_dict() if not existing.empty else None
@@ -154,26 +154,27 @@ class CreatorPackagingIntelligenceMixin:
                 record_id = 0
         else:
             record_id = 0
+        if not record_id and not existing.empty:
+            record_id = int(existing.iloc[0]["id"])
+            self.db.execute(
+                """UPDATE creator_published_titles SET content_type=?,title=?,game=?,
+                   published_at=?,views=?,likes=?,comments=?,watch_time=?,example_type=?,
+                   source_video_id=COALESCE(?,source_video_id),updated_at=? WHERE id=?""",
+                (content_type, clean, game, published_at, views, likes, comments,
+                 watch_time, kind, source_video_id, now, record_id),
+            )
         if not record_id:
             self.db.execute(
                 """INSERT INTO creator_published_titles(
                    platform,content_type,title,game,published_at,views,likes,comments,
                    watch_time,example_type,source_video_id,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(platform,content_type,title) DO UPDATE SET
-                   game=excluded.game,published_at=excluded.published_at,
-                   views=excluded.views,likes=excluded.likes,comments=excluded.comments,
-                   watch_time=excluded.watch_time,example_type=excluded.example_type,
-                   source_video_id=excluded.source_video_id,updated_at=excluded.updated_at""",
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (platform, content_type, clean, game, published_at, views, likes,
                  comments, watch_time, kind, source_video_id, now, now),
             )
-            row = self.db.frame(
-                """SELECT id FROM creator_published_titles
-                   WHERE platform=? AND content_type=? AND title=?""",
-                (platform, content_type, clean),
-            )
-            record_id = int(row.iloc[0]["id"])
+            record_id = int(self.db.frame(
+                "SELECT id FROM creator_published_titles ORDER BY id DESC LIMIT 1"
+            ).iloc[0]["id"])
         after = self.db.frame(
             "SELECT * FROM creator_published_titles WHERE id=?", (record_id,)
         ).iloc[0].to_dict()

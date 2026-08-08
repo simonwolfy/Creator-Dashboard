@@ -52,7 +52,8 @@ class SocialPlatformService:
                 comments INTEGER, watch_time REAL,
                 example_type TEXT NOT NULL DEFAULT 'published',
                 source_video_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                UNIQUE(platform,content_type,title))"""
+                shares INTEGER, reach INTEGER, duration_seconds REAL,
+                description TEXT)"""
         )
         columns = {str(row["name"]) for _, row in self.db.frame(
             "PRAGMA table_info(creator_published_titles)"
@@ -61,6 +62,11 @@ class SocialPlatformService:
                                ("duration_seconds", "REAL"), ("description", "TEXT")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE creator_published_titles ADD COLUMN {name} {sql_type}")
+        self._remove_legacy_title_uniqueness()
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_creator_titles_source "
+            "ON creator_published_titles(platform,source_video_id)"
+        )
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS creator_title_sync_state(
                 platform TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'Never synced',
@@ -68,6 +74,62 @@ class SocialPlatformService:
                 records_seen INTEGER NOT NULL DEFAULT 0,
                 records_changed INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"""
         )
+
+    def _remove_legacy_title_uniqueness(self) -> None:
+        """Allow two platform posts to legitimately share the same visible title.
+
+        Older workspaces used a title-based UNIQUE constraint. Platform IDs are the
+        real record identity; keeping that constraint made a normal re-sync crash
+        when an imported title was later associated with its platform ID.
+        """
+        row = self.db.frame(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='creator_published_titles'"
+        )
+        if row.empty:
+            return
+        normalized = "".join(str(row.iloc[0]["sql"] or "").lower().split())
+        if "unique(platform,content_type,title)" not in normalized:
+            return
+        columns = [
+            "id", "platform", "content_type", "title", "game", "published_at",
+            "views", "likes", "comments", "watch_time", "example_type",
+            "source_video_id", "created_at", "updated_at", "shares", "reach",
+            "duration_seconds", "description",
+        ]
+        create_sql = """CREATE TABLE creator_published_titles_new(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL DEFAULT 'twitch',
+            content_type TEXT NOT NULL DEFAULT 'clip', title TEXT NOT NULL,
+            game TEXT, published_at TEXT, views INTEGER, likes INTEGER,
+            comments INTEGER, watch_time REAL,
+            example_type TEXT NOT NULL DEFAULT 'published',
+            source_video_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            shares INTEGER, reach INTEGER, duration_seconds REAL, description TEXT)"""
+        copy_sql = (
+            f"INSERT INTO creator_published_titles_new({','.join(columns)}) "
+            f"SELECT {','.join(columns)} FROM creator_published_titles"
+        )
+        if callable(getattr(self.db, "connect", None)):
+            with self.db.connect() as connection:
+                connection.execute("DROP TABLE IF EXISTS creator_published_titles_new")
+                connection.execute(create_sql)
+                connection.execute(copy_sql)
+                connection.execute("DROP TABLE creator_published_titles")
+                connection.execute(
+                    "ALTER TABLE creator_published_titles_new RENAME TO creator_published_titles"
+                )
+            return
+        connection = getattr(self.db, "connection", None)
+        if connection is None:
+            raise RuntimeError("Database connection does not support the title schema upgrade.")
+        with connection:
+            connection.execute("DROP TABLE IF EXISTS creator_published_titles_new")
+            connection.execute(create_sql)
+            connection.execute(copy_sql)
+            connection.execute("DROP TABLE creator_published_titles")
+            connection.execute(
+                "ALTER TABLE creator_published_titles_new RENAME TO creator_published_titles"
+            )
 
     def _migrate_legacy_credentials(self) -> None:
         self.db.execute("PRAGMA secure_delete=ON")
@@ -480,11 +542,21 @@ class SocialPlatformService:
         source_id = str(record.get("source_video_id") or record.get("id") or "").strip()
         if not source_id:
             raise ValueError("Platform record is missing its source ID.")
+        title = str(record.get("title") or record.get("caption") or "Untitled post").strip()
+        content_type = str(record.get("content_type") or "short")
         existing = self.db.frame(
             "SELECT * FROM creator_published_titles WHERE platform=? AND source_video_id=?",
             (platform, source_id),
         )
-        title = str(record.get("title") or record.get("caption") or "Untitled post").strip()
+        if existing.empty:
+            # Claim legacy/manual title history instead of inserting a duplicate.
+            existing = self.db.frame(
+                """SELECT * FROM creator_published_titles
+                   WHERE platform=? AND content_type=? AND title=?
+                     AND (source_video_id IS NULL OR source_video_id='')
+                   ORDER BY id LIMIT 1""",
+                (platform, content_type, title),
+            )
         values = (record.get("content_type") or "short", title, record.get("description"), record.get("published_at"),
                   self._number(record.get("views"), int), self._number(record.get("likes"), int),
                   self._number(record.get("comments"), int), self._number(record.get("shares"), int),
@@ -502,8 +574,9 @@ class SocialPlatformService:
                 (platform, *values, source_id, now, now))
         else:
             self.db.execute("""UPDATE creator_published_titles SET content_type=?,title=?,description=?,published_at=?,
-                views=?,likes=?,comments=?,shares=?,reach=?,watch_time=?,duration_seconds=?,updated_at=?
-                WHERE id=?""", (*values, now, int(existing.iloc[0]["id"])))
+                views=?,likes=?,comments=?,shares=?,reach=?,watch_time=?,duration_seconds=?,source_video_id=?,
+                example_type='published',updated_at=? WHERE id=?""",
+                (*values, source_id, now, int(existing.iloc[0]["id"])))
         if changed:
             current = self.db.frame(
                 "SELECT * FROM creator_published_titles WHERE platform=? AND source_video_id=?",

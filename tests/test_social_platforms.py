@@ -138,3 +138,66 @@ def test_youtube_sync_mirrors_content_tab_table(tmp_path):
     assert int(row["likes"]) == 0
     assert int(row["comments"]) == 0
     assert int(row["shares"]) == 0
+
+
+def test_youtube_sync_claims_legacy_title_without_duplicate_error(tmp_path):
+    db = DB(tmp_path / "youtube-legacy-title.db")
+    service = SocialPlatformService(db)
+    service.save_configuration("youtube", {"api_key": "key", "channel_id": "channel"})
+    now = "2026-08-01T00:00:00Z"
+    db.execute("""INSERT INTO creator_published_titles(
+        platform,content_type,title,example_type,created_at,updated_at)
+        VALUES('youtube','video','Already imported','published',?,?)""", (now, now))
+
+    result = service.sync("youtube", fetcher=lambda platform, cursor: [{
+        "source_video_id": "yt-legacy", "content_type": "video",
+        "title": "Already imported", "published_at": now, "views": 42,
+    }])
+
+    rows = db.frame("SELECT * FROM creator_published_titles WHERE platform='youtube'")
+    assert result["changed"] == 1
+    assert len(rows) == 1
+    assert rows.iloc[0]["source_video_id"] == "yt-legacy"
+    assert int(rows.iloc[0]["views"]) == 42
+
+
+def test_platform_ids_allow_two_posts_with_the_same_title(tmp_path):
+    db = DB(tmp_path / "duplicate-visible-title.db")
+    service = SocialPlatformService(db)
+    service.save_configuration("youtube", {"api_key": "key", "channel_id": "channel"})
+    records = [
+        {"source_video_id": "yt-one", "content_type": "video", "title": "Weekly update"},
+        {"source_video_id": "yt-two", "content_type": "video", "title": "Weekly update"},
+    ]
+    service.sync("youtube", fetcher=lambda platform, cursor: records)
+    rows = db.frame(
+        "SELECT source_video_id FROM creator_published_titles WHERE platform='youtube' ORDER BY source_video_id"
+    )
+    assert rows["source_video_id"].tolist() == ["yt-one", "yt-two"]
+
+
+def test_legacy_unique_title_schema_is_upgraded_in_place(tmp_path):
+    db = DB(tmp_path / "legacy-unique-schema.db")
+    db.execute("""CREATE TABLE creator_published_titles(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        platform TEXT NOT NULL DEFAULT 'twitch',
+        content_type TEXT NOT NULL DEFAULT 'clip', title TEXT NOT NULL,
+        game TEXT, published_at TEXT, views INTEGER, likes INTEGER,
+        comments INTEGER, watch_time REAL,
+        example_type TEXT NOT NULL DEFAULT 'published', source_video_id TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(platform,content_type,title))""")
+    db.execute("""INSERT INTO creator_published_titles(
+        platform,content_type,title,created_at,updated_at)
+        VALUES('youtube','video','Same title','2026-08-01','2026-08-01')""")
+
+    SocialPlatformService(db)
+    db.execute("""INSERT INTO creator_published_titles(
+        platform,content_type,title,source_video_id,created_at,updated_at)
+        VALUES('youtube','video','Same title','second','2026-08-02','2026-08-02')""")
+
+    assert len(db.frame("SELECT id FROM creator_published_titles")) == 2
+    schema = db.frame(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='creator_published_titles'"
+    ).iloc[0]["sql"].lower()
+    assert "unique(platform,content_type,title)" not in "".join(schema.split())

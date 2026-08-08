@@ -5,7 +5,7 @@ from typing import Any
 import json
 import math
 import random
-import sqlite3
+import re
 import uuid
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -164,6 +164,50 @@ class LiveStreamService:
             """INSERT OR IGNORE INTO live_integration_settings(
                 id,updated_at
             ) VALUES(1,datetime('now'))""",
+            """CREATE TABLE IF NOT EXISTS live_chat_messages(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                message_id TEXT NOT NULL UNIQUE,
+                captured_at TEXT NOT NULL,
+                chatter_user_id TEXT,
+                chatter_user_name TEXT NOT NULL,
+                message_text TEXT NOT NULL,
+                color TEXT,
+                badges_json TEXT NOT NULL DEFAULT '[]',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(session_id) REFERENCES live_sessions(id)
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_live_chat_captured
+               ON live_chat_messages(captured_at)""",
+            """CREATE TABLE IF NOT EXISTS twitch_channel_snapshots(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                captured_at TEXT NOT NULL,
+                broadcaster_id TEXT NOT NULL,
+                is_live INTEGER NOT NULL DEFAULT 0,
+                stream_id TEXT,
+                title TEXT,
+                game TEXT,
+                viewers INTEGER NOT NULL DEFAULT 0,
+                followers_total INTEGER,
+                subscribers_total INTEGER,
+                started_at TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_twitch_channel_snapshots_time
+               ON twitch_channel_snapshots(captured_at)""",
+            """CREATE TABLE IF NOT EXISTS twitch_api_content(
+                content_key TEXT PRIMARY KEY,
+                platform_content_id TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                created_at TEXT,
+                duration_seconds REAL,
+                views INTEGER NOT NULL DEFAULT 0,
+                url TEXT,
+                thumbnail_url TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                synced_at TEXT NOT NULL
+            )""",
         ]
         for sql in statements:
             self.db.execute(sql)
@@ -317,6 +361,274 @@ class LiveStreamService:
             method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         return cls._json_request(request)
+
+    def _twitch_request(
+        self, path: str, query: dict[str, Any] | None = None, *,
+        method: str = "GET", payload: dict[str, Any] | None = None,
+        retry: bool = True,
+    ) -> dict[str, Any]:
+        settings = self.settings()
+        client_id = str(settings.get("twitch_client_id") or "").strip()
+        access_token = str(settings.get("twitch_access_token") or "").strip()
+        broadcaster_id = str(settings.get("twitch_broadcaster_id") or "").strip()
+        if not client_id or not access_token or not broadcaster_id:
+            raise ValueError("Connect Twitch before syncing live data.")
+        url = f"https://api.twitch.tv/helix/{path.lstrip('/')}"
+        if query:
+            url += "?" + urlencode({key: value for key, value in query.items() if value is not None})
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = Request(
+            url, data=body, method=method,
+            headers={
+                "Client-Id": client_id,
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            return self._json_request(request)
+        except HTTPError as exc:
+            if exc.code == 401 and retry and settings.get("twitch_refresh_token"):
+                self.refresh_twitch_connection()
+                return self._twitch_request(path, query, method=method, payload=payload, retry=False)
+            try:
+                response = json.loads(exc.read().decode("utf-8"))
+                message = response.get("message") or str(exc)
+            except Exception:
+                message = str(exc)
+            raise RuntimeError(self.vault.redact(message)) from None
+
+    def twitch_channel_status(self, *, store: bool = True) -> dict[str, Any]:
+        settings = self.settings()
+        broadcaster_id = str(settings.get("twitch_broadcaster_id") or "").strip()
+        streams = self._twitch_request("streams", {"user_id": broadcaster_id}).get("data") or []
+        channels = self._twitch_request("channels", {"broadcaster_id": broadcaster_id}).get("data") or []
+        stream = streams[0] if streams else {}
+        channel = channels[0] if channels else {}
+        try:
+            followers = self._twitch_request(
+                "channels/followers", {"broadcaster_id": broadcaster_id, "first": 1}
+            ).get("total")
+        except RuntimeError:
+            followers = None
+        try:
+            subscribers = self._twitch_request(
+                "subscriptions", {"broadcaster_id": broadcaster_id, "first": 1}
+            ).get("total")
+        except RuntimeError:
+            subscribers = None
+        now = datetime.now().isoformat()
+        status = {
+            "captured_at": now,
+            "broadcaster_id": broadcaster_id,
+            "is_live": bool(stream),
+            "stream_id": stream.get("id"),
+            "title": stream.get("title") or channel.get("title"),
+            "game": stream.get("game_name") or channel.get("game_name"),
+            "viewers": int(stream.get("viewer_count") or 0),
+            "followers_total": self._optional_int(followers),
+            "subscribers_total": self._optional_int(subscribers),
+            "started_at": stream.get("started_at"),
+        }
+        if store:
+            self.db.execute(
+                """INSERT INTO twitch_channel_snapshots(
+                    captured_at,broadcaster_id,is_live,stream_id,title,game,viewers,
+                    followers_total,subscribers_total,started_at,payload_json)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    now, broadcaster_id, int(status["is_live"]), status["stream_id"],
+                    status["title"], status["game"], status["viewers"],
+                    status["followers_total"], status["subscribers_total"],
+                    status["started_at"], json.dumps({"stream": stream, "channel": channel}),
+                ),
+            )
+        return status
+
+    def poll_twitch_live(self) -> dict[str, Any]:
+        status = self.twitch_channel_status(store=True)
+        active = self.active_session()
+        if not status["is_live"]:
+            if active and active.get("source_mode") == "twitch":
+                self.end_session(active["id"])
+                status["session_ended"] = True
+            return status
+        if active and active.get("source_mode") != "twitch":
+            raise RuntimeError("End the simulation session before starting real Twitch tracking.")
+        if not active:
+            if not bool(self.settings().get("auto_start_session")):
+                return status
+            active = self.start_session(
+                title=status["title"], game=status["game"],
+                starting_followers=status["followers_total"],
+                starting_subscribers=status["subscribers_total"],
+                source_mode="twitch", twitch_stream_id=status["stream_id"],
+            )
+            status["session_started"] = True
+        elif status["title"] or status["game"]:
+            self.db.execute(
+                """UPDATE live_sessions SET title=COALESCE(?,title),game=COALESCE(?,game),
+                   twitch_stream_id=COALESCE(?,twitch_stream_id),updated_at=? WHERE id=?""",
+                (status["title"], status["game"], status["stream_id"], datetime.now().isoformat(), active["id"]),
+            )
+        chat = self.chat_activity()
+        self.record_snapshot(
+            LiveSnapshot(
+                captured_at=status["captured_at"], viewers=status["viewers"],
+                followers_total=status["followers_total"],
+                subscribers_total=status["subscribers_total"],
+                chat_messages_minute=chat["messages_minute"],
+                unique_chatters_5m=chat["unique_chatters_5m"],
+                current_game=status["game"], current_title=status["title"],
+            ),
+            active["id"],
+        )
+        status["session_id"] = active["id"]
+        return status
+
+    def sync_twitch_content(self) -> dict[str, Any]:
+        settings = self.settings()
+        broadcaster_id = str(settings.get("twitch_broadcaster_id") or "")
+        status = self.twitch_channel_status(store=True)
+        videos = self._twitch_request(
+            "videos", {"user_id": broadcaster_id, "first": 100, "type": "archive"}
+        ).get("data") or []
+        clips = self._twitch_request(
+            "clips", {"broadcaster_id": broadcaster_id, "first": 100}
+        ).get("data") or []
+        now = datetime.now().isoformat()
+        for content_type, records in (("video", videos), ("clip", clips)):
+            for record in records:
+                content_id = str(record.get("id") or "").strip()
+                if not content_id:
+                    continue
+                duration = (
+                    self._twitch_duration_seconds(record.get("duration"))
+                    if content_type == "video" else float(record.get("duration") or 0)
+                )
+                self.db.execute(
+                    """INSERT INTO twitch_api_content(
+                        content_key,platform_content_id,content_type,title,created_at,
+                        duration_seconds,views,url,thumbnail_url,payload_json,synced_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(content_key) DO UPDATE SET
+                        title=excluded.title,created_at=excluded.created_at,
+                        duration_seconds=excluded.duration_seconds,views=excluded.views,
+                        url=excluded.url,thumbnail_url=excluded.thumbnail_url,
+                        payload_json=excluded.payload_json,synced_at=excluded.synced_at""",
+                    (
+                        f"{content_type}:{content_id}", content_id, content_type,
+                        str(record.get("title") or "Untitled"),
+                        record.get("created_at") or record.get("published_at"), duration,
+                        int(record.get("view_count") or 0), record.get("url"),
+                        record.get("thumbnail_url"), json.dumps(record), now,
+                    ),
+                )
+        return {"status": status, "videos": len(videos), "clips": len(clips)}
+
+    def twitch_api_content(self):
+        return self.db.frame(
+            """SELECT content_type,title,created_at,duration_seconds,views,url,synced_at
+               FROM twitch_api_content ORDER BY COALESCE(created_at,synced_at) DESC"""
+        )
+
+    def latest_twitch_status(self):
+        frame = self.db.frame(
+            "SELECT * FROM twitch_channel_snapshots ORDER BY id DESC LIMIT 1"
+        )
+        return frame.iloc[0].to_dict() if not frame.empty else None
+
+    def record_chat_message(self, event: dict[str, Any], message_id: str | None = None):
+        message = event.get("message") or {}
+        text = str(message.get("text") or "").strip()
+        if not text:
+            return None
+        active = self.active_session()
+        external_id = str(message_id or event.get("message_id") or uuid.uuid4())
+        captured_at = datetime.now().isoformat()
+        self.db.execute(
+            """INSERT OR IGNORE INTO live_chat_messages(
+                session_id,message_id,captured_at,chatter_user_id,chatter_user_name,
+                message_text,color,badges_json,payload_json)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                active.get("id") if active else None, external_id, captured_at,
+                event.get("chatter_user_id"),
+                str(event.get("chatter_user_name") or event.get("chatter_user_login") or "Unknown"),
+                text, event.get("color"), json.dumps(event.get("badges") or []),
+                json.dumps(event, default=str),
+            ),
+        )
+        frame = self.db.frame(
+            "SELECT * FROM live_chat_messages WHERE message_id=?", (external_id,)
+        )
+        return frame.iloc[0].to_dict() if not frame.empty else None
+
+    def chat_messages(self, session_id=None, limit: int = 500):
+        if session_id is None:
+            return self.db.frame(
+                """SELECT captured_at,chatter_user_name,message_text
+                   FROM live_chat_messages ORDER BY id DESC LIMIT ?""", (int(limit),)
+            ).iloc[::-1].reset_index(drop=True)
+        return self.db.frame(
+            """SELECT captured_at,chatter_user_name,message_text
+               FROM live_chat_messages WHERE session_id=? ORDER BY id DESC LIMIT ?""",
+            (int(session_id), int(limit)),
+        ).iloc[::-1].reset_index(drop=True)
+
+    def chat_activity(self) -> dict[str, int]:
+        one_minute = (datetime.now() - timedelta(minutes=1)).isoformat()
+        five_minutes = (datetime.now() - timedelta(minutes=5)).isoformat()
+        messages = int(self.db.scalar(
+            "SELECT COUNT(*) FROM live_chat_messages WHERE captured_at>=?", (one_minute,), 0
+        ))
+        chatters = int(self.db.scalar(
+            """SELECT COUNT(DISTINCT chatter_user_id) FROM live_chat_messages
+               WHERE captured_at>=?""", (five_minutes,), 0
+        ))
+        return {"messages_minute": messages, "unique_chatters_5m": chatters}
+
+    def subscribe_twitch_eventsub(self, websocket_session_id: str) -> dict[str, Any]:
+        broadcaster_id = str(self.settings().get("twitch_broadcaster_id") or "")
+        subscriptions = [
+            ("stream.online", "1", {"broadcaster_user_id": broadcaster_id}),
+            ("stream.offline", "1", {"broadcaster_user_id": broadcaster_id}),
+            ("channel.update", "2", {"broadcaster_user_id": broadcaster_id}),
+            ("channel.follow", "2", {
+                "broadcaster_user_id": broadcaster_id, "moderator_user_id": broadcaster_id,
+            }),
+            ("channel.raid", "1", {"to_broadcaster_user_id": broadcaster_id}),
+            ("channel.chat.message", "1", {
+                "broadcaster_user_id": broadcaster_id, "user_id": broadcaster_id,
+            }),
+        ]
+        subscribed, errors = [], []
+        for event_type, version, condition in subscriptions:
+            try:
+                self._twitch_request(
+                    "eventsub/subscriptions", method="POST",
+                    payload={
+                        "type": event_type, "version": version, "condition": condition,
+                        "transport": {"method": "websocket", "session_id": websocket_session_id},
+                    },
+                )
+                subscribed.append(event_type)
+            except Exception as exc:
+                errors.append({"type": event_type, "error": self.vault.redact(exc)})
+        return {"subscribed": subscribed, "errors": errors}
+
+    @staticmethod
+    def _optional_int(value):
+        return int(value) if value is not None else None
+
+    @staticmethod
+    def _twitch_duration_seconds(value: Any) -> float:
+        text = str(value or "")
+        match = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", text)
+        if not match:
+            return 0.0
+        hours, minutes, seconds = (int(part or 0) for part in match.groups())
+        return float(hours * 3600 + minutes * 60 + seconds)
 
     def active_session(self):
         frame = self.db.frame(

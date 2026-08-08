@@ -212,6 +212,28 @@ Review detected files before starting large processing jobs.
 
 ## Everyday workflow
 
+### Track a live Twitch stream
+
+1. Connect Twitch under **Live Stream > Connections and rules**.
+2. Open **Live Stream** and click **Start Twitch tracking**.
+3. Leave Creator Intelligence running while streaming. The dashboard polls current
+   viewers, title, category, follower count, and subscriber count while Twitch
+   EventSub supplies chat and channel events.
+4. Open **Live chat** for the read-only chat feed and **Markers** for detected or
+   manually marked moments.
+5. Click **Stop Twitch tracking** when you no longer want the connection running.
+
+The tracker may be started while the channel is offline; it will keep watching,
+create a real Twitch session when the channel goes live, and complete that session
+when Twitch reports it offline. End any simulation session before starting real
+tracking.
+
+For connected Twitch content statistics, open **Twitch > Connected Twitch API**
+and click **Sync connected Twitch data**. This imports current channel status,
+recent broadcasts, clips, and their public view counts. Historical metrics that
+Twitch does not expose through Helix, including full watch-time and revenue history,
+still come from imported Twitch analytics reports.
+
 ### Analyze a VOD or video
 
 1. Add the source media to the asset library or a watched folder.
