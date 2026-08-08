@@ -59,7 +59,10 @@ def test_youtube_desktop_oauth_imports_client_and_discovers_channel(tmp_path, mo
     flow = service.begin_oauth("youtube", "http://127.0.0.1:43210/callback/")
     query = parse_qs(urlparse(flow["authorization_url"]).query)
     assert query["code_challenge_method"] == ["S256"]
-    assert query["scope"] == ["https://www.googleapis.com/auth/youtube.readonly"]
+    assert set(query["scope"][0].split()) == {
+        "https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/yt-analytics.readonly",
+    }
     monkeypatch.setattr(service, "_post_form", lambda url, values: {
         "access_token": "youtube-access", "refresh_token": "youtube-refresh", "expires_in": 3600,
     })
@@ -73,6 +76,8 @@ def test_youtube_desktop_oauth_imports_client_and_discovers_channel(tmp_path, mo
     assert config["access_token"] == "youtube-access"
     assert config["refresh_token"] == "youtube-refresh"
     assert service.connection_status("youtube")["configured"] is True
+    assert service.connection_status("youtube")["state"] == "connected"
+    assert service.connection_status("youtube")["missing_scopes"] == []
 
 
 def test_tiktok_desktop_oauth_uses_pkce_and_discovers_user(tmp_path, monkeypatch):

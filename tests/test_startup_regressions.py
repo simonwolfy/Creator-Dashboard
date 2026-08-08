@@ -33,7 +33,8 @@ def test_fresh_database_creates_runtime_foundation(tmp_path: Path):
 
     applied = db.migrate()
 
-    assert applied[-1].name == "runtime_foundation"
+    assert applied[-1].name == "google_drive_connection_lifecycle"
+    assert "runtime_foundation" in {migration.name for migration in applied}
     with db.connect() as con:
         tables = {
             str(row[0])

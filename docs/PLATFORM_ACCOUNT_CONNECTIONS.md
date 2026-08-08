@@ -31,20 +31,49 @@ Official reference: [Twitch device code grant](https://dev.twitch.tv/docs/authen
 
 ## YouTube
 
-1. In Google Cloud, enable **YouTube Data API v3** and configure the OAuth consent
-   screen. While the app is in testing, add the Google account that owns the channel
-   as a test user.
+1. In Google Cloud, enable **YouTube Data API v3** and **YouTube Analytics API**, then
+   configure the OAuth consent screen. While the app is in testing, add the Google
+   account that owns the channel as a test user.
 2. Create an OAuth client with application type **Desktop app** and download its
    JSON file. Do not commit that file to Git.
 3. Open **YouTube > API setup**, click **Import Google OAuth client JSON**, then
    click **Connect YouTube**.
-4. Select the channel-owning Google account and approve read-only YouTube access.
-   The channel ID and refreshable tokens are filled automatically.
+4. Select the channel-owning Google account and approve read-only YouTube and
+   YouTube Analytics access. The channel ID and refreshable tokens are filled
+   automatically, followed by an initial content-and-analytics sync.
 
 An API key is optional after Google sign-in, but remains supported for public-only
-channel synchronization.
+channel synchronization. API-key-only connections are shown as **Limited** because
+they cannot read private watch time, retention, subscriber, or share analytics.
+Creator Intelligence checks OAuth hourly and refreshes content and Analytics every
+30 minutes while the YouTube page is open. Revoked or expired refresh tokens are
+shown as reconnect-required states; quota errors preserve the connection and show a
+temporary limited state instead of deleting credentials.
 
-Official reference: [Google OAuth for mobile and desktop apps](https://developers.google.com/youtube/v3/guides/auth/installed-apps).
+Official references: [Google OAuth for mobile and desktop apps](https://developers.google.com/youtube/v3/guides/auth/installed-apps)
+and [YouTube Analytics reports](https://developers.google.com/youtube/analytics/reference/reports/query).
+
+## Google Drive
+
+1. In Google Cloud, enable **Google Drive API** and configure the OAuth consent
+   screen. Add the connecting account as a test user while the app is in testing.
+2. Create an OAuth client with application type **Desktop app** and download its
+   JSON file. Do not commit that file to Git.
+3. Open **Google Drive**, choose the desktop client JSON, then click **Connect Google
+   Drive** and approve access in the browser.
+4. The app performs an initial metadata-only top-level folder sync. Use **Drive
+   Folders** to browse and map the folders needed by the workspace.
+
+Creator Intelligence requests `drive.metadata.readonly`. It cannot download file
+contents or create, edit, move, or delete Drive files. It validates the connection
+hourly and refreshes its lightweight folder summary every 30 minutes while the page
+is open. Access tokens refresh through the securely stored refresh token. Expired,
+revoked, quota-limited, and other error states remain visible with a reconnect or
+retry path. **Disconnect and revoke access** clears the local OS-vault credentials
+even if Google is temporarily unreachable.
+
+Official references: [Choose Google Drive scopes](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)
+and [Resolve Drive API errors](https://developers.google.com/workspace/drive/api/guides/handle-errors).
 
 ## Instagram
 

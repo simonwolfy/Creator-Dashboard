@@ -30,6 +30,74 @@ def test_platform_credentials_share_canonical_integration_store(tmp_path):
     assert service.connection_status("instagram")["configured"] is True
 
 
+def test_youtube_api_key_mode_is_explicitly_limited(tmp_path):
+    service = SocialPlatformService(DB(tmp_path / "youtube-limited.db"))
+    service.save_configuration("youtube", {"api_key": "key", "channel_id": "channel"})
+    status = service.connection_status("youtube")
+    assert status["state"] == "limited"
+    assert status["can_sync"] is True
+    assert "private YouTube Analytics" in status["message"]
+    assert status["capabilities"][1]["available"] is False
+
+
+def test_youtube_revoked_refresh_token_requires_reconnect(tmp_path, monkeypatch):
+    service = SocialPlatformService(DB(tmp_path / "youtube-revoked.db"))
+    service.save_configuration("youtube", {
+        "oauth_client_id": "client", "access_token": "expired", "refresh_token": "revoked",
+        "channel_id": "channel", "granted_scopes": " ".join(service.YOUTUBE_SCOPES),
+        "connection_state": "connected",
+    })
+    monkeypatch.setattr(
+        service, "_post_form", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("HTTP 400: invalid_grant token revoked")
+        ),
+    )
+    try:
+        service.refresh_access_token("youtube")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("A revoked refresh token should fail")
+    assert service.connection_status("youtube")["state"] == "revoked"
+
+
+def test_youtube_quota_error_enters_limited_state(tmp_path, monkeypatch):
+    service = SocialPlatformService(DB(tmp_path / "youtube-quota.db"))
+    service.save_configuration("youtube", {
+        "access_token": "access", "refresh_token": "refresh", "channel_id": "channel",
+        "granted_scopes": " ".join(service.YOUTUBE_SCOPES), "connection_state": "connected",
+    })
+    monkeypatch.setattr(
+        service, "_fetch_records", lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("HTTP 403: quota exceeded (quotaExceeded)")
+        ),
+    )
+    try:
+        service.sync("youtube")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Quota exhaustion should fail this sync")
+    assert service.connection_status("youtube")["state"] == "limited"
+
+
+def test_youtube_analytics_rows_map_to_content_metrics(tmp_path, monkeypatch):
+    service = SocialPlatformService(DB(tmp_path / "youtube-analytics.db"))
+    monkeypatch.setattr(service, "_json_request", lambda _request: {
+        "columnHeaders": [{"name": name} for name in (
+            "video", "views", "engagedViews", "estimatedMinutesWatched",
+            "averageViewPercentage", "subscribersGained", "subscribersLost",
+            "likes", "comments", "shares",
+        )],
+        "rows": [["video-1", 100, 80, 240, 62.5, 5, 1, 12, 3, 2]],
+    })
+    metrics = service._fetch_youtube_analytics({"access_token": "safe"})["video-1"]
+    assert metrics["watch_time_hours"] == 4
+    assert metrics["avg_percentage_viewed"] == 62.5
+    assert metrics["subscribers_gained"] == 5
+    assert metrics["shares"] == 2
+
+
 def test_social_summary_uses_published_performance_rows(tmp_path):
     db = DB(tmp_path / "stats.db"); service = SocialPlatformService(db)
     now = "2026-08-01T00:00:00"
@@ -123,6 +191,9 @@ def test_youtube_sync_mirrors_content_tab_table(tmp_path):
     db.execute("""CREATE TABLE youtube_content(
         content_id TEXT PRIMARY KEY,title TEXT,description TEXT,publish_time TEXT,
         duration_seconds REAL NOT NULL DEFAULT 0,views INTEGER NOT NULL DEFAULT 0,
+        engaged_views INTEGER NOT NULL DEFAULT 0,watch_time_hours REAL NOT NULL DEFAULT 0,
+        avg_percentage_viewed REAL NOT NULL DEFAULT 0,
+        subscribers_gained INTEGER NOT NULL DEFAULT 0,subscribers_lost INTEGER NOT NULL DEFAULT 0,
         likes INTEGER NOT NULL DEFAULT 0,comments INTEGER NOT NULL DEFAULT 0,
         shares INTEGER NOT NULL DEFAULT 0)""")
     service = SocialPlatformService(db)
@@ -130,6 +201,8 @@ def test_youtube_sync_mirrors_content_tab_table(tmp_path):
     service.sync("youtube", fetcher=lambda platform, cursor: [{
         "source_video_id": "yt-1", "title": "A Better Clip Title", "description": "Description",
         "published_at": "2026-08-01T00:00:00Z", "duration_seconds": 45, "views": 1000,
+        "engaged_views": 750, "watch_time_hours": 12.5, "avg_percentage_viewed": 68.0,
+        "subscribers_gained": 9, "subscribers_lost": 1, "shares": 4,
     }])
     row = db.frame("SELECT * FROM youtube_content WHERE content_id='yt-1'").iloc[0]
     assert row["title"] == "A Better Clip Title"
@@ -137,7 +210,12 @@ def test_youtube_sync_mirrors_content_tab_table(tmp_path):
     assert int(row["views"]) == 1000
     assert int(row["likes"]) == 0
     assert int(row["comments"]) == 0
-    assert int(row["shares"]) == 0
+    assert int(row["shares"]) == 4
+    assert int(row["engaged_views"]) == 750
+    assert float(row["watch_time_hours"]) == 12.5
+    assert float(row["avg_percentage_viewed"]) == 68.0
+    assert int(row["subscribers_gained"]) == 9
+    assert int(row["subscribers_lost"]) == 1
 
 
 def test_youtube_sync_claims_legacy_title_without_duplicate_error(tmp_path):

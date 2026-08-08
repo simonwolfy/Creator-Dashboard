@@ -175,10 +175,11 @@ and other media-processing features.
 
 ### 2. Connect or import platform data
 
-- **YouTube:** import a Google OAuth client JSON created as a **Desktop app**, click
-  **Connect YouTube**, approve access in the browser, and sync. The channel ID and
-  tokens are filled automatically. An API key and channel ID remain available as
-  a public-data fallback.
+- **YouTube:** enable YouTube Data API v3 and YouTube Analytics API, import a Google
+  OAuth client JSON created as a **Desktop app**, click **Connect YouTube**, and
+  approve read-only access. The channel ID, refreshable tokens, content, watch time,
+  retention, subscriber, and engagement statistics sync automatically. An API key
+  and channel ID remain available as a public-data fallback.
 - **Twitch:** paste the Client ID from a Twitch app registered as **Public**, then
   click **Connect Twitch** under **Live Stream > Connections and rules**. Twitch's
   device page fills the broadcaster ID and tokens automatically. No Client Secret
@@ -190,8 +191,10 @@ and other media-processing features.
 - **TikTok:** enter the client key and client secret, register
   `http://127.0.0.1:49152/callback/` as the Desktop Login Kit redirect, then click
   **Connect TikTok**. The PKCE browser flow fills the open ID and tokens.
-- **Google Drive:** select a Google OAuth desktop client JSON file, connect in the
-  browser, test the connection, then choose folders under **Drive Folders**.
+- **Google Drive:** enable Google Drive API, select a Google OAuth desktop client
+  JSON file, connect in the browser, then choose folders under **Drive Folders**.
+  The app requests metadata-only access and automatically validates and refreshes
+  the connection while its page is open.
 
 See [Platform account connections](docs/PLATFORM_ACCOUNT_CONNECTIONS.md) for the
 provider-console setup and requested permissions.

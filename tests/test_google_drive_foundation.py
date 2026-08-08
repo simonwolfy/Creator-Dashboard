@@ -48,6 +48,12 @@ class FakeDrive:
     def about(self):
         return FakeAbout()
 
+    def files(self):
+        return self
+
+    def list(self, **_kwargs):
+        return FakeRequest({"files": [{"id": "one"}, {"id": "two"}]})
+
 
 def make_service(tmp_path: Path):
     db = Database(tmp_path / "creator.db")
@@ -115,3 +121,40 @@ def test_invalid_client_file_is_rejected(tmp_path):
         assert "OAuth client-secrets" in str(exc)
     else:
         raise AssertionError("Invalid client file should have been rejected")
+
+
+def test_initial_drive_sync_records_non_secret_summary(tmp_path, monkeypatch):
+    service, store, db = make_service(tmp_path)
+    service.configure(str(write_client_file(tmp_path)))
+    service.connect()
+    monkeypatch.setattr(service, "_load_credentials", FakeCredentials)
+    result = service.sync_now()
+    status = service.status()
+    assert result["folders"] == 2
+    assert status.last_synced_at
+    assert status.last_sync_summary == "Found 2 top-level folder(s)"
+    stored = str(db.frame("SELECT * FROM google_drive_connections").to_dict())
+    assert "safe-test-token" not in stored
+    assert "safe-test-token" in store.value
+
+
+def test_drive_revoke_clears_local_credentials(tmp_path):
+    revoked = []
+    service, store, _db = make_service(tmp_path)
+    service.revoke_request = revoked.append
+    service.configure(str(write_client_file(tmp_path)))
+    service.connect()
+    status = service.revoke_and_disconnect()
+    assert revoked == ["refresh"]
+    assert store.value is None
+    assert status.state.value == "disconnected"
+
+
+def test_drive_quota_error_is_reported_as_limited(tmp_path):
+    service, store, _db = make_service(tmp_path)
+    service.configure(str(write_client_file(tmp_path)))
+    store.save(FakeCredentials().to_json())
+    service._record_error(RuntimeError("HTTP 429: rateLimitExceeded"))
+    status = service.status()
+    assert status.state.value == "limited"
+    assert status.connected is True

@@ -2,23 +2,32 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta
+import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from creator_intelligence.core.credential_vault import CredentialVault
+from creator_intelligence.services.connection_lifecycle import ConnectionState, ConnectionStatus
 from creator_intelligence.services.desktop_oauth import oauth_state, pkce_pair
 
 
 class SocialPlatformService:
     """Shared credentials, sync state, and published-content analytics."""
 
+    YOUTUBE_SCOPES = (
+        "https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/yt-analytics.readonly",
+    )
+
     FIELDS = {
         "youtube": (
             "api_key", "channel_id", "oauth_client_id", "oauth_client_secret",
             "access_token", "refresh_token", "token_expires_at", "account_name",
+            "granted_scopes", "connection_state", "last_validated_at",
         ),
         "instagram": (
             "app_id", "app_secret", "access_token", "account_id", "redirect_uri",
@@ -33,6 +42,8 @@ class SocialPlatformService:
     def __init__(self, db, credential_vault=None):
         self.db = db
         self.vault = credential_vault or CredentialVault.for_database(db)
+        self._refresh_locks = {platform: threading.Lock() for platform in self.FIELDS}
+        self._last_sync_warnings: list[str] = []
         self._ensure_schema()
         self._migrate_legacy_credentials()
 
@@ -200,13 +211,14 @@ class SocialPlatformService:
     def revoke_and_disconnect(self, platform: str) -> dict[str, Any]:
         platform=self._platform(platform)
         config=self.configuration(platform)
+        revoke_error = None
         if platform=="youtube" and (config.get("refresh_token") or config.get("access_token")):
             try:
                 self._post_form("https://oauth2.googleapis.com/revoke", {
                     "token": config.get("refresh_token") or config.get("access_token")
                 })
             except Exception as exc:
-                raise RuntimeError(self.vault.redact(exc)) from None
+                revoke_error = self.vault.redact(exc)
         elif platform=="tiktok":
             try:
                 self._post_form("https://open.tiktokapis.com/v2/oauth/revoke/",{
@@ -214,7 +226,13 @@ class SocialPlatformService:
                     "token":config.get("access_token")})
             except Exception as exc:
                 raise RuntimeError(self.vault.redact(exc)) from None
-        return self.disconnect(platform)
+        status = self.disconnect(platform)
+        if revoke_error:
+            status["revocation_warning"] = (
+                "Local credentials were cleared, but Google could not confirm remote revocation: "
+                + revoke_error
+            )
+        return status
 
     def connection_status(self, platform: str) -> dict[str, Any]:
         platform = self._platform(platform)
@@ -225,6 +243,40 @@ class SocialPlatformService:
                 missing.append("channel_id")
             if not (config.get("access_token") or config.get("api_key")):
                 missing.append("google_sign_in_or_api_key")
+            access_token = bool(config.get("access_token"))
+            api_key = bool(config.get("api_key"))
+            granted = self._scope_values(config.get("granted_scopes"))
+            saved_state = str(config.get("connection_state") or "")
+            if not (access_token or api_key):
+                state = (
+                    ConnectionState.DISCONNECTED
+                    if config.get("oauth_client_id") or config.get("channel_id")
+                    else ConnectionState.NOT_CONFIGURED
+                )
+                message = "Connect a Google account to import channel content and analytics."
+            elif access_token:
+                state = self._connection_state(saved_state, ConnectionState.CONNECTED)
+                if self._token_expired(config.get("token_expires_at")) and not config.get("refresh_token"):
+                    state = ConnectionState.EXPIRED
+                missing_scopes = [scope for scope in self.YOUTUBE_SCOPES if scope not in granted]
+                if state == ConnectionState.CONNECTED and missing_scopes:
+                    state = ConnectionState.LIMITED
+                message = self._youtube_state_message(state, missing_scopes)
+            else:
+                state = ConnectionState.LIMITED
+                message = "API-key mode can sync public videos, but private YouTube Analytics requires Google sign-in."
+            lifecycle = ConnectionStatus(
+                provider="youtube",
+                state=state,
+                message=message,
+                account_id=config.get("channel_id") or None,
+                account_name=config.get("account_name") or None,
+                granted_scopes=granted,
+                required_scopes=self.YOUTUBE_SCOPES,
+                expires_at=config.get("token_expires_at") or None,
+                last_validated_at=config.get("last_validated_at") or None,
+                last_error=config.get("last_error") or None,
+            ).as_dict()
         elif platform == "instagram":
             required = ("app_id", "app_secret", "access_token", "account_id")
             missing = [field for field in required if not config.get(field)]
@@ -235,7 +287,7 @@ class SocialPlatformService:
             "SELECT * FROM creator_title_sync_state WHERE platform=?", (platform,)
         )
         sync_row = sync.iloc[0].to_dict() if not sync.empty else {}
-        return {
+        legacy = {
             "platform": platform,
             "configured": not missing,
             "missing": missing,
@@ -245,6 +297,41 @@ class SocialPlatformService:
             "credential_storage": "Operating-system credential vault",
             "account_name": config.get("account_name"),
         }
+        if platform == "youtube":
+            lifecycle.update(legacy)
+            lifecycle["configured"] = lifecycle["state"] not in {
+                ConnectionState.NOT_CONFIGURED.value,
+                ConnectionState.DISCONNECTED.value,
+            }
+            lifecycle["can_sync"] = lifecycle["state"] in {
+                ConnectionState.CONNECTED.value,
+                ConnectionState.LIMITED.value,
+            }
+            lifecycle["capabilities"] = self.youtube_capabilities(lifecycle)
+            return lifecycle
+        return legacy
+
+    def youtube_capabilities(self, status: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        status = status or self.connection_status("youtube")
+        granted = set(status.get("granted_scopes") or ())
+        has_public = bool(self.configuration("youtube").get("api_key"))
+        return [
+            {
+                "capability": "Channel identity and published videos",
+                "available": has_public or self.YOUTUBE_SCOPES[0] in granted,
+                "permission": "YouTube read-only",
+            },
+            {
+                "capability": "Watch time, retention, subscribers, and shares",
+                "available": self.YOUTUBE_SCOPES[1] in granted,
+                "permission": "YouTube Analytics read-only",
+            },
+            {
+                "capability": "Edit, upload, or delete videos",
+                "available": False,
+                "permission": "Not requested by Creator Intelligence",
+            },
+        ]
 
     def content(self, platform: str):
         platform = self._platform(platform)
@@ -300,7 +387,7 @@ class SocialPlatformService:
             verifier, challenge = pkce_pair()
             params = {
                 "client_id": config.get("oauth_client_id"), "redirect_uri": redirect_uri,
-                "response_type": "code", "scope": "https://www.googleapis.com/auth/youtube.readonly",
+                "response_type": "code", "scope": " ".join(self.YOUTUBE_SCOPES),
                 "access_type": "offline", "include_granted_scopes": "true", "prompt": "consent",
                 "state": state, "code_challenge": challenge, "code_challenge_method": "S256",
             }
@@ -371,9 +458,15 @@ class SocialPlatformService:
                 access_token=payload.get("access_token") or "",
                 refresh_token=payload.get("refresh_token") or config.get("refresh_token") or "",
                 token_expires_at=self._expires_at(payload.get("expires_in")),
+                granted_scopes=payload.get("scope") or " ".join(self.YOUTUBE_SCOPES),
+                connection_state=ConnectionState.CONNECTING.value,
             )
             identity = self._youtube_identity(config)
-            config.update(identity)
+            config.update(
+                identity,
+                connection_state=ConnectionState.CONNECTED.value,
+                last_validated_at=datetime.now().isoformat(),
+            )
         elif platform == "instagram":
             payload = self._post_form("https://api.instagram.com/oauth/access_token", {
                 "client_id": config.get("app_id"), "client_secret": config.get("app_secret"),
@@ -411,6 +504,7 @@ class SocialPlatformService:
         if target and platform != "youtube":
             config["redirect_uri"] = target
         self.save_configuration(platform, config, True)
+        self._set_integration_error(platform, None, connected=True)
         return {
             "connected": True, "expires_in": payload.get("expires_in"),
             "account_id": config.get("channel_id") or config.get("account_id") or config.get("user_id"),
@@ -419,34 +513,88 @@ class SocialPlatformService:
 
     def refresh_access_token(self, platform: str) -> dict[str, Any]:
         platform = self._platform(platform)
-        config = self.configuration(platform)
-        if platform == "youtube":
-            if not config.get("refresh_token"):
-                raise ValueError("Reconnect YouTube to obtain a refresh token.")
-            payload = self._post_form("https://oauth2.googleapis.com/token", {
-                "client_id": config.get("oauth_client_id"),
-                "client_secret": config.get("oauth_client_secret"),
-                "grant_type": "refresh_token", "refresh_token": config.get("refresh_token"),
-            })
-        elif platform == "instagram":
-            payload = self._json_request(Request(
-                "https://graph.instagram.com/refresh_access_token?" + urlencode({
-                    "grant_type": "ig_refresh_token", "access_token": config.get("access_token")
-                })
-            ))
-        elif platform == "tiktok":
-            payload = self._post_form("https://open.tiktokapis.com/v2/oauth/token/", {
-                "client_key": config.get("client_key"), "client_secret": config.get("client_secret"),
-                "grant_type": "refresh_token", "refresh_token": config.get("refresh_token"),
-            })
-        else:
-            raise ValueError("This platform does not use token refresh here.")
-        config["access_token"] = payload.get("access_token") or config.get("access_token") or ""
-        if payload.get("refresh_token"):
-            config["refresh_token"] = payload["refresh_token"]
-        config["token_expires_at"] = self._expires_at(payload.get("expires_in"))
-        self.save_configuration(platform, config, True)
-        return {"refreshed": True, "expires_in": payload.get("expires_in")}
+        with self._refresh_locks[platform]:
+            config = self.configuration(platform)
+            try:
+                if platform == "youtube":
+                    if not config.get("refresh_token"):
+                        raise ValueError("Reconnect YouTube to obtain a refresh token.")
+                    payload = self._post_form("https://oauth2.googleapis.com/token", {
+                        "client_id": config.get("oauth_client_id"),
+                        "client_secret": config.get("oauth_client_secret"),
+                        "grant_type": "refresh_token", "refresh_token": config.get("refresh_token"),
+                    })
+                elif platform == "instagram":
+                    payload = self._json_request(Request(
+                        "https://graph.instagram.com/refresh_access_token?" + urlencode({
+                            "grant_type": "ig_refresh_token", "access_token": config.get("access_token")
+                        })
+                    ))
+                elif platform == "tiktok":
+                    payload = self._post_form("https://open.tiktokapis.com/v2/oauth/token/", {
+                        "client_key": config.get("client_key"), "client_secret": config.get("client_secret"),
+                        "grant_type": "refresh_token", "refresh_token": config.get("refresh_token"),
+                    })
+                else:
+                    raise ValueError("This platform does not use token refresh here.")
+            except Exception as exc:
+                if platform == "youtube":
+                    safe = self.vault.redact(exc)
+                    state = (
+                        ConnectionState.REVOKED
+                        if "invalid_grant" in safe.lower() or "revoked" in safe.lower()
+                        else ConnectionState.EXPIRED
+                    )
+                    config.update(connection_state=state.value)
+                    self.save_configuration(platform, config, True)
+                    self._set_integration_error(platform, safe)
+                raise
+            config["access_token"] = payload.get("access_token") or config.get("access_token") or ""
+            if payload.get("refresh_token"):
+                config["refresh_token"] = payload["refresh_token"]
+            if payload.get("scope"):
+                config["granted_scopes"] = payload["scope"]
+            config["token_expires_at"] = self._expires_at(payload.get("expires_in"))
+            if platform == "youtube":
+                config["connection_state"] = ConnectionState.CONNECTED.value
+            self.save_configuration(platform, config, True)
+            return {"refreshed": True, "expires_in": payload.get("expires_in")}
+
+    def validate_connection(self, platform: str) -> dict[str, Any]:
+        """Validate provider access, refreshing an expired token once when possible."""
+        platform = self._platform(platform)
+        if platform != "youtube":
+            return self.connection_status(platform)
+        config = self.configuration("youtube")
+        if not config.get("access_token"):
+            return self.connection_status("youtube")
+        try:
+            if self._token_expired(config.get("token_expires_at")) and config.get("refresh_token"):
+                self.refresh_access_token("youtube")
+                config = self.configuration("youtube")
+            try:
+                identity = self._youtube_identity(config)
+            except Exception as first_error:
+                if not self._is_auth_error(first_error) or not config.get("refresh_token"):
+                    raise
+                self.refresh_access_token("youtube")
+                config = self.configuration("youtube")
+                identity = self._youtube_identity(config)
+            config.update(
+                identity,
+                connection_state=ConnectionState.CONNECTED.value,
+                last_validated_at=datetime.now().isoformat(),
+            )
+            self.save_configuration("youtube", config, True)
+            self._set_integration_error("youtube", None, connected=True)
+        except Exception as exc:
+            safe = self.vault.redact(exc)
+            config = self.configuration("youtube")
+            state = self._state_for_error(exc)
+            config["connection_state"] = state.value
+            self.save_configuration("youtube", config, True)
+            self._set_integration_error("youtube", safe)
+        return self.connection_status("youtube")
 
     def _youtube_identity(self, config: dict[str, Any]) -> dict[str, str]:
         payload = self._json_request(Request(
@@ -463,6 +611,78 @@ class SocialPlatformService:
             "channel_id": str(item.get("id") or ""),
             "account_name": str((item.get("snippet") or {}).get("title") or ""),
         }
+
+    @staticmethod
+    def _scope_values(value: Any) -> tuple[str, ...]:
+        if isinstance(value, (list, tuple, set)):
+            return tuple(str(scope) for scope in value if scope)
+        return tuple(str(value or "").replace(",", " ").split())
+
+    @staticmethod
+    def _connection_state(value: str, fallback: ConnectionState) -> ConnectionState:
+        try:
+            return ConnectionState(value)
+        except ValueError:
+            return fallback
+
+    @staticmethod
+    def _token_expired(value: Any) -> bool:
+        if not value:
+            return False
+        try:
+            expires = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            now = datetime.now(expires.tzinfo) if expires.tzinfo else datetime.now()
+            return expires <= now + timedelta(minutes=2)
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _is_auth_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(marker in text for marker in (
+            "http 401", "invalid credentials", "invalid_grant", "unauthorized", "expired token",
+        ))
+
+    @classmethod
+    def _state_for_error(cls, exc: Exception) -> ConnectionState:
+        text = str(exc).lower()
+        if "invalid_grant" in text or "revoked" in text or "deleted_client" in text:
+            return ConnectionState.REVOKED
+        if cls._is_auth_error(exc):
+            return ConnectionState.EXPIRED
+        if any(marker in text for marker in (
+            "quotaexceeded", "dailylimitexceeded", "ratelimitexceeded",
+            "userratelimitexceeded", "http 429", "too many requests",
+        )):
+            return ConnectionState.LIMITED
+        return ConnectionState.ERROR
+
+    @staticmethod
+    def _youtube_state_message(state: ConnectionState, missing_scopes: list[str]) -> str:
+        if state == ConnectionState.CONNECTED:
+            return "YouTube content and read-only Analytics access are ready."
+        if state == ConnectionState.LIMITED:
+            if missing_scopes:
+                return "YouTube is connected with limited access. Reconnect to approve the missing read-only permissions."
+            return "YouTube is connected, but an API limit is temporarily blocking part of the sync."
+        if state == ConnectionState.EXPIRED:
+            return "The YouTube session expired and could not refresh. Reconnect the Google account."
+        if state == ConnectionState.REVOKED:
+            return "Google access was revoked or invalidated. Reconnect the account to continue."
+        if state == ConnectionState.ERROR:
+            return "YouTube could not be validated. Review the error and try again."
+        return "Connect a Google account to import channel content and analytics."
+
+    def _set_integration_error(
+        self, platform: str, error: str | None, *, connected: bool = False,
+    ) -> None:
+        now = datetime.now().isoformat()
+        self.db.execute(
+            """UPDATE integration_settings
+               SET last_error=?,last_connected_at=CASE WHEN ? THEN ? ELSE last_connected_at END,
+                   updated_at=? WHERE integration_id=?""",
+            (error, int(connected), now, now, f"{platform}_title_sync"),
+        )
 
     def _instagram_identity(self, config: dict[str, Any]) -> dict[str, str]:
         identity = {
@@ -503,6 +723,7 @@ class SocialPlatformService:
     def sync(self, platform: str, fetcher=None) -> dict[str, Any]:
         platform = self._platform(platform)
         now = datetime.now().isoformat()
+        self._last_sync_warnings = []
         prior = self.connection_status(platform)
         if not prior["configured"]:
             raise ValueError("Complete the API setup before syncing.")
@@ -526,13 +747,30 @@ class SocialPlatformService:
             from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
             outcomes = PublishingOutcomeService(self.db).process_sync(platform)
             self._record_sync(platform, "Completed", newest, len(records), changed, None, now)
+            if platform == "youtube" and self.configuration("youtube").get("access_token"):
+                config = self.configuration("youtube")
+                config["connection_state"] = (
+                    ConnectionState.LIMITED.value
+                    if self._last_sync_warnings
+                    else ConnectionState.CONNECTED.value
+                )
+                self.save_configuration("youtube", config, True)
+                self._set_integration_error(
+                    "youtube", "; ".join(self._last_sync_warnings) or None, connected=True
+                )
             return {"platform": platform, "seen": len(records), "changed": changed,
                     "unchanged": len(records) - changed, "last_cursor": newest,
                     "outcomes_matched": outcomes["matched"],
-                    "outcome_snapshots": outcomes["snapshots"]}
+                    "outcome_snapshots": outcomes["snapshots"],
+                    "warnings": list(self._last_sync_warnings)}
         except Exception as exc:
             safe=self.vault.redact(exc)
             self._record_sync(platform, "Failed", cursor, 0, 0, safe, now)
+            if platform == "youtube":
+                config = self.configuration("youtube")
+                config["connection_state"] = self._state_for_error(exc).value
+                self.save_configuration("youtube", config, True)
+                self._set_integration_error("youtube", safe)
             raise RuntimeError(safe) from None
 
     def _upsert_record(self, platform: str, record: dict[str, Any]) -> int:
@@ -628,6 +866,11 @@ class SocialPlatformService:
             "likes": self._number_or_zero(record.get("likes"), int),
             "comments": self._number_or_zero(record.get("comments"), int),
             "shares": self._number_or_zero(record.get("shares"), int),
+            "engaged_views": self._number_or_zero(record.get("engaged_views"), int),
+            "watch_time_hours": self._number_or_zero(record.get("watch_time_hours"), float),
+            "avg_percentage_viewed": self._number_or_zero(record.get("avg_percentage_viewed"), float),
+            "subscribers_gained": self._number_or_zero(record.get("subscribers_gained"), int),
+            "subscribers_lost": self._number_or_zero(record.get("subscribers_lost"), int),
         }
         available = [name for name in values if name in columns]
         update = [name for name in available if name != "content_id"]
@@ -646,21 +889,37 @@ class SocialPlatformService:
 
     def _fetch_youtube(self, cursor: str | None):
         config = self.configuration("youtube")
-        params = {"part": "snippet", "channelId": config["channel_id"], "type": "video",
-                  "order": "date", "maxResults": 50}
+        channel_params = {
+            "part": "contentDetails",
+            "id": config["channel_id"],
+        }
         if config.get("api_key"):
-            params["key"] = config["api_key"]
+            channel_params["key"] = config["api_key"]
         headers = ({"Authorization": f"Bearer {config.get('access_token')}"}
                    if config.get("access_token") else {})
-        if cursor:
-            params["publishedAfter"] = cursor
+        channel = self._json_request(Request(
+            "https://www.googleapis.com/youtube/v3/channels?" + urlencode(channel_params),
+            headers=headers,
+        ))
+        channel_items = channel.get("items") or []
+        uploads_playlist = (
+            ((channel_items[0].get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
+            if channel_items else None
+        )
+        if not uploads_playlist:
+            raise ValueError("YouTube did not return the channel uploads playlist.")
+        params = {"part": "snippet,contentDetails", "playlistId": uploads_playlist, "maxResults": 50}
+        if config.get("api_key"):
+            params["key"] = config["api_key"]
         snippets = {}
         while True:
             payload = self._json_request(Request(
-                "https://www.googleapis.com/youtube/v3/search?" + urlencode(params), headers=headers,
+                "https://www.googleapis.com/youtube/v3/playlistItems?" + urlencode(params), headers=headers,
             ))
-            snippets.update({item["id"]["videoId"]: item.get("snippet", {})
-                             for item in payload.get("items", [])})
+            for item in payload.get("items", []):
+                video_id = str((item.get("contentDetails") or {}).get("videoId") or "")
+                if video_id:
+                    snippets[video_id] = item.get("snippet", {})
             if not payload.get("nextPageToken"):
                 break
             params["pageToken"] = payload["nextPageToken"]
@@ -686,7 +945,70 @@ class SocialPlatformService:
                                 "published_at": snippet.get("publishedAt"), "duration_seconds": duration,
                                 "views": stats.get("viewCount"), "likes": stats.get("likeCount"),
                                 "comments": stats.get("commentCount")})
+        granted = set(self._scope_values(config.get("granted_scopes")))
+        if config.get("access_token") and self.YOUTUBE_SCOPES[1] in granted:
+            try:
+                analytics = self._fetch_youtube_analytics(config)
+            except Exception as exc:
+                self._last_sync_warnings.append(
+                    "Published videos synced, but YouTube Analytics is temporarily unavailable: "
+                    + self.vault.redact(exc)
+                )
+            else:
+                for record in records:
+                    record.update(analytics.get(record["source_video_id"], {}))
+        elif config.get("access_token"):
+            self._last_sync_warnings.append(
+                "Reconnect YouTube to grant read-only Analytics access for watch time, retention, and subscriber stats."
+            )
         return records
+
+    def _fetch_youtube_analytics(self, config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        metrics = (
+            "views,engagedViews,estimatedMinutesWatched,averageViewPercentage,"
+            "subscribersGained,subscribersLost,likes,comments,shares"
+        )
+        start_index = 1
+        result: dict[str, dict[str, Any]] = {}
+        while True:
+            params = {
+                "ids": "channel==MINE",
+                "startDate": "2000-01-01",
+                "endDate": datetime.now(UTC).date().isoformat(),
+                "metrics": metrics,
+                "dimensions": "video",
+                "sort": "-views",
+                "maxResults": 200,
+                "startIndex": start_index,
+            }
+            payload = self._json_request(Request(
+                "https://youtubeanalytics.googleapis.com/v2/reports?" + urlencode(params),
+                headers={"Authorization": f"Bearer {config.get('access_token')}"},
+            ))
+            names = [str(column.get("name") or "") for column in payload.get("columnHeaders", [])]
+            rows = payload.get("rows") or []
+            for values in rows:
+                row = dict(zip(names, values, strict=False))
+                video_id = str(row.get("video") or "")
+                if not video_id:
+                    continue
+                minutes = self._number_or_zero(row.get("estimatedMinutesWatched"), float)
+                result[video_id] = {
+                    "views": self._number_or_zero(row.get("views"), int),
+                    "engaged_views": self._number_or_zero(row.get("engagedViews"), int),
+                    "watch_time": minutes / 60,
+                    "watch_time_hours": minutes / 60,
+                    "avg_percentage_viewed": self._number_or_zero(row.get("averageViewPercentage"), float),
+                    "subscribers_gained": self._number_or_zero(row.get("subscribersGained"), int),
+                    "subscribers_lost": self._number_or_zero(row.get("subscribersLost"), int),
+                    "likes": self._number_or_zero(row.get("likes"), int),
+                    "comments": self._number_or_zero(row.get("comments"), int),
+                    "shares": self._number_or_zero(row.get("shares"), int),
+                }
+            if len(rows) < 200:
+                break
+            start_index += len(rows)
+        return result
 
     def _fetch_instagram(self, cursor: str | None):
         config = self.configuration("instagram")
@@ -780,8 +1102,24 @@ class SocialPlatformService:
 
     @staticmethod
     def _json_request(request: Request) -> dict[str, Any]:
-        with urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            with urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                payload = {}
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error, dict):
+                message = str(error.get("message") or exc.reason or "Provider request failed")
+                details = error.get("errors") or []
+                reason = str(details[0].get("reason") or "") if details else ""
+            else:
+                message = str(error or exc.reason or "Provider request failed")
+                reason = ""
+            suffix = f" ({reason})" if reason else ""
+            raise RuntimeError(f"HTTP {exc.code}: {message}{suffix}") from None
 
     @classmethod
     def _post_form(cls, url: str, values: dict[str, Any]) -> dict[str, Any]:
