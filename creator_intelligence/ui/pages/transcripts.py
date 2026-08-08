@@ -132,6 +132,23 @@ class TranscriptsPage(QWidget):
             return None
         return int(self.jobs_table.model().frame.iloc[index.row()]["id"])
 
+    def open_transcript(self, transcript_id):
+        """Select a transcript when another workflow links into this page."""
+        self.refresh()
+        model = self.transcripts_table.model()
+        if model is None or model.frame.empty:
+            return
+        matches = model.frame.index[
+            model.frame["id"] == int(transcript_id)
+        ].tolist()
+        if not matches:
+            return
+        row = int(matches[0])
+        self.transcripts_table.selectRow(row)
+        self.transcripts_table.setCurrentIndex(model.index(row, 0))
+        self.refresh_details()
+        self.tabs.setCurrentWidget(self.segments_table)
+
     def refresh(self):
         selected_transcript = self.selected_transcript_id()
         selected_job = self.selected_job_id()

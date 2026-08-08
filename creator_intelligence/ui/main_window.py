@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QScrollArea,
     QStackedWidget,
     QStatusBar,
     QTableView,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -197,7 +199,7 @@ class MainWindow(QMainWindow):
         )
         self.setWindowTitle(f"Creator Intelligence {APPLICATION_VERSION} — Creator OS")
         self.resize(1600, 960)
-        self.setMinimumSize(QSize(1180, 740))
+        self.setMinimumSize(QSize(720, 480))
         self.theme = str(getattr(runtime.settings, "theme", "dark"))
         self.accent_color = normalize_accent(
             str(getattr(runtime.settings, "accent_color", "#7137c8"))
@@ -209,7 +211,27 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         self.nav = HierarchicalNavigation()
         self.nav.setFixedWidth(260)
+        self.navigation_panel = QWidget()
+        self.navigation_panel.setObjectName("sidebarPanel")
+        navigation_layout = QVBoxLayout(self.navigation_panel)
+        navigation_layout.setContentsMargins(6, 6, 6, 6)
+        navigation_layout.setSpacing(6)
+        self.navigation_toggle = QToolButton()
+        self.navigation_toggle.setObjectName("sidebarToggle")
+        self.navigation_toggle.clicked.connect(self._toggle_navigation_sidebar)
+        navigation_layout.addWidget(self.navigation_toggle)
+        navigation_layout.addWidget(self.nav, 1)
         self.stack = QStackedWidget()
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setObjectName("contentScroll")
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.content_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.content_scroll.setWidget(self.stack)
         self.pages_by_key: dict[str, QWidget] = {}
 
         navigation = list(self.registry.build_navigation())
@@ -260,10 +282,13 @@ class MainWindow(QMainWindow):
                 self._add_navigation_item(group_item, item.label, key)
                 self.pages_by_key[key] = page
                 self.stack.addWidget(page)
-                self._configure_page_tables(page)
+                self._configure_page_tables(page, key)
                 appearance_signal = getattr(page, "appearance_changed", None)
                 if appearance_signal is not None:
                     appearance_signal.connect(self.apply_appearance)
+                navigation_signal = getattr(page, "navigation_requested", None)
+                if navigation_signal is not None:
+                    navigation_signal.connect(self._open_related_page)
 
         if self.nav.topLevelItemCount() == 0:
             page = ModuleFailurePage(
@@ -280,8 +305,12 @@ class MainWindow(QMainWindow):
         self.nav.itemExpanded.connect(lambda _item: self._save_navigation_state())
         self.nav.itemCollapsed.connect(lambda _item: self._save_navigation_state())
         self._restore_navigation_state()
-        layout.addWidget(self.nav)
-        layout.addWidget(self.stack, 1)
+        collapsed = self.settings.value(
+            "navigation/sidebar_collapsed", False, type=bool
+        )
+        self._set_navigation_sidebar_collapsed(collapsed, persist=False)
+        layout.addWidget(self.navigation_panel)
+        layout.addWidget(self.content_scroll, 1)
         self.setCentralWidget(container)
 
         status = QStatusBar()
@@ -379,8 +408,40 @@ class MainWindow(QMainWindow):
         page = self.pages_by_key.get(str(key)) if key is not None else None
         if page is not None:
             self.stack.setCurrentWidget(page)
+            if hasattr(self, "content_scroll"):
+                self.content_scroll.horizontalScrollBar().setValue(0)
+                self.content_scroll.verticalScrollBar().setValue(0)
             self.settings.setValue("navigation/current", str(key))
             self.settings.sync()
+
+    def _open_related_page(self, label: str, item_id=None) -> None:
+        target_item = None
+        for group_index in range(self.nav.topLevelItemCount()):
+            group = self.nav.topLevelItem(group_index)
+            for item_index in range(group.childCount()):
+                item = group.child(item_index)
+                if item.text(0) == label:
+                    target_item = item
+                    group.setExpanded(True)
+                    break
+            if target_item is not None:
+                break
+        if target_item is None:
+            self.statusBar().showMessage(f"{label} is not available in this workspace.", 5000)
+            return
+        self.nav.setCurrentItem(target_item)
+        page_key = str(target_item.data(0, NAV_KEY_ROLE))
+        page = self.pages_by_key.get(page_key)
+        method_name = {
+            "Transcripts": "open_transcript",
+            "Production": "open_project",
+            "Publishing": "open_item",
+        }.get(label)
+        if item_id is not None and page is not None and method_name:
+            opener = getattr(page, method_name, None)
+            if opener is not None:
+                opener(item_id)
+        self.statusBar().showMessage(f"Opened {label}.", 3000)
 
     def _restore_navigation_state(self) -> None:
         expanded = self.settings.value("navigation/expanded_groups", ["Overview"], list)
@@ -410,6 +471,30 @@ class MainWindow(QMainWindow):
         self.settings.setValue("navigation/expanded_groups", expanded)
         self.settings.sync()
 
+    def _toggle_navigation_sidebar(self) -> None:
+        self._set_navigation_sidebar_collapsed(not self.sidebar_collapsed)
+
+    def _set_navigation_sidebar_collapsed(
+        self, collapsed: bool, *, persist: bool = True
+    ) -> None:
+        self.sidebar_collapsed = bool(collapsed)
+        self.nav.setVisible(not self.sidebar_collapsed)
+        if self.sidebar_collapsed:
+            self.navigation_panel.setFixedWidth(46)
+            self.navigation_toggle.setText("▶")
+            self.navigation_toggle.setToolTip("Expand navigation")
+            self.navigation_toggle.setAccessibleName("Expand navigation")
+        else:
+            self.navigation_panel.setFixedWidth(272)
+            self.navigation_toggle.setText("◀  Collapse navigation")
+            self.navigation_toggle.setToolTip("Collapse navigation")
+            self.navigation_toggle.setAccessibleName("Collapse navigation")
+        if persist:
+            self.settings.setValue(
+                "navigation/sidebar_collapsed", self.sidebar_collapsed
+            )
+            self.settings.sync()
+
     def _navigation_reordered(self) -> None:
         group_order = []
         for index in range(self.nav.topLevelItemCount()):
@@ -424,10 +509,23 @@ class MainWindow(QMainWindow):
         self.settings.setValue("navigation/group_order", group_order)
         self._save_navigation_state()
 
-    @staticmethod
-    def _configure_page_tables(page: QWidget) -> None:
-        for table in page.findChildren(QTableView):
-            configure_readable_table(table)
+    def _configure_page_tables(self, page: QWidget, page_key: str) -> None:
+        attribute_names = {
+            id(value): name
+            for name, value in vars(page).items()
+            if isinstance(value, QTableView)
+        }
+        for index, table in enumerate(page.findChildren(QTableView)):
+            name = attribute_names.get(id(table), f"table_{index}")
+            if not table.objectName():
+                table.setObjectName(name)
+            label = name.removesuffix("_table").replace("_", " ")
+            configure_readable_table(
+                table,
+                settings=self.settings,
+                settings_key=f"{page_key}/{name}",
+                empty_text=f"No {label} yet.",
+            )
 
     def apply_appearance(self, theme: str, accent_color: str) -> None:
         self.theme = str(theme)

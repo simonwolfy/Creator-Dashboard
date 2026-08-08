@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QMainWindow,
+    QPushButton,
     QTableWidget,
     QTreeWidgetItem,
     QWidget,
@@ -37,6 +38,7 @@ from creator_intelligence.ui.theme import (
     is_valid_accent,
     normalize_accent,
 )
+from creator_intelligence.ui.widgets import FlowLayout, set_button_enabled
 
 
 def test_table_headers_are_human_readable():
@@ -81,6 +83,59 @@ def test_readable_widths_are_restored_after_a_refresh_resize():
         "Scheduled publish time"
     )
     table.close()
+    app.processEvents()
+
+
+def test_empty_tables_show_a_helpful_state():
+    app = QApplication.instance() or QApplication([])
+    table = QTableWidget(0, 2)
+    table.setHorizontalHeaderLabels(["Title", "Status"])
+    configure_readable_table(table, empty_text="No packages to review yet.")
+    table.resize(500, 240)
+    table.show()
+    app.processEvents()
+
+    assert table._empty_state.label.text() == "No packages to review yet."
+    assert table._empty_state.label.isVisible()
+
+    table.insertRow(0)
+    table.viewport().update()
+    app.processEvents()
+    assert not table._empty_state.label.isVisible()
+    table.close()
+
+
+def test_column_visibility_is_saved_between_sessions(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    settings = QSettings(str(tmp_path / "tables.ini"), QSettings.Format.IniFormat)
+    first = QTableWidget(0, 3)
+    first.setHorizontalHeaderLabels(["Title", "Platform", "Status"])
+    configure_readable_table(first, settings=settings, settings_key="publishing/items")
+    first._column_visibility.set_column_visible(1, False)
+    assert first.isColumnHidden(1)
+
+    restored = QTableWidget(0, 3)
+    restored.setHorizontalHeaderLabels(["Title", "Platform", "Status"])
+    configure_readable_table(
+        restored, settings=settings, settings_key="publishing/items"
+    )
+    assert restored.isColumnHidden(1)
+    assert "show or hide columns" in restored.horizontalHeader().toolTip()
+    first.close()
+    restored.close()
+    app.processEvents()
+
+
+def test_disabled_buttons_explain_why_the_action_is_unavailable():
+    app = QApplication.instance() or QApplication([])
+    button = QPushButton("Send to Publishing")
+    set_button_enabled(button, False, "Approve the package first.")
+    assert not button.isEnabled()
+    assert button.toolTip() == "Approve the package first."
+    set_button_enabled(button, True)
+    assert button.isEnabled()
+    assert button.toolTip() == ""
+    button.close()
     app.processEvents()
 
 
@@ -152,6 +207,14 @@ def test_main_window_builds_nested_navigation(tmp_path):
         ui_settings=ui_settings,
     )
     window = MainWindow(runtime)
+    assert window.minimumWidth() == 720
+    assert window.minimumHeight() == 480
+    assert window.content_scroll.widget() is window.stack
+    window.resize(720, 480)
+    window.show()
+    app.processEvents()
+    assert window.width() == 720
+    assert window.height() == 480
     groups = [
         window.nav.topLevelItem(index).text(0)
         for index in range(window.nav.topLevelItemCount())
@@ -159,6 +222,18 @@ def test_main_window_builds_nested_navigation(tmp_path):
     assert groups == ["Overview", "Platforms", "System"]
     assert window.nav.topLevelItem(0).child(0).text(0) == "Home"
     assert window.nav.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
+    window._open_related_page("Settings")
+    assert window.nav.currentItem().text(0) == "Settings"
+    assert window.stack.currentWidget() is window.pages_by_key["system:Settings"]
+    assert window.sidebar_collapsed is False
+    assert window.nav.isHidden() is False
+    window._toggle_navigation_sidebar()
+    assert window.sidebar_collapsed is True
+    assert window.nav.isHidden() is True
+    assert window.navigation_toggle.text() == "▶"
+    window._toggle_navigation_sidebar()
+    assert window.sidebar_collapsed is False
+    assert window.nav.isHidden() is False
 
     system_group = window.nav.takeTopLevelItem(2)
     window.nav.insertTopLevelItem(0, system_group)
@@ -166,10 +241,15 @@ def test_main_window_builds_nested_navigation(tmp_path):
     youtube_item = platforms_group.takeChild(1)
     platforms_group.insertChild(0, youtube_item)
     window._navigation_reordered()
+    window._toggle_navigation_sidebar()
     window.close()
     app.processEvents()
 
     restored = MainWindow(runtime)
+    assert restored.sidebar_collapsed is True
+    assert restored.nav.isHidden() is True
+    restored._toggle_navigation_sidebar()
+    assert restored.nav.isHidden() is False
     restored_groups = [
         restored.nav.topLevelItem(index).text(0)
         for index in range(restored.nav.topLevelItemCount())
@@ -181,6 +261,18 @@ def test_main_window_builds_nested_navigation(tmp_path):
         for index in range(restored_platforms.childCount())
     ] == ["YouTube", "Twitch"]
     restored.close()
+    app.processEvents()
+
+
+def test_flow_layout_wraps_controls_on_narrow_windows():
+    app = QApplication.instance() or QApplication([])
+    container = QWidget()
+    layout = FlowLayout(container)
+    for label in ("Start Twitch tracking", "Stop Twitch tracking", "Start simulation"):
+        layout.addWidget(QPushButton(label))
+
+    assert layout.heightForWidth(260) > layout.heightForWidth(900)
+    container.close()
     app.processEvents()
 
 

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from creator_intelligence.services.google_drive_metadata_sync import GoogleDriveMetadataSyncService
+from creator_intelligence.ui.widgets import set_button_enabled
 
 FOLDER_ID_ROLE = Qt.ItemDataRole.UserRole
 PATH_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -58,7 +59,9 @@ class GoogleDriveFoldersPage(QWidget):
         self.purpose_box = QComboBox()
         self.purpose_box.addItems(self.service.PURPOSES)
         self.map_button = QPushButton("Map selected folder")
-        self.map_button.setEnabled(False)
+        set_button_enabled(
+            self.map_button, False, "Load Drive and select a folder first."
+        )
         self.map_button.clicked.connect(self.add_mapping)
         picker.addWidget(self.selected_label, 2)
         picker.addWidget(QLabel("Purpose"))
@@ -98,7 +101,9 @@ class GoogleDriveFoldersPage(QWidget):
 
     def load_root(self) -> None:
         self.tree.clear()
-        self.map_button.setEnabled(False)
+        set_button_enabled(
+            self.map_button, False, "Drive folders are still loading."
+        )
         self.selected_label.setText("Loading My Drive...")
         try:
             folders = self.service.browse_folders()
@@ -151,7 +156,11 @@ class GoogleDriveFoldersPage(QWidget):
         item = self.tree.currentItem()
         folder_id = item.data(0, FOLDER_ID_ROLE) if item else None
         selectable = bool(folder_id and folder_id != "root")
-        self.map_button.setEnabled(selectable)
+        set_button_enabled(
+            self.map_button,
+            selectable,
+            "Select a Drive folder below My Drive before mapping it.",
+        )
         self.selected_label.setText(str(item.data(0, PATH_ROLE) or item.text(0)) if selectable else "Select a folder to map it.")
 
     def add_mapping(self) -> None:

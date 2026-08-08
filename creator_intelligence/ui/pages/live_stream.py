@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
-    QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QTabWidget,
+    QWidget,QVBoxLayout,QLabel,QPushButton,QTabWidget,
     QTableView,QAbstractItemView,QGroupBox,QGridLayout,QFormLayout,
     QLineEdit,QSpinBox,QDoubleSpinBox,QCheckBox,QMessageBox,QInputDialog
 )
@@ -11,6 +11,7 @@ from creator_intelligence.ui.pages.twitch import FrameModel
 from creator_intelligence.ui.oauth_connect import run_twitch_device_oauth, show_connection_result
 from creator_intelligence.services.live_stream import LiveSimulationAdapter
 from creator_intelligence.services.twitch_eventsub import TwitchEventSubClient
+from creator_intelligence.ui.widgets import FlowLayout
 
 class MetricCard(QGroupBox):
     def __init__(self,title):
@@ -40,7 +41,8 @@ class LiveStreamPage(QWidget):
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
-        controls=QHBoxLayout()
+        controls_widget=QWidget()
+        controls=FlowLayout(controls_widget)
         start=QPushButton("Start simulation")
         start.clicked.connect(self.start_simulation)
         tick=QPushButton("Advance simulation")
@@ -61,8 +63,7 @@ class LiveStreamPage(QWidget):
         stop_twitch.clicked.connect(self.stop_twitch_tracking)
         for button in (start_twitch,stop_twitch,start,tick,auto,marker,raid,end,refresh):
             controls.addWidget(button)
-        controls.addStretch()
-        layout.addLayout(controls)
+        layout.addWidget(controls_widget)
 
         tabs=QTabWidget()
         tabs.addTab(self._dashboard_tab(),"Live dashboard")

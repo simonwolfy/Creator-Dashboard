@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -24,25 +24,33 @@ from PySide6.QtWidgets import (
 )
 
 from creator_intelligence.ui.pages.twitch import FrameModel
+from creator_intelligence.ui.widgets import FlowLayout, StatusBanner, set_button_enabled
 
 
 class PackagingReviewPage(QWidget):
+    navigation_requested = Signal(str, object)
+
     def __init__(self,service):
         super().__init__(); self.service=service; self.current_package_id=None; self.source_path=None
+        self.current_transcript_id=None; self.current_publishing_item_id=None
         root=QVBoxLayout(self)
         title=QLabel("Packaging Review"); title.setObjectName("pageTitle"); root.addWidget(title)
         subtitle=QLabel("Review, edit, approve, and send platform-ready clip packages to Publishing.")
         subtitle.setWordWrap(True); root.addWidget(subtitle)
-        filters=QHBoxLayout(); self.status=QComboBox(); self.status.addItems(["All","Generated","Approved","Rejected","Published"])
+        filters_container=QWidget(); filters=FlowLayout(filters_container)
+        self.status=QComboBox(); self.status.addItems(["All","Generated","Approved","Rejected","Published"])
         self.platform=QComboBox(); self.platform.addItems(["All","youtube","tiktok","instagram","twitch"])
         for label,widget in (("Status",self.status),("Platform",self.platform)):
             filters.addWidget(QLabel(label)); filters.addWidget(widget)
+        self.action_buttons={}
         for label,handler in (("Refresh",self.refresh),("Approve selected",self.approve),
                               ("Reject selected",self.reject),("Regenerate",self.regenerate),
                               ("Send to Publishing",self.send_to_publishing),
                               ("Bulk approve",self.bulk_approve),("Export selected",self.export_selected)):
             button=QPushButton(label); button.clicked.connect(handler); filters.addWidget(button)
-        filters.addStretch(); root.addLayout(filters)
+            self.action_buttons[label]=button
+        root.addWidget(filters_container)
+        self.notice=StatusBanner("Select a package to review."); root.addWidget(self.notice)
         split=QSplitter(); root.addWidget(split,1)
         left=QWidget(); left_layout=QVBoxLayout(left); self.queue=QTableView()
         self.queue.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -53,6 +61,12 @@ class PackagingReviewPage(QWidget):
         self.context=QLabel("Select a package to review."); self.context.setWordWrap(True); right_layout.addWidget(self.context)
         preview_row=QHBoxLayout(); self.preview=QLabel("No source video linked"); preview_row.addWidget(self.preview,1)
         open_button=QPushButton("Open source video"); open_button.clicked.connect(self.open_source); preview_row.addWidget(open_button)
+        self.open_transcript_button=QPushButton("Open transcript")
+        self.open_transcript_button.clicked.connect(self.open_transcript)
+        preview_row.addWidget(self.open_transcript_button)
+        self.open_publishing_button=QPushButton("Open in Publishing")
+        self.open_publishing_button.clicked.connect(self.open_publishing_item)
+        preview_row.addWidget(self.open_publishing_button)
         right_layout.addLayout(preview_row)
         self.transcript=QPlainTextEdit(); self.transcript.setReadOnly(True); self.transcript.setPlaceholderText("Clip transcript")
         self.transcript.setMaximumHeight(120); right_layout.addWidget(self.transcript)
@@ -74,7 +88,41 @@ class PackagingReviewPage(QWidget):
         variant_actions.addStretch(); right_layout.addLayout(variant_actions)
         split.addWidget(right); split.setSizes([520,700])
         self.status.currentTextChanged.connect(self.refresh); self.platform.currentTextChanged.connect(self.refresh)
+        self._update_action_states()
         self.refresh()
+
+    def _update_action_states(self, decision_status=None):
+        has_package=bool(self.current_package_id)
+        for label in ("Approve selected","Reject selected","Regenerate"):
+            set_button_enabled(
+                self.action_buttons[label],has_package,"Select a package first."
+            )
+        set_button_enabled(
+            self.action_buttons["Send to Publishing"],
+            has_package and decision_status == "Approved",
+            "Approve the selected package before sending it to Publishing."
+            if has_package else "Select a package first.",
+        )
+        set_button_enabled(
+            self.action_buttons["Bulk approve"],
+            bool(self.selected_ids()),
+            "Select one or more packages first.",
+        )
+        set_button_enabled(
+            self.action_buttons["Export selected"],
+            bool(self.selected_ids()),
+            "Select one or more packages first.",
+        )
+        set_button_enabled(
+            self.open_transcript_button,
+            self.current_transcript_id is not None,
+            "This package is not linked to a transcript.",
+        )
+        set_button_enabled(
+            self.open_publishing_button,
+            self.current_publishing_item_id is not None,
+            "Send this package to Publishing first.",
+        )
 
     def refresh(self):
         self.queue.setModel(FrameModel(self.service.queue(self.status.currentText(),self.platform.currentText())))
@@ -88,6 +136,8 @@ class PackagingReviewPage(QWidget):
         if not ids:return
         self.current_package_id=ids[0]; detail=self.service.detail(ids[0]); package=detail["package"]; clip=detail["clip"]
         self.source_path=detail["source_path"]
+        self.current_transcript_id=int(clip["transcript_id"]) if clip.get("transcript_id") is not None else None
+        self.current_publishing_item_id=None
         self.context.setText(f"{package['platform'].title()} • Clip {package['clip_candidate_id']} • {package['decision_status']} • {package.get('clip_type') or 'Clip'}\nAI prediction: {package.get('predicted_performance') or 'Unknown'}")
         if clip:self.preview.setText(f"Preview range: {float(clip.get('start_seconds') or 0):.1f}s–{float(clip.get('end_seconds') or 0):.1f}s")
         else:self.preview.setText("No clip preview metadata")
@@ -98,6 +148,8 @@ class PackagingReviewPage(QWidget):
         self.hook_edit.setText(package.get("used_hook") or package.get("generated_hook") or "")
         tags=self.service.outcomes._json(package.get("used_hashtags_json") or package.get("generated_hashtags_json"),[])
         self.hashtags_edit.setText(" ".join(tags)); self.variants.setModel(FrameModel(detail["variants"])); self.show_validation(detail["validation"])
+        self._update_action_states(str(package.get("decision_status") or ""))
+        self.notice.set_status("Package ready for review.")
 
     def edits(self):
         return {"title":self.title_edit.text().strip(),"description":self.description_edit.toPlainText().strip(),
@@ -111,44 +163,63 @@ class PackagingReviewPage(QWidget):
     def save_edits(self):
         if not self.current_package_id:return
         self.service.save_edits(self.current_package_id,self.edits()); self.show_validation(self.service.validate(self.current_package_id,self.edits())); self.refresh()
+        self.notice.set_status("Package edits saved.","success")
 
     def approve(self):
         if not self.current_package_id:return
         try:self.service.approve(self.current_package_id,self.edits())
-        except Exception as exc:QMessageBox.warning(self,"Cannot approve",str(exc));return
-        self.refresh(); self.load_selected()
+        except Exception as exc:
+            self.notice.set_status(str(exc),"error"); QMessageBox.warning(self,"Cannot approve",str(exc));return
+        self.refresh(); self.load_selected(); self.notice.set_status("Package approved.","success")
 
     def reject(self):
-        if self.current_package_id:self.service.reject(self.current_package_id);self.refresh()
+        if self.current_package_id:
+            self.service.reject(self.current_package_id);self.refresh();self.load_selected()
+            self.notice.set_status("Package rejected and recorded as negative feedback.","success")
 
     def regenerate(self):
         if not self.current_package_id:return
-        self.service.regenerate(self.current_package_id); QMessageBox.information(self,"Regenerated","A fresh package and experiment set was created."); self.refresh()
+        self.service.regenerate(self.current_package_id); self.notice.set_status("A fresh package and experiment set was created.","success"); self.refresh()
 
     def send_to_publishing(self):
         if not self.current_package_id:return
         try:item_id=self.service.send_to_publishing(self.current_package_id)
-        except Exception as exc:QMessageBox.warning(self,"Cannot send",str(exc));return
-        QMessageBox.information(self,"Sent to Publishing",f"Publishing item {item_id} is ready.")
+        except Exception as exc:
+            self.notice.set_status(str(exc),"error"); QMessageBox.warning(self,"Cannot send",str(exc));return
+        self.current_publishing_item_id=item_id
+        self._update_action_states("Approved")
+        self.notice.set_status(f"Publishing item {item_id} is ready. Open it to continue.","success")
 
     def bulk_approve(self):
-        result=self.service.bulk_approve(self.selected_ids()); QMessageBox.information(self,"Bulk review",f"Approved {len(result['approved'])}; skipped {len(result['failed'])}."); self.refresh()
+        result=self.service.bulk_approve(self.selected_ids()); self.notice.set_status(f"Approved {len(result['approved'])}; skipped {len(result['failed'])}.","success"); self.refresh()
 
     def export_selected(self):
         ids=self.selected_ids()
         if not ids:return
         path,_=QFileDialog.getSaveFileName(self,"Export packages","packaging-review.json","JSON files (*.json)")
-        if path:Path(path).write_text(json.dumps(self.service.export_payload(ids),indent=2),encoding="utf-8")
+        if path:
+            Path(path).write_text(json.dumps(self.service.export_payload(ids),indent=2),encoding="utf-8")
+            self.notice.set_status(f"Exported {len(ids)} package(s).","success")
 
     def copy_package(self):
-        if self.current_package_id:QApplication.clipboard().setText(json.dumps(self.service.export_payload([self.current_package_id])[0],indent=2))
+        if self.current_package_id:
+            QApplication.clipboard().setText(json.dumps(self.service.export_payload([self.current_package_id])[0],indent=2))
+            self.notice.set_status("Package copied to the clipboard.","success")
 
     def use_variant(self):
         index=self.variants.currentIndex()
         if not index.isValid():return
         variant_id=str(self.variants.model().frame.iloc[index.row()]["id"])
         self.service.apply_variant(self.current_package_id,variant_id)
-        self.load_selected();self.refresh()
+        self.load_selected();self.refresh();self.notice.set_status("Selected variant applied as editable package copy.","success")
+
+    def open_transcript(self):
+        if self.current_transcript_id is not None:
+            self.navigation_requested.emit("Transcripts",self.current_transcript_id)
+
+    def open_publishing_item(self):
+        if self.current_publishing_item_id is not None:
+            self.navigation_requested.emit("Publishing",self.current_publishing_item_id)
 
     def open_source(self):
         if self.source_path and Path(str(self.source_path)).exists():QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.source_path)))

@@ -140,6 +140,19 @@ class PublishingPage(QWidget):
         if not index.isValid(): return None
         return int(self.items_table.model().frame.iloc[index.row()]["id"])
 
+    def open_item(self, item_id):
+        """Select a publishing item when another workflow links into this page."""
+        self.refresh()
+        model=self.items_table.model()
+        if model is None or model.frame.empty:return
+        matches=model.frame.index[model.frame["id"]==int(item_id)].tolist()
+        if not matches:return
+        row=int(matches[0])
+        self.items_table.selectRow(row)
+        self.items_table.setCurrentIndex(model.index(row,0))
+        self.refresh_dependencies()
+        self.tabs.setCurrentWidget(self.items_table)
+
     def refresh(self):
         self.items_table.setModel(FrameModel(self.service.items()))
         self.calendar_table.setModel(FrameModel(self.service.calendar()))

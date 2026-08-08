@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from creator_intelligence.ui.widgets import set_button_enabled
+
 
 class InstallWorker(QObject):
     completed = Signal(object)
@@ -121,7 +123,9 @@ class FFmpegManagerPage(QWidget):
         self.refresh()
 
     def install(self):
-        self.install_button.setEnabled(False)
+        set_button_enabled(
+            self.install_button, False, "FFmpeg installation is already running."
+        )
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
         self.banner.setText("Installing FFmpeg with Windows Package Manager. This can take several minutes...")
@@ -157,7 +161,7 @@ class FFmpegManagerPage(QWidget):
             self._thread.wait()
         self._worker = None
         self._thread = None
-        self.install_button.setEnabled(True)
+        set_button_enabled(self.install_button, True)
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.progress.setVisible(False)
