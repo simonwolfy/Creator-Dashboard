@@ -87,8 +87,23 @@ and [Resolve Drive API errors](https://developers.google.com/workspace/drive/api
    finishes automatically. With an HTTPS callback, paste the complete final
    callback URL into the dialog so its code and anti-forgery state can be verified.
 
-The account must be eligible for the Instagram professional API features enabled
-for the Meta app. Available insights depend on Meta review and granted permissions.
+Instagram Login supports professional **Business** and **Creator** accounts, not
+personal consumer accounts. The app requests `instagram_business_basic` and
+`instagram_business_manage_insights`; it does not request publishing or media
+editing. Standard Access covers accounts owned by or assigned to app-role users,
+while other professional accounts require the appropriate Meta review and Advanced
+Access. Some metrics vary by media type, and Meta can return an empty result rather
+than zero when a metric is unavailable. Creator Intelligence preserves the basic
+media sync and marks the connection **Limited** when only some insights are
+available.
+
+The connection is checked hourly and content statistics are refreshed every 30
+minutes while the page is open. Reconnecting replaces the one active Instagram
+account stored for that workspace. Disconnect always clears the local OS-vault
+credentials; remove the app under Instagram **Apps and Websites** as well when you
+want to revoke the remote grant.
+
+Official reference: [Meta's Instagram API workspace](https://www.postman.com/meta/instagram/overview).
 
 ## TikTok
 
@@ -100,10 +115,23 @@ for the Meta app. Available insights depend on Meta review and granted permissio
 5. Approve access in the browser. Creator Intelligence validates state and PKCE,
    then fills the open ID, access token, and refresh token automatically.
 
-Content and analytics access can remain unavailable until TikTok approves the app
-and its requested scopes.
+TikTok's Display API exposes the public account profile and public video counts:
+views, likes, comments, and shares. It does not expose creator watch time,
+retention, revenue, or audience analytics, and Creator Intelligence does not request
+publishing permission. Content remains unavailable until `video.list` is granted;
+the page shows partial permissions as **Limited** instead of treating them as a
+complete connection.
 
-Official reference: [TikTok Login Kit for Desktop](https://developers.tiktok.com/doc/login-kit-desktop/).
+Access tokens are refreshed automatically and TikTok's rotated refresh token is
+saved over the previous one. The connection is checked hourly and public video
+statistics are refreshed every 30 minutes while the page is open. Reconnecting
+replaces the one active TikTok account stored for that workspace. Disconnect tries
+TikTok's revoke endpoint and always clears local credentials, even if TikTok is
+temporarily unreachable.
+
+Official references: [TikTok Login Kit for Desktop](https://developers.tiktok.com/doc/login-kit-desktop/),
+[Display API](https://developers.tiktok.com/doc/display-api-overview/), and
+[access-token management](https://developers.tiktok.com/doc/oauth-user-access-token-management?enter_method=left_navigation).
 
 ## Disconnecting
 

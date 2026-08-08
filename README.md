@@ -187,14 +187,23 @@ and other media-processing features.
 - **Instagram:** enter the Meta app ID, app secret, and registered redirect URI,
   then click **Connect Instagram**. A local development callback can use
   `http://127.0.0.1:49153/callback/`; an approved HTTPS redirect uses the guided
-  callback-URL fallback.
+  callback-URL fallback. Instagram Login supports professional Business and Creator
+  accounts. Creator Intelligence syncs basic media and the insights Meta makes
+  available, shows partial permissions as Limited, and does not request publishing.
 - **TikTok:** enter the client key and client secret, register
   `http://127.0.0.1:49152/callback/` as the Desktop Login Kit redirect, then click
-  **Connect TikTok**. The PKCE browser flow fills the open ID and tokens.
+  **Connect TikTok**. The PKCE browser flow fills the open ID and refreshable
+  tokens. TikTok's Display API supplies public video views, likes, comments, and
+  shares; it does not supply watch time, retention, revenue, or audience analytics.
 - **Google Drive:** enable Google Drive API, select a Google OAuth desktop client
   JSON file, connect in the browser, then choose folders under **Drive Folders**.
   The app requests metadata-only access and automatically validates and refreshes
   the connection while its page is open.
+
+Instagram and TikTok connections are validated hourly and sync every 30 minutes
+while their pages are open. Each workspace stores one active account per platform;
+reconnecting replaces it. Disconnect always clears local OS-vault credentials,
+even if a provider is temporarily unavailable.
 
 See [Platform account connections](docs/PLATFORM_ACCOUNT_CONNECTIONS.md) for the
 provider-console setup and requested permissions.

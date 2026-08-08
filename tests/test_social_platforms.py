@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import pandas as pd
+from urllib.parse import parse_qs, urlparse
 
 from creator_intelligence.services.social_platforms import SocialPlatformService
 from creator_intelligence.core.credential_vault import MemoryCredentialBackend
@@ -279,3 +280,142 @@ def test_legacy_unique_title_schema_is_upgraded_in_place(tmp_path):
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='creator_published_titles'"
     ).iloc[0]["sql"].lower()
     assert "unique(platform,content_type,title)" not in "".join(schema.split())
+
+
+def test_instagram_partial_permissions_keep_basic_content_sync_available(tmp_path):
+    service = SocialPlatformService(DB(tmp_path / "instagram-partial.db"))
+    service.save_configuration("instagram", {
+        "app_id": "app", "app_secret": "secret", "access_token": "token",
+        "account_id": "account", "granted_scopes": "instagram_business_basic",
+        "connection_state": "connected",
+    })
+
+    status = service.connection_status("instagram")
+
+    assert status["state"] == "limited"
+    assert status["can_sync"] is True
+    assert status["missing_scopes"] == ["instagram_business_manage_insights"]
+    assert status["capabilities"][0]["available"] is True
+    assert status["capabilities"][1]["available"] is False
+
+
+def test_tiktok_without_video_permission_cannot_sync_videos(tmp_path):
+    service = SocialPlatformService(DB(tmp_path / "tiktok-partial.db"))
+    service.save_configuration("tiktok", {
+        "client_key": "key", "client_secret": "secret", "access_token": "token",
+        "refresh_token": "refresh", "user_id": "user",
+        "granted_scopes": "user.info.basic", "connection_state": "connected",
+    })
+
+    status = service.connection_status("tiktok")
+
+    assert status["state"] == "limited"
+    assert status["can_sync"] is False
+    assert status["capabilities"][0]["available"] is True
+    assert status["capabilities"][1]["available"] is False
+
+
+def test_tiktok_refresh_persists_rotated_token_scope_and_refresh_expiry(tmp_path, monkeypatch):
+    service = SocialPlatformService(DB(tmp_path / "tiktok-rotation.db"))
+    service.save_configuration("tiktok", {
+        "client_key": "key", "client_secret": "secret", "access_token": "old-access",
+        "refresh_token": "old-refresh", "user_id": "user",
+        "granted_scopes": "user.info.basic video.list", "connection_state": "connected",
+    })
+    monkeypatch.setattr(service, "_post_form", lambda *_args, **_kwargs: {
+        "access_token": "new-access", "refresh_token": "new-refresh",
+        "expires_in": 86400, "refresh_expires_in": 31_536_000,
+        "scope": "user.info.basic,video.list",
+    })
+
+    service.refresh_access_token("tiktok")
+    config = service.configuration("tiktok")
+
+    assert config["access_token"] == "new-access"
+    assert config["refresh_token"] == "new-refresh"
+    assert config["refresh_expires_at"]
+    assert service.connection_status("tiktok")["state"] == "connected"
+
+
+def test_tiktok_revoked_connection_is_classified_and_requires_reconnect(tmp_path, monkeypatch):
+    service = SocialPlatformService(DB(tmp_path / "tiktok-revoked.db"))
+    service.save_configuration("tiktok", {
+        "client_key": "key", "client_secret": "secret", "access_token": "access",
+        "refresh_token": "refresh", "user_id": "user",
+        "granted_scopes": "user.info.basic video.list", "connection_state": "connected",
+    })
+    monkeypatch.setattr(
+        service, "_tiktok_identity",
+        lambda _config: (_ for _ in ()).throw(RuntimeError("HTTP 400: invalid_grant token revoked")),
+    )
+    monkeypatch.setattr(
+        service, "refresh_access_token",
+        lambda _platform: (_ for _ in ()).throw(RuntimeError("HTTP 400: invalid_grant token revoked")),
+    )
+
+    status = service.validate_connection("tiktok")
+
+    assert status["state"] == "revoked"
+    assert status["can_sync"] is False
+    assert "Reconnect" in status["message"]
+
+
+def test_instagram_insights_fall_back_per_metric_and_report_partial_access(tmp_path, monkeypatch):
+    service = SocialPlatformService(DB(tmp_path / "instagram-insights.db"))
+
+    def graph_request(request):
+        metrics = parse_qs(urlparse(request.full_url).query).get("metric", [""])[0]
+        if "," in metrics:
+            raise RuntimeError("Metric is not valid for this media type")
+        if metrics == "views":
+            return {"data": [{"name": "views", "values": [{"value": 125}]}]}
+        if metrics == "shares":
+            return {"data": [{"name": "shares", "total_value": {"value": 4}}]}
+        raise RuntimeError(f"{metrics} is unavailable")
+
+    monkeypatch.setattr(service, "_json_request", graph_request)
+    service._last_sync_warnings = []
+
+    insights = service._instagram_media_insights("media", "access")
+
+    assert insights == {"views": 125, "shares": 4}
+    assert len(service._last_sync_warnings) == 1
+    assert "reach" in service._last_sync_warnings[0]
+
+
+def test_tiktok_fetch_refreshes_existing_statistics_even_with_a_cursor(tmp_path, monkeypatch):
+    service = SocialPlatformService(DB(tmp_path / "tiktok-current-stats.db"))
+    service.save_configuration("tiktok", {
+        "client_key": "key", "client_secret": "secret", "access_token": "token",
+        "refresh_token": "refresh", "user_id": "user",
+    })
+    monkeypatch.setattr(service, "_json_request", lambda _request: {
+        "data": {"videos": [{
+            "id": "existing", "title": "Existing", "create_time": 1,
+            "view_count": 99, "like_count": 7,
+        }], "has_more": False},
+    })
+
+    records = service._fetch_tiktok("2099-01-01T00:00:00+00:00")
+
+    assert len(records) == 1
+    assert records[0]["views"] == 99
+
+
+def test_failed_tiktok_remote_revoke_still_clears_local_credentials(tmp_path, monkeypatch):
+    db = DB(tmp_path / "tiktok-revoke-failure.db")
+    service = SocialPlatformService(db)
+    service.save_configuration("tiktok", {
+        "client_key": "key", "client_secret": "secret", "access_token": "token",
+        "refresh_token": "refresh", "user_id": "user",
+    })
+    monkeypatch.setattr(
+        service, "_post_form",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("HTTP 503 provider unavailable")),
+    )
+
+    status = service.revoke_and_disconnect("tiktok")
+
+    assert status["configured"] is False
+    assert status.get("revocation_warning")
+    assert service.configuration("tiktok").get("access_token") in {None, ""}

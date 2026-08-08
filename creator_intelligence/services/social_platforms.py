@@ -22,6 +22,11 @@ class SocialPlatformService:
         "https://www.googleapis.com/auth/youtube.readonly",
         "https://www.googleapis.com/auth/yt-analytics.readonly",
     )
+    INSTAGRAM_SCOPES = (
+        "instagram_business_basic",
+        "instagram_business_manage_insights",
+    )
+    TIKTOK_SCOPES = ("user.info.basic", "video.list")
 
     FIELDS = {
         "youtube": (
@@ -31,11 +36,13 @@ class SocialPlatformService:
         ),
         "instagram": (
             "app_id", "app_secret", "access_token", "account_id", "redirect_uri",
-            "token_expires_at", "account_name",
+            "token_expires_at", "account_name", "granted_scopes", "connection_state",
+            "last_validated_at",
         ),
         "tiktok": (
             "client_key", "client_secret", "access_token", "refresh_token", "user_id",
-            "redirect_uri", "token_expires_at", "account_name",
+            "redirect_uri", "token_expires_at", "refresh_expires_at", "account_name",
+            "granted_scopes", "connection_state", "last_validated_at",
         ),
     }
 
@@ -225,12 +232,18 @@ class SocialPlatformService:
                     "client_key":config.get("client_key"),"client_secret":config.get("client_secret"),
                     "token":config.get("access_token")})
             except Exception as exc:
-                raise RuntimeError(self.vault.redact(exc)) from None
+                revoke_error = self.vault.redact(exc)
         status = self.disconnect(platform)
         if revoke_error:
+            provider = "Google" if platform == "youtube" else "TikTok"
             status["revocation_warning"] = (
-                "Local credentials were cleared, but Google could not confirm remote revocation: "
+                f"Local credentials were cleared, but {provider} could not confirm remote revocation: "
                 + revoke_error
+            )
+        elif platform == "instagram":
+            status["revocation_warning"] = (
+                "Local credentials were cleared. To remove the remote permission too, open "
+                "Instagram Settings > Website permissions > Apps and Websites and remove this app."
             )
         return status
 
@@ -280,9 +293,35 @@ class SocialPlatformService:
         elif platform == "instagram":
             required = ("app_id", "app_secret", "access_token", "account_id")
             missing = [field for field in required if not config.get(field)]
+            granted = self._scope_values(config.get("granted_scopes"))
+            state, message = self._social_connection_state(
+                platform, config, granted, self.INSTAGRAM_SCOPES,
+            )
+            lifecycle = ConnectionStatus(
+                provider="instagram", state=state, message=message,
+                account_id=config.get("account_id") or None,
+                account_name=config.get("account_name") or None,
+                granted_scopes=granted, required_scopes=self.INSTAGRAM_SCOPES,
+                expires_at=config.get("token_expires_at") or None,
+                last_validated_at=config.get("last_validated_at") or None,
+                last_error=config.get("last_error") or None,
+            ).as_dict()
         else:
             required = ("client_key", "client_secret", "access_token", "refresh_token", "user_id")
             missing = [field for field in required if not config.get(field)]
+            granted = self._scope_values(config.get("granted_scopes"))
+            state, message = self._social_connection_state(
+                platform, config, granted, self.TIKTOK_SCOPES,
+            )
+            lifecycle = ConnectionStatus(
+                provider="tiktok", state=state, message=message,
+                account_id=config.get("user_id") or None,
+                account_name=config.get("account_name") or None,
+                granted_scopes=granted, required_scopes=self.TIKTOK_SCOPES,
+                expires_at=config.get("token_expires_at") or None,
+                last_validated_at=config.get("last_validated_at") or None,
+                last_error=config.get("last_error") or None,
+            ).as_dict()
         sync = self.db.frame(
             "SELECT * FROM creator_title_sync_state WHERE platform=?", (platform,)
         )
@@ -309,7 +348,23 @@ class SocialPlatformService:
             }
             lifecycle["capabilities"] = self.youtube_capabilities(lifecycle)
             return lifecycle
-        return legacy
+        lifecycle.update(legacy)
+        lifecycle["configured"] = lifecycle["state"] not in {
+            ConnectionState.NOT_CONFIGURED.value,
+            ConnectionState.DISCONNECTED.value,
+        }
+        granted_set = set(lifecycle.get("granted_scopes") or ())
+        lifecycle["can_sync"] = (
+            self.INSTAGRAM_SCOPES[0] in granted_set
+            if platform == "instagram"
+            else self.TIKTOK_SCOPES[1] in granted_set
+        ) and lifecycle["state"] in {
+            ConnectionState.CONNECTED.value,
+            ConnectionState.LIMITED.value,
+        }
+        lifecycle["capabilities"] = self.social_capabilities(platform, lifecycle)
+        lifecycle["account_policy"] = "One active account per platform in each workspace"
+        return lifecycle
 
     def youtube_capabilities(self, status: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         status = status or self.connection_status("youtube")
@@ -328,6 +383,58 @@ class SocialPlatformService:
             },
             {
                 "capability": "Edit, upload, or delete videos",
+                "available": False,
+                "permission": "Not requested by Creator Intelligence",
+            },
+        ]
+
+    def social_capabilities(
+        self, platform: str, status: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        platform = self._platform(platform)
+        status = status or self.connection_status(platform)
+        granted = set(status.get("granted_scopes") or ())
+        if platform == "instagram":
+            return [
+                {
+                    "capability": "Professional account identity and published media",
+                    "available": self.INSTAGRAM_SCOPES[0] in granted,
+                    "permission": "Instagram business basic",
+                },
+                {
+                    "capability": "Available media views, reach, interactions, saves, and shares",
+                    "available": self.INSTAGRAM_SCOPES[1] in granted,
+                    "permission": "Instagram business insights",
+                },
+                {
+                    "capability": "Personal Instagram accounts",
+                    "available": False,
+                    "permission": "Not supported by the Instagram professional API",
+                },
+                {
+                    "capability": "Publish, edit, or delete media",
+                    "available": False,
+                    "permission": "Not requested by Creator Intelligence",
+                },
+            ]
+        return [
+            {
+                "capability": "TikTok account identity",
+                "available": self.TIKTOK_SCOPES[0] in granted,
+                "permission": "User info basic",
+            },
+            {
+                "capability": "Public videos, views, likes, comments, and shares",
+                "available": self.TIKTOK_SCOPES[1] in granted,
+                "permission": "Video list",
+            },
+            {
+                "capability": "Watch time, retention, revenue, and audience analytics",
+                "available": False,
+                "permission": "Not exposed by TikTok Display API",
+            },
+            {
+                "capability": "Publish, edit, or delete videos",
                 "available": False,
                 "permission": "Not requested by Creator Intelligence",
             },
@@ -472,8 +579,12 @@ class SocialPlatformService:
                 "client_id": config.get("app_id"), "client_secret": config.get("app_secret"),
                 "grant_type": "authorization_code", "redirect_uri": target, "code": code,
             })
-            config["access_token"] = payload.get("access_token") or ""
-            config["account_id"] = str(payload.get("user_id") or payload.get("id") or "")
+            config.update(
+                access_token=payload.get("access_token") or "",
+                account_id=str(payload.get("user_id") or payload.get("id") or ""),
+                granted_scopes=payload.get("scope") or " ".join(self.INSTAGRAM_SCOPES),
+                connection_state=ConnectionState.CONNECTING.value,
+            )
             try:
                 long_lived = self._json_request(Request(
                     "https://graph.instagram.com/access_token?" + urlencode({
@@ -486,19 +597,32 @@ class SocialPlatformService:
             except Exception:
                 config["token_expires_at"] = self._expires_at(payload.get("expires_in"))
             identity = self._instagram_identity(config)
-            config.update(identity)
+            config.update(
+                identity,
+                connection_state=ConnectionState.CONNECTED.value,
+                last_validated_at=datetime.now().isoformat(),
+            )
         elif platform == "tiktok":
             payload = self._post_form("https://open.tiktokapis.com/v2/oauth/token/", {
                 "client_key": config.get("client_key"), "client_secret": config.get("client_secret"),
                 "code": code, "code_verifier": code_verifier,
                 "grant_type": "authorization_code", "redirect_uri": target,
             })
-            config.update(access_token=payload.get("access_token") or "",
-                          refresh_token=payload.get("refresh_token") or "",
-                          user_id=payload.get("open_id") or config.get("user_id") or "",
-                          token_expires_at=self._expires_at(payload.get("expires_in")))
+            config.update(
+                access_token=payload.get("access_token") or "",
+                refresh_token=payload.get("refresh_token") or "",
+                user_id=payload.get("open_id") or config.get("user_id") or "",
+                token_expires_at=self._expires_at(payload.get("expires_in")),
+                refresh_expires_at=self._expires_at(payload.get("refresh_expires_in")),
+                granted_scopes=payload.get("scope") or " ".join(self.TIKTOK_SCOPES),
+                connection_state=ConnectionState.CONNECTING.value,
+            )
             identity = self._tiktok_identity(config)
-            config.update(identity)
+            config.update(
+                identity,
+                connection_state=ConnectionState.CONNECTED.value,
+                last_validated_at=datetime.now().isoformat(),
+            )
         else:
             raise ValueError(platform)
         if target and platform != "youtube":
@@ -538,16 +662,13 @@ class SocialPlatformService:
                 else:
                     raise ValueError("This platform does not use token refresh here.")
             except Exception as exc:
-                if platform == "youtube":
-                    safe = self.vault.redact(exc)
-                    state = (
-                        ConnectionState.REVOKED
-                        if "invalid_grant" in safe.lower() or "revoked" in safe.lower()
-                        else ConnectionState.EXPIRED
-                    )
-                    config.update(connection_state=state.value)
-                    self.save_configuration(platform, config, True)
-                    self._set_integration_error(platform, safe)
+                safe = self.vault.redact(exc)
+                state = self._state_for_error(exc)
+                if state == ConnectionState.ERROR:
+                    state = ConnectionState.EXPIRED
+                config.update(connection_state=state.value)
+                self.save_configuration(platform, config, True)
+                self._set_integration_error(platform, safe)
                 raise
             config["access_token"] = payload.get("access_token") or config.get("access_token") or ""
             if payload.get("refresh_token"):
@@ -555,46 +676,82 @@ class SocialPlatformService:
             if payload.get("scope"):
                 config["granted_scopes"] = payload["scope"]
             config["token_expires_at"] = self._expires_at(payload.get("expires_in"))
-            if platform == "youtube":
-                config["connection_state"] = ConnectionState.CONNECTED.value
+            if payload.get("refresh_expires_in"):
+                config["refresh_expires_at"] = self._expires_at(payload.get("refresh_expires_in"))
+            required = {
+                "youtube": self.YOUTUBE_SCOPES,
+                "instagram": self.INSTAGRAM_SCOPES,
+                "tiktok": self.TIKTOK_SCOPES,
+            }[platform]
+            granted = set(self._scope_values(config.get("granted_scopes")))
+            config["connection_state"] = (
+                ConnectionState.CONNECTED.value
+                if all(scope in granted for scope in required)
+                else ConnectionState.LIMITED.value
+            )
             self.save_configuration(platform, config, True)
             return {"refreshed": True, "expires_in": payload.get("expires_in")}
 
     def validate_connection(self, platform: str) -> dict[str, Any]:
         """Validate provider access, refreshing an expired token once when possible."""
         platform = self._platform(platform)
-        if platform != "youtube":
-            return self.connection_status(platform)
-        config = self.configuration("youtube")
+        config = self.configuration(platform)
         if not config.get("access_token"):
-            return self.connection_status("youtube")
+            return self.connection_status(platform)
+        can_refresh = bool(
+            config.get("refresh_token")
+            or (platform == "instagram" and config.get("access_token"))
+        )
         try:
-            if self._token_expired(config.get("token_expires_at")) and config.get("refresh_token"):
-                self.refresh_access_token("youtube")
-                config = self.configuration("youtube")
+            refresh_due = self._token_expired(config.get("token_expires_at"))
+            if platform == "instagram":
+                refresh_due = self._token_near_expiry(
+                    config.get("token_expires_at"), days=7,
+                )
+            if refresh_due and can_refresh:
+                self.refresh_access_token(platform)
+                config = self.configuration(platform)
             try:
-                identity = self._youtube_identity(config)
+                identity = {
+                    "youtube": self._youtube_identity,
+                    "instagram": self._instagram_identity,
+                    "tiktok": self._tiktok_identity,
+                }[platform](config)
             except Exception as first_error:
-                if not self._is_auth_error(first_error) or not config.get("refresh_token"):
+                if not self._is_auth_error(first_error) or not can_refresh:
                     raise
-                self.refresh_access_token("youtube")
-                config = self.configuration("youtube")
-                identity = self._youtube_identity(config)
+                self.refresh_access_token(platform)
+                config = self.configuration(platform)
+                identity = {
+                    "youtube": self._youtube_identity,
+                    "instagram": self._instagram_identity,
+                    "tiktok": self._tiktok_identity,
+                }[platform](config)
+            required = {
+                "youtube": self.YOUTUBE_SCOPES,
+                "instagram": self.INSTAGRAM_SCOPES,
+                "tiktok": self.TIKTOK_SCOPES,
+            }[platform]
+            granted = set(self._scope_values(config.get("granted_scopes")))
             config.update(
                 identity,
-                connection_state=ConnectionState.CONNECTED.value,
+                connection_state=(
+                    ConnectionState.CONNECTED.value
+                    if all(scope in granted for scope in required)
+                    else ConnectionState.LIMITED.value
+                ),
                 last_validated_at=datetime.now().isoformat(),
             )
-            self.save_configuration("youtube", config, True)
-            self._set_integration_error("youtube", None, connected=True)
+            self.save_configuration(platform, config, True)
+            self._set_integration_error(platform, None, connected=True)
         except Exception as exc:
             safe = self.vault.redact(exc)
-            config = self.configuration("youtube")
+            config = self.configuration(platform)
             state = self._state_for_error(exc)
             config["connection_state"] = state.value
-            self.save_configuration("youtube", config, True)
-            self._set_integration_error("youtube", safe)
-        return self.connection_status("youtube")
+            self.save_configuration(platform, config, True)
+            self._set_integration_error(platform, safe)
+        return self.connection_status(platform)
 
     def _youtube_identity(self, config: dict[str, Any]) -> dict[str, str]:
         payload = self._json_request(Request(
@@ -625,6 +782,60 @@ class SocialPlatformService:
         except ValueError:
             return fallback
 
+    def _social_connection_state(
+        self,
+        platform: str,
+        config: dict[str, Any],
+        granted_scopes: tuple[str, ...],
+        required_scopes: tuple[str, ...],
+    ) -> tuple[ConnectionState, str]:
+        access_token = bool(config.get("access_token"))
+        setup_started = bool(
+            config.get("app_id") or config.get("client_key")
+            or config.get("account_id") or config.get("user_id")
+        )
+        if not access_token:
+            state = ConnectionState.DISCONNECTED if setup_started else ConnectionState.NOT_CONFIGURED
+        else:
+            state = self._connection_state(
+                str(config.get("connection_state") or ""), ConnectionState.CONNECTED,
+            )
+            if self._token_expired(config.get("token_expires_at")):
+                state = (
+                    ConnectionState.REVOKED
+                    if platform == "tiktok" and self._token_expired(config.get("refresh_expires_at"))
+                    else ConnectionState.EXPIRED
+                )
+            missing = [scope for scope in required_scopes if scope not in granted_scopes]
+            if state == ConnectionState.CONNECTED and missing:
+                state = ConnectionState.LIMITED
+        missing = [scope for scope in required_scopes if scope not in granted_scopes]
+        return state, self._social_state_message(platform, state, missing)
+
+    @staticmethod
+    def _social_state_message(
+        platform: str, state: ConnectionState, missing_scopes: list[str],
+    ) -> str:
+        name = platform.title()
+        if state == ConnectionState.CONNECTED:
+            return f"{name} is connected and ready for read-only content syncing."
+        if state == ConnectionState.LIMITED:
+            if missing_scopes:
+                return (
+                    f"{name} is connected with limited access. Reconnect to approve the "
+                    "missing read-only permissions."
+                )
+            return f"{name} is connected, but an API limit is temporarily blocking part of the sync."
+        if state == ConnectionState.EXPIRED:
+            return f"The {name} session expired and could not refresh. Reconnect the account."
+        if state == ConnectionState.REVOKED:
+            return f"{name} access was revoked or invalidated. Reconnect the account to continue."
+        if state == ConnectionState.ERROR:
+            return f"{name} could not be validated. Review the error and try again."
+        if state == ConnectionState.DISCONNECTED:
+            return f"{name} setup is saved, but no account is connected."
+        return f"Add the {name} app details, then connect an account."
+
     @staticmethod
     def _token_expired(value: Any) -> bool:
         if not value:
@@ -637,16 +848,32 @@ class SocialPlatformService:
             return False
 
     @staticmethod
+    def _token_near_expiry(value: Any, *, days: int) -> bool:
+        if not value:
+            return False
+        try:
+            expires = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            now = datetime.now(expires.tzinfo) if expires.tzinfo else datetime.now()
+            return expires <= now + timedelta(days=days)
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
     def _is_auth_error(exc: Exception) -> bool:
         text = str(exc).lower()
         return any(marker in text for marker in (
             "http 401", "invalid credentials", "invalid_grant", "unauthorized", "expired token",
+            "access token has expired", "invalid oauth access token", "error validating access token",
+            "invalid access token",
         ))
 
     @classmethod
     def _state_for_error(cls, exc: Exception) -> ConnectionState:
         text = str(exc).lower()
-        if "invalid_grant" in text or "revoked" in text or "deleted_client" in text:
+        if any(marker in text for marker in (
+            "invalid_grant", "revoked", "deleted_client", "invalid oauth access token",
+            "invalid access token",
+        )):
             return ConnectionState.REVOKED
         if cls._is_auth_error(exc):
             return ConnectionState.EXPIRED
@@ -685,21 +912,20 @@ class SocialPlatformService:
         )
 
     def _instagram_identity(self, config: dict[str, Any]) -> dict[str, str]:
-        identity = {
-            "account_id": str(config.get("account_id") or ""),
-            "account_name": str(config.get("account_name") or ""),
+        payload = self._json_request(Request(
+            "https://graph.instagram.com/me?" + urlencode({
+                "fields": "id,user_id,username", "access_token": config.get("access_token"),
+            })
+        ))
+        account_id = str(payload.get("user_id") or payload.get("id") or config.get("account_id") or "")
+        if not account_id:
+            raise ValueError(
+                "Instagram did not return a professional account ID. Business or Creator accounts are required."
+            )
+        return {
+            "account_id": account_id,
+            "account_name": str(payload.get("username") or config.get("account_name") or ""),
         }
-        try:
-            payload = self._json_request(Request(
-                "https://graph.instagram.com/me?" + urlencode({
-                    "fields": "id,user_id,username", "access_token": config.get("access_token"),
-                })
-            ))
-        except Exception:
-            return identity
-        identity["account_id"] = str(payload.get("user_id") or payload.get("id") or identity["account_id"])
-        identity["account_name"] = str(payload.get("username") or identity["account_name"])
-        return identity
 
     def _tiktok_identity(self, config: dict[str, Any]) -> dict[str, str]:
         payload = self._json_request(Request(
@@ -733,8 +959,12 @@ class SocialPlatformService:
             try:
                 records = list((fetcher or self._fetch_records)(platform, cursor))
             except Exception as first_error:
-                token_error = "401" in str(first_error) or "expired" in str(first_error).lower()
-                can_refresh = bool(self.configuration(platform).get("refresh_token"))
+                token_error = self._is_auth_error(first_error)
+                config = self.configuration(platform)
+                can_refresh = bool(
+                    config.get("refresh_token")
+                    or (platform == "instagram" and config.get("access_token"))
+                )
                 if fetcher is not None or not token_error or not can_refresh:
                     raise
                 self.refresh_access_token(platform)
@@ -747,16 +977,22 @@ class SocialPlatformService:
             from creator_intelligence.services.publishing_outcomes import PublishingOutcomeService
             outcomes = PublishingOutcomeService(self.db).process_sync(platform)
             self._record_sync(platform, "Completed", newest, len(records), changed, None, now)
-            if platform == "youtube" and self.configuration("youtube").get("access_token"):
-                config = self.configuration("youtube")
+            if self.configuration(platform).get("access_token"):
+                config = self.configuration(platform)
+                required = {
+                    "youtube": self.YOUTUBE_SCOPES,
+                    "instagram": self.INSTAGRAM_SCOPES,
+                    "tiktok": self.TIKTOK_SCOPES,
+                }[platform]
+                granted = set(self._scope_values(config.get("granted_scopes")))
                 config["connection_state"] = (
                     ConnectionState.LIMITED.value
-                    if self._last_sync_warnings
+                    if self._last_sync_warnings or not all(scope in granted for scope in required)
                     else ConnectionState.CONNECTED.value
                 )
-                self.save_configuration("youtube", config, True)
+                self.save_configuration(platform, config, True)
                 self._set_integration_error(
-                    "youtube", "; ".join(self._last_sync_warnings) or None, connected=True
+                    platform, "; ".join(self._last_sync_warnings) or None, connected=True
                 )
             return {"platform": platform, "seen": len(records), "changed": changed,
                     "unchanged": len(records) - changed, "last_cursor": newest,
@@ -766,11 +1002,10 @@ class SocialPlatformService:
         except Exception as exc:
             safe=self.vault.redact(exc)
             self._record_sync(platform, "Failed", cursor, 0, 0, safe, now)
-            if platform == "youtube":
-                config = self.configuration("youtube")
-                config["connection_state"] = self._state_for_error(exc).value
-                self.save_configuration("youtube", config, True)
-                self._set_integration_error("youtube", safe)
+            config = self.configuration(platform)
+            config["connection_state"] = self._state_for_error(exc).value
+            self.save_configuration(platform, config, True)
+            self._set_integration_error(platform, safe)
             raise RuntimeError(safe) from None
 
     def _upsert_record(self, platform: str, record: dict[str, Any]) -> int:
@@ -1017,48 +1252,91 @@ class SocialPlatformService:
             "limit": 100, "access_token": config["access_token"],
         })
         records = []
-        while url:
+        granted = set(self._scope_values(config.get("granted_scopes")))
+        insights_available = (
+            self.INSTAGRAM_SCOPES[1] in granted or not granted
+        )
+        page_count = 0
+        while url and page_count < 10:
+            page_count += 1
             payload = self._json_request(Request(url))
             for item in payload.get("data", []):
                 timestamp = item.get("timestamp")
-                if cursor and timestamp and timestamp <= cursor:
-                    continue
-                insights = {}
-                try:
-                    insight_payload = self._json_request(Request(
-                        f"https://graph.instagram.com/{item.get('id')}/insights?" + urlencode({
-                            "metric": "views,reach,total_interactions", "access_token": config["access_token"]
-                        })
-                    ))
-                    for metric in insight_payload.get("data", []):
-                        values = metric.get("values") or []
-                        insights[metric.get("name")] = values[0].get("value") if values else metric.get("value")
-                except Exception:
-                    # Basic media permissions still provide captions and engagement counts.
-                    insights = {}
+                insights = (
+                    self._instagram_media_insights(
+                        str(item.get("id") or ""), config["access_token"],
+                    )
+                    if insights_available else {}
+                )
                 records.append({"source_video_id": item.get("id"), "title": item.get("caption") or "Untitled post",
                                 "content_type": str(item.get("media_type") or "post").lower(),
                                 "published_at": timestamp, "views": insights.get("views"),
-                                "reach": insights.get("reach"), "likes": item.get("like_count"),
+                                "reach": insights.get("reach"), "shares": insights.get("shares"),
+                                "likes": item.get("like_count"),
                                 "comments": item.get("comments_count")})
             url = (payload.get("paging") or {}).get("next")
+        if url:
+            self._append_sync_warning(
+                "Instagram returned more than 1,000 recent media items; this sync was capped to protect API limits."
+            )
         return records
+
+    def _instagram_media_insights(self, media_id: str, access_token: str) -> dict[str, Any]:
+        metrics = ("views", "reach", "total_interactions", "saved", "shares")
+
+        def request(names: tuple[str, ...]) -> dict[str, Any]:
+            payload = self._json_request(Request(
+                f"https://graph.instagram.com/{media_id}/insights?" + urlencode({
+                    "metric": ",".join(names), "access_token": access_token,
+                })
+            ))
+            result: dict[str, Any] = {}
+            for metric in payload.get("data", []):
+                values = metric.get("values") or []
+                total = metric.get("total_value") or {}
+                result[str(metric.get("name") or "")] = (
+                    values[0].get("value") if values else total.get("value", metric.get("value"))
+                )
+            return result
+
+        try:
+            return request(metrics)
+        except Exception as combined_error:
+            if self._is_auth_error(combined_error):
+                raise
+            result: dict[str, Any] = {}
+            failures = []
+            for metric in metrics:
+                try:
+                    result.update(request((metric,)))
+                except Exception as metric_error:
+                    if self._is_auth_error(metric_error):
+                        raise
+                    failures.append(metric)
+            if failures:
+                self._append_sync_warning(
+                    "Some Instagram insights were unavailable for this account or media type: "
+                    + ", ".join(failures)
+                )
+            return result
 
     def _fetch_tiktok(self, cursor: str | None):
         config = self.configuration("tiktok")
         url = "https://open.tiktokapis.com/v2/video/list/?fields=id,title,video_description,duration,create_time,view_count,like_count,comment_count,share_count"
         body = {"max_count": 20}
         records = []
-        while True:
+        page_count = 0
+        while page_count < 10:
+            page_count += 1
             payload = self._json_request(Request(
                 url, data=json.dumps(body).encode("utf-8"), method="POST",
                 headers={"Authorization": f"Bearer {config['access_token']}", "Content-Type": "application/json"},
             ))
             data = payload.get("data") or {}
             for item in data.get("videos", []):
-                published = datetime.fromtimestamp(int(item.get("create_time") or 0)).isoformat()
-                if cursor and published <= cursor:
-                    continue
+                published = datetime.fromtimestamp(
+                    int(item.get("create_time") or 0), UTC,
+                ).isoformat()
                 records.append({"source_video_id": item.get("id"),
                                 "title": item.get("title") or item.get("video_description") or "Untitled video",
                                 "content_type": "short", "published_at": published,
@@ -1068,7 +1346,15 @@ class SocialPlatformService:
             if not data.get("has_more"):
                 break
             body["cursor"] = data.get("cursor")
+        else:
+            self._append_sync_warning(
+                "TikTok returned more than 200 recent videos; this sync was capped to protect API limits."
+            )
         return records
+
+    def _append_sync_warning(self, warning: str) -> None:
+        if warning not in self._last_sync_warnings:
+            self._last_sync_warnings.append(warning)
 
     def _record_sync(self, platform, status, cursor, seen, changed, error, now):
         self.db.execute("""INSERT INTO creator_title_sync_state(
@@ -1104,7 +1390,8 @@ class SocialPlatformService:
     def _json_request(request: Request) -> dict[str, Any]:
         try:
             with urlopen(request, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
+                body = response.read().decode("utf-8").strip()
+                return json.loads(body) if body else {}
         except HTTPError as exc:
             try:
                 payload = json.loads(exc.read().decode("utf-8"))
@@ -1114,7 +1401,9 @@ class SocialPlatformService:
             if isinstance(error, dict):
                 message = str(error.get("message") or exc.reason or "Provider request failed")
                 details = error.get("errors") or []
-                reason = str(details[0].get("reason") or "") if details else ""
+                reason = str(error.get("code") or "")
+                if not reason and details:
+                    reason = str(details[0].get("reason") or "")
             else:
                 message = str(error or exc.reason or "Provider request failed")
                 reason = ""
