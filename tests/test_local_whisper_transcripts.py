@@ -25,8 +25,10 @@ def service_without_init():
 def test_embedded_engine_is_preferred(monkeypatch):
     service = service_without_init()
     monkeypatch.setattr(
-        "creator_intelligence.services.local_whisper_transcripts.importlib.util.find_spec",
-        lambda name: object() if name == "faster_whisper" else None,
+        "creator_intelligence.services.local_whisper_transcripts.importlib.import_module",
+        lambda name: SimpleNamespace(WhisperModel=object)
+        if name == "faster_whisper"
+        else None,
     )
 
     status = service.engine_status()
@@ -34,6 +36,22 @@ def test_embedded_engine_is_preferred(monkeypatch):
     assert status.available is True
     assert status.engine == "embedded-faster-whisper"
     assert "GPU acceleration" in status.message
+
+
+def test_embedded_engine_falls_back_when_runtime_cannot_load(monkeypatch):
+    service = service_without_init()
+
+    def unavailable(_name):
+        raise OSError("missing packaged runtime")
+
+    monkeypatch.setattr(
+        "creator_intelligence.services.local_whisper_transcripts.importlib.import_module",
+        unavailable,
+    )
+
+    status = service.engine_status()
+
+    assert status.engine != "embedded-faster-whisper"
 
 
 def test_job_settings_accept_json_and_invalid_values():

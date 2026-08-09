@@ -36,6 +36,7 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
         self.clip_filter.currentTextChanged.connect(self._refresh_clip_candidates)
         clip_layout.addWidget(self.clip_filter)
         for label, handler in (
+            ("Discover clips", self.discover_clips),
             ("Analyze selected", self.analyze_selected_clips),
             ("View intelligence", self.view_clip_intelligence),
             ("Approve", lambda: self._review_selected_clips("Approved")),
@@ -63,7 +64,7 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.addWidget(self.clip_controls)
         page_layout.addWidget(self.clip_candidates_table)
-        self.tabs.addTab(page, "Clip candidates")
+        self.clip_candidates_tab_index = self.tabs.addTab(page, "Clip candidates")
         self._refresh_clip_candidates()
 
     def _segment_group(self):
@@ -130,7 +131,54 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
             f"Created and analyzed clip {clip_id}: {self._clock(start)}–{self._clock(end)}."
         )
         self._refresh_clip_candidates(selected_id=clip_id)
-        self.tabs.setCurrentIndex(self.tabs.count() - 1)
+        self.tabs.setCurrentIndex(self.clip_candidates_tab_index)
+
+    def discover_clips(self) -> None:
+        transcript_id = self.selected_transcript_id()
+        if transcript_id is None:
+            QMessageBox.information(
+                self, "Discover clips", "Select a transcript to scan."
+            )
+            return
+        min_score, ok = QInputDialog.getDouble(
+            self,
+            "Discover clips",
+            "Minimum candidate score (higher is stricter)",
+            55.0,
+            0.0,
+            100.0,
+            1,
+        )
+        if not ok:
+            return
+        max_candidates, ok = QInputDialog.getInt(
+            self,
+            "Discover clips",
+            "Maximum moments to place in review",
+            20,
+            1,
+            100,
+            1,
+        )
+        if not ok:
+            return
+        try:
+            result = self.service.discover_clip_candidates(
+                int(transcript_id),
+                min_score=min_score,
+                max_candidates=max_candidates,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Clip discovery failed", str(exc))
+            return
+        self.clip_filter.setCurrentText("Unreviewed")
+        self._refresh_clip_candidates()
+        self.tabs.setCurrentIndex(self.clip_candidates_tab_index)
+        self.action_status.setText(
+            f"Scanned {result['segments_scanned']} segment(s), staged "
+            f"{result['candidates_created']} clip(s), and removed "
+            f"{result['duplicates_removed']} overlap(s). Review clips before Production."
+        )
 
     def _selected_clip_ids(self) -> list[int]:
         model = self.clip_candidates_table.model()
@@ -266,7 +314,8 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
                     ),
                 )
                 visible = [
-                    "id", "time", "title", "viral_score", "hook_score",
+                    "id", "time", "title", "discovery_rank", "creator_dna_score",
+                    "viral_score", "hook_score",
                     "humor_score", "surprise_score", "emotion_score", "quote_score",
                     "suggested_title", "review_status", "sent_to_production",
                     "production_status", "reason",

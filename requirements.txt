@@ -9,3 +9,4 @@ reportlab>=4.0
 keyring>=25.0
 google-api-python-client>=2.140
 google-auth-oauthlib>=1.2
+faster-whisper>=1.1

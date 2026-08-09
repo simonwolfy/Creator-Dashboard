@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Iterable
 from datetime import datetime
 
 CLIP_REVIEW_STATUSES = ("Unreviewed", "Approved", "Rejected", "Needs work")
+TRANSCRIPT_DISCOVERY_SOURCE = "automatic-transcript-discovery-v1"
 
 
 class TranscriptProductionMixin:
@@ -47,6 +49,26 @@ class TranscriptProductionMixin:
             """CREATE INDEX IF NOT EXISTS idx_clip_jobs_status
                ON production_clip_jobs(status,priority,updated_at)"""
         )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS transcript_discovery_runs(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transcript_id INTEGER NOT NULL,
+                algorithm_version TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Running',
+                segments_scanned INTEGER NOT NULL DEFAULT 0,
+                windows_considered INTEGER NOT NULL DEFAULT 0,
+                candidates_created INTEGER NOT NULL DEFAULT 0,
+                duplicates_removed INTEGER NOT NULL DEFAULT 0,
+                settings_json TEXT,
+                error_message TEXT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT
+            )"""
+        )
+        self.db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_transcript_discovery_runs
+               ON transcript_discovery_runs(transcript_id,started_at)"""
+        )
         self._ensure_clip_intelligence_columns()
 
     def _ensure_clip_intelligence_columns(self) -> None:
@@ -70,6 +92,9 @@ class TranscriptProductionMixin:
             "suggested_hashtags_json": "TEXT",
             "intelligence_version": "TEXT",
             "analyzed_at": "TEXT",
+            "discovery_run_id": "INTEGER",
+            "discovery_rank": "REAL",
+            "creator_dna_score": "REAL",
         }
         for name, sql_type in columns.items():
             if name not in existing:
@@ -84,6 +109,7 @@ class TranscriptProductionMixin:
                         c.quote_score,c.viral_score,c.suggested_start_seconds,
                         c.suggested_end_seconds,c.suggested_title,c.suggested_caption,
                         c.suggested_hashtags_json,c.intelligence_version,c.analyzed_at,
+                        c.discovery_run_id,c.discovery_rank,c.creator_dna_score,
                         CASE WHEN j.id IS NULL THEN 0 ELSE 1 END AS sent_to_production,
                         j.id AS production_job_id,j.status AS production_status
                  FROM transcript_clip_candidates c
@@ -93,8 +119,270 @@ class TranscriptProductionMixin:
         if review_status and review_status != "All":
             sql += " AND c.review_status=?"
             params.append(review_status)
-        sql += " ORDER BY COALESCE(c.viral_score,c.score) DESC,c.start_seconds,c.id"
+        sql += " ORDER BY COALESCE(c.discovery_rank,c.viral_score,c.score) DESC,c.start_seconds,c.id"
         return self.db.frame(sql, params)
+
+    def discover_clip_candidates(
+        self,
+        transcript_id: int,
+        *,
+        min_score: float = 55.0,
+        max_candidates: int = 20,
+        min_seconds: float = 8.0,
+        max_seconds: float = 60.0,
+        overlap_threshold: float = 0.55,
+        replace_unreviewed: bool = True,
+    ) -> dict:
+        """Scan a complete transcript and stage ranked moments for creator review."""
+        transcript_id = int(transcript_id)
+        min_score = float(min_score)
+        max_candidates = int(max_candidates)
+        min_seconds = float(min_seconds)
+        max_seconds = float(max_seconds)
+        overlap_threshold = float(overlap_threshold)
+        if not 0 <= min_score <= 100:
+            raise ValueError("Minimum score must be between 0 and 100.")
+        if max_candidates < 1:
+            raise ValueError("Maximum candidates must be at least 1.")
+        if min_seconds <= 0 or max_seconds < min_seconds:
+            raise ValueError("Clip duration limits are invalid.")
+        if not 0 < overlap_threshold <= 1:
+            raise ValueError("Overlap threshold must be greater than 0 and at most 1.")
+
+        # Resolve the transcript up front so an invalid id does not create a run row.
+        self.transcript(transcript_id)
+        settings = {
+            "min_score": min_score,
+            "max_candidates": max_candidates,
+            "min_seconds": min_seconds,
+            "max_seconds": max_seconds,
+            "overlap_threshold": overlap_threshold,
+            "replace_unreviewed": bool(replace_unreviewed),
+        }
+        started_at = datetime.now().isoformat()
+        run_id = int(self.db.execute(
+            """INSERT INTO transcript_discovery_runs(
+                transcript_id,algorithm_version,status,settings_json,started_at
+            ) VALUES(?,?,'Running',?,?)""",
+            (
+                transcript_id,
+                TRANSCRIPT_DISCOVERY_SOURCE,
+                json.dumps(settings, sort_keys=True),
+                started_at,
+            ),
+        ))
+        try:
+            segments = self.segments(transcript_id)
+            ordered = self._discovery_segments(segments)
+            if replace_unreviewed:
+                self.db.execute(
+                    """DELETE FROM transcript_clip_candidates
+                       WHERE transcript_id=? AND source=?
+                         AND review_status='Unreviewed'
+                         AND NOT EXISTS(
+                             SELECT 1 FROM production_clip_jobs j
+                             WHERE j.clip_candidate_id=transcript_clip_candidates.id
+                         )""",
+                    (transcript_id, TRANSCRIPT_DISCOVERY_SOURCE),
+                )
+            protected = self._protected_clip_ranges(transcript_id)
+
+            windows = self._candidate_windows(
+                ordered,
+                min_score=min_score,
+                min_seconds=min_seconds,
+                max_seconds=max_seconds,
+            )
+            considered = len(windows)
+            selected: list[dict] = []
+            duplicates_removed = 0
+            for window in sorted(
+                windows,
+                key=lambda item: (-item["viral_score"], item["start_seconds"]),
+            ):
+                interval = (window["start_seconds"], window["end_seconds"])
+                conflicts = protected + [
+                    (item["start_seconds"], item["end_seconds"])
+                    for item in selected
+                ]
+                if any(
+                    self._interval_overlap_ratio(interval, existing) >= overlap_threshold
+                    for existing in conflicts
+                ):
+                    duplicates_removed += 1
+                    continue
+                selected.append(window)
+                if len(selected) >= max_candidates:
+                    break
+
+            created_ids: list[int] = []
+            for window in selected:
+                clip_id = self.add_clip_candidate(
+                    transcript_id,
+                    window["start_seconds"],
+                    window["end_seconds"],
+                    window["suggested_title"],
+                    "Automatically discovered from the complete transcript; creator review required.",
+                    window["viral_score"],
+                    TRANSCRIPT_DISCOVERY_SOURCE,
+                )
+                analysis = self.analyze_clip_candidate(clip_id)
+                dna_score = self._creator_dna_candidate_score(analysis)
+                discovery_rank = self._discovery_rank(analysis, dna_score)
+                self.db.execute(
+                    """UPDATE transcript_clip_candidates
+                       SET discovery_run_id=?,discovery_rank=?,creator_dna_score=?,updated_at=?
+                       WHERE id=?""",
+                    (
+                        run_id,
+                        discovery_rank,
+                        dna_score,
+                        datetime.now().isoformat(),
+                        clip_id,
+                    ),
+                )
+                created_ids.append(clip_id)
+
+            completed_at = datetime.now().isoformat()
+            self.db.execute(
+                """UPDATE transcript_discovery_runs SET
+                   status='Completed',segments_scanned=?,windows_considered=?,
+                   candidates_created=?,duplicates_removed=?,completed_at=?
+                   WHERE id=?""",
+                (
+                    len(ordered),
+                    considered,
+                    len(created_ids),
+                    duplicates_removed,
+                    completed_at,
+                    run_id,
+                ),
+            )
+            return {
+                "run_id": run_id,
+                "transcript_id": transcript_id,
+                "segments_scanned": len(ordered),
+                "windows_considered": considered,
+                "candidates_created": len(created_ids),
+                "duplicates_removed": duplicates_removed,
+                "candidate_ids": created_ids,
+                "status": "Completed",
+            }
+        except Exception as exc:
+            self.db.execute(
+                """UPDATE transcript_discovery_runs
+                   SET status='Failed',error_message=?,completed_at=? WHERE id=?""",
+                (str(exc), datetime.now().isoformat(), run_id),
+            )
+            raise
+
+    @staticmethod
+    def _discovery_segments(frame) -> list[dict]:
+        if frame.empty:
+            return []
+        rows: list[dict] = []
+        for _, raw in frame.sort_values(["start_seconds", "end_seconds", "id"]).iterrows():
+            text = re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()
+            try:
+                start = float(raw["start_seconds"])
+                end = float(raw["end_seconds"])
+            except (TypeError, ValueError):
+                continue
+            if not text or not math.isfinite(start) or not math.isfinite(end) or end <= start:
+                continue
+            rows.append({"start": max(0.0, start), "end": end, "text": text})
+        return rows
+
+    def _candidate_windows(
+        self,
+        segments: list[dict],
+        *,
+        min_score: float,
+        min_seconds: float,
+        max_seconds: float,
+    ) -> list[dict]:
+        windows: list[dict] = []
+        anchor_floor = max(30.0, min_score - 18.0)
+        for index, segment in enumerate(segments):
+            anchor = self._score_clip_text(
+                segment["text"], segment["start"], segment["end"]
+            )
+            if float(anchor["viral_score"]) < anchor_floor:
+                continue
+            target_start = max(0.0, segment["start"] - 8.0)
+            target_end = min(target_start + max_seconds, segment["end"] + 22.0)
+            left = index
+            while left > 0 and segments[left - 1]["end"] > target_start:
+                left -= 1
+            right = index
+            while right + 1 < len(segments) and segments[right + 1]["start"] < target_end:
+                right += 1
+            while right + 1 < len(segments) and segments[right]["end"] - segments[left]["start"] < min_seconds:
+                if segments[right + 1]["end"] - segments[left]["start"] > max_seconds:
+                    break
+                right += 1
+            start = segments[left]["start"]
+            end = min(segments[right]["end"], start + max_seconds)
+            if end - start < min_seconds:
+                continue
+            text = " ".join(
+                item["text"] for item in segments[left:right + 1]
+                if item["start"] < end and item["end"] > start
+            )
+            analysis = self._score_clip_text(text, start, end)
+            if float(analysis["viral_score"]) < min_score:
+                continue
+            windows.append({
+                "start_seconds": round(start, 2),
+                "end_seconds": round(end, 2),
+                "text": text,
+                **analysis,
+            })
+        return windows
+
+    def _protected_clip_ranges(self, transcript_id: int) -> list[tuple[float, float]]:
+        frame = self.db.frame(
+            """SELECT c.start_seconds,c.end_seconds
+               FROM transcript_clip_candidates c
+               WHERE c.transcript_id=?""",
+            (int(transcript_id),),
+        )
+        return [
+            (float(row["start_seconds"]), float(row["end_seconds"]))
+            for _, row in frame.iterrows()
+        ]
+
+    @staticmethod
+    def _interval_overlap_ratio(
+        first: tuple[float, float], second: tuple[float, float]
+    ) -> float:
+        overlap = max(0.0, min(first[1], second[1]) - max(first[0], second[0]))
+        shorter = min(first[1] - first[0], second[1] - second[0])
+        return overlap / shorter if shorter > 0 else 0.0
+
+    @staticmethod
+    def _creator_dna_candidate_score(analysis: dict) -> float:
+        context = analysis.get("packaging_context") or {}
+        ranking = context.get("title_ranking") or []
+        selected_title = str(analysis.get("suggested_title") or "")
+        selected = next(
+            (item for item in ranking if str(item.get("title") or "") == selected_title),
+            ranking[0] if ranking else {},
+        )
+        style = float(selected.get("style_score") or 0.0)
+        duplicate_similarity = float(selected.get("duplicate_similarity") or 0.0)
+        return round(max(0.0, min(100.0, 50.0 + style - duplicate_similarity * 20.0)), 1)
+
+    @staticmethod
+    def _discovery_rank(analysis: dict, dna_score: float) -> float:
+        rank = (
+            float(analysis.get("viral_score") or 0.0) * 0.55
+            + float(analysis.get("replayability_score") or 0.0) * 0.10
+            + float(analysis.get("shareability_score") or 0.0) * 0.10
+            + float(analysis.get("retention_estimate") or 0.0) * 0.05
+            + float(dna_score) * 0.20
+        )
+        return round(max(0.0, min(100.0, rank)), 1)
 
     def analyze_clip_candidates(self, clip_ids: Iterable[int]) -> list[dict]:
         results = []

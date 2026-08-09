@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 import importlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -174,7 +173,14 @@ class LocalWhisperTranscriptService(
         ))
 
     def engine_status(self):
-        if importlib.util.find_spec("faster_whisper") is not None:
+        try:
+            faster_whisper = importlib.import_module("faster_whisper")
+            embedded_available = callable(
+                getattr(faster_whisper, "WhisperModel", None)
+            )
+        except (ImportError, OSError):
+            embedded_available = False
+        if embedded_available:
             return TranscriptEngineStatus(
                 "embedded-faster-whisper",
                 True,

@@ -100,6 +100,15 @@ class HierarchicalNavigation(QTreeWidget):
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
+        self._dragged_item = None
+
+    def startDrag(self, supported_actions) -> None:
+        """Keep a stable source item for the whole native drag operation."""
+        self._dragged_item = self.currentItem()
+        try:
+            super().startDrag(supported_actions)
+        finally:
+            self._dragged_item = None
 
     def drop_destination(self, item: QTreeWidgetItem, target, position):
         above = QAbstractItemView.DropIndicatorPosition.AboveItem
@@ -132,8 +141,8 @@ class HierarchicalNavigation(QTreeWidget):
         return None
 
     def dropEvent(self, event) -> None:
-        item = self.currentItem()
-        if item is None:
+        item = self._dragged_item
+        if item is None or item.treeWidget() is not self:
             event.ignore()
             return
 
@@ -169,6 +178,8 @@ class HierarchicalNavigation(QTreeWidget):
         if original_index < 0:
             return False
 
+        original_siblings = self._siblings(original_parent)
+
         moved_item = (
             self.takeTopLevelItem(original_index)
             if original_parent is None
@@ -191,21 +202,36 @@ class HierarchicalNavigation(QTreeWidget):
                 )
                 destination_parent.insertChild(destination_index, moved_item)
         except Exception:
-            if moved_item.treeWidget() is None:
-                if original_parent is None:
-                    self.insertTopLevelItem(original_index, moved_item)
-                else:
-                    original_parent.insertChild(original_index, moved_item)
+            self._restore_siblings(original_parent, original_siblings)
             return False
 
-        if moved_item.treeWidget() is not self:
-            if original_parent is None:
-                self.insertTopLevelItem(original_index, moved_item)
-            else:
-                original_parent.insertChild(original_index, moved_item)
+        current_siblings = self._siblings(original_parent)
+        if (
+            moved_item.treeWidget() is not self
+            or len(current_siblings) != len(original_siblings)
+            or {id(entry) for entry in current_siblings}
+            != {id(entry) for entry in original_siblings}
+        ):
+            self._restore_siblings(original_parent, original_siblings)
             return False
         self.setCurrentItem(moved_item)
         return True
+
+    def _siblings(self, parent) -> list[QTreeWidgetItem]:
+        if parent is None:
+            return [self.topLevelItem(index) for index in range(self.topLevelItemCount())]
+        return [parent.child(index) for index in range(parent.childCount())]
+
+    def _restore_siblings(self, parent, siblings: list[QTreeWidgetItem]) -> None:
+        """Restore the complete level after any failed or incomplete tree move."""
+        if parent is None:
+            while self.topLevelItemCount():
+                self.takeTopLevelItem(0)
+            self.addTopLevelItems(siblings)
+            return
+        while parent.childCount():
+            parent.takeChild(0)
+        parent.addChildren(siblings)
 
 
 class ModuleFailurePage(QWidget):

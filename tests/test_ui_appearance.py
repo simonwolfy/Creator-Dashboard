@@ -329,6 +329,29 @@ def test_navigation_reordering_never_loses_tabs_or_folders():
     app.processEvents()
 
 
+def test_navigation_reordering_preserves_nested_subfolders():
+    app = QApplication.instance() or QApplication([])
+    navigation = HierarchicalNavigation()
+    group = QTreeWidgetItem(["Group"])
+    first_subfolder = QTreeWidgetItem(["First subfolder"])
+    second_subfolder = QTreeWidgetItem(["Second subfolder"])
+    nested_tab = QTreeWidgetItem(["Nested tab"])
+    first_subfolder.addChild(nested_tab)
+    group.addChildren([first_subfolder, second_subfolder])
+    navigation.addTopLevelItem(group)
+
+    for _ in range(25):
+        assert navigation.move_item(first_subfolder, group, 2)
+        assert navigation.move_item(first_subfolder, group, 0)
+
+    assert group.childCount() == 2
+    assert first_subfolder.childCount() == 1
+    assert first_subfolder.child(0) is nested_tab
+    assert nested_tab.treeWidget() is navigation
+    navigation.close()
+    app.processEvents()
+
+
 def test_theme_switch_can_repolish_goals_page():
     app = QApplication.instance() or QApplication([])
 
