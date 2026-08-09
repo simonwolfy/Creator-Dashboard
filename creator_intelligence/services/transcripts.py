@@ -1,10 +1,12 @@
 from __future__ import annotations
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 import csv
 import json
+import math
 import os
 import re
 import shutil
@@ -17,6 +19,52 @@ TRANSCRIPT_JOB_TYPES = (
     "Import transcript",
     "Build chapters",
     "Build search index",
+)
+
+_CHAPTER_STOP_WORDS = frozenset(
+    """
+    a about after again all also am an and any are as at back be because been
+    before being beneath beside between but by can could did didnt do does
+    doesnt doing dont down during for
+    from get getting go going gonna got had has have he her here him his how i
+    id ill im into is it its ive just kinda know let lets like literally maybe
+    inside me more my near next no not now of oh okay on one or our out outside
+    over really right under underneath
+    said say see she should so some sort still stuff than that thats the their
+    them then there these they thing things think this those through to too uh
+    um up us very want was way we well were what when where which while who why
+    will with within without would yeah yep yes you your youre
+    """.split()
+)
+_CHAPTER_FILLER_WORDS = frozenset(
+    "hey hello hi hmm huh bam bruh bro dude guys meh nope ooh uh um whoa wow".split()
+)
+_CHAPTER_GENERIC_CONTENT = frozenset(
+    "bad better chapter good guy need said stream sure thing time wait".split()
+)
+_CHAPTER_ACTION_ROOTS = {
+    "attack": "Fighting", "attacked": "Fighting",
+    "build": "Building", "built": "Building",
+    "discover": "Discovering", "discovered": "Discovering",
+    "escape": "Escaping", "escaped": "Escaping",
+    "fight": "Fighting", "fighting": "Fighting",
+    "find": "Finding", "found": "Finding",
+    "loot": "Looting", "looted": "Looting", "looting": "Looting",
+    "plan": "Planning", "planned": "Planning", "planning": "Planning",
+    "run": "Escaping", "running": "Escaping",
+    "survive": "Surviving", "survived": "Surviving",
+}
+_CHAPTER_ACTION_WORDS = frozenset(
+    set(_CHAPTER_ACTION_ROOTS)
+    | {
+        "die", "died", "kill", "killed", "lose", "lost", "save", "saved",
+        "shoot", "shot", "win", "won",
+    }
+)
+_CHAPTER_TRANSITION_PATTERN = re.compile(
+    r"\b(after that|back to|finally|later on|meanwhile|moving on|next up|"
+    r"now (?:we|i) (?:need|want|will)|switch(?:ed|ing)? to)\b",
+    re.IGNORECASE,
 )
 
 @dataclass(frozen=True)
@@ -498,106 +546,556 @@ class TranscriptService:
         return results
 
     def build_chapters(
-        self, transcript_id, target_minutes=20,
-        minimum_minutes=5, maximum_minutes=45
+        self, transcript_id, target_minutes=10,
+        minimum_minutes=3, maximum_minutes=30
     ):
         segments = self.segments(transcript_id)
         if segments.empty:
             return self.chapters(transcript_id)
-        self.db.execute(
-            "DELETE FROM transcript_chapters WHERE transcript_id=?",
-            (int(transcript_id),)
+        target = max(60.0, float(target_minutes) * 60.0)
+        minimum = max(30.0, min(float(minimum_minutes) * 60.0, target))
+        maximum = max(target, float(maximum_minutes) * 60.0)
+        manual = self.db.frame(
+            """SELECT * FROM transcript_chapters
+               WHERE transcript_id=? AND source='manual'
+               ORDER BY start_seconds,id""",
+            (int(transcript_id),),
         )
-
-        target = max(60,int(target_minutes)*60)
-        minimum = max(30,int(minimum_minutes)*60)
-        maximum = max(target,int(maximum_minutes)*60)
-        groups = []
-        current = []
-        group_start = None
-
-        for _,row in segments.iterrows():
-            if group_start is None:
-                group_start = float(row["start_seconds"])
-            current.append(row.to_dict())
-            duration = float(row["end_seconds"]) - group_start
-            text = str(row["text"]).strip()
-            boundary_hint = bool(
-                re.search(
-                    r"\b(now|next|after that|we switched|moving on|finally|later|meanwhile)\b",
-                    text.lower()
-                )
+        manual_ranges = [
+            (float(row["start_seconds"]), float(row["end_seconds"]))
+            for _, row in manual.iterrows()
+        ]
+        groups = self._semantic_chapter_groups(
+            segments,
+            manual_ranges,
+            target_seconds=target,
+            minimum_seconds=minimum,
+            maximum_seconds=maximum,
+        )
+        documents = [
+            Counter(self._chapter_terms(self._chapter_group_text(group)))
+            for group in groups
+        ]
+        document_frequency = Counter(
+            term for document in documents for term in document
+        )
+        metadata = [
+            self._semantic_chapter_metadata(
+                group,
+                document_frequency=document_frequency,
+                document_count=max(1, len(documents)),
+                fallback_index=index,
             )
-            if duration >= maximum or (duration >= target and boundary_hint):
-                groups.append(current)
-                current = []
-                group_start = None
-        if current:
-            if groups and (
-                float(current[-1]["end_seconds"]) -
-                float(current[0]["start_seconds"]) < minimum
-            ):
-                groups[-1].extend(current)
-            else:
-                groups.append(current)
-
-        now = datetime.now().isoformat()
-        for index,group in enumerate(groups):
-            text = " ".join(str(item["text"]) for item in group)
-            keywords = self._keywords(text)
-            title = self._chapter_title(text,keywords,index)
-            summary = self._summary(text)
-            self.db.execute(
-                """INSERT INTO transcript_chapters(
-                    transcript_id,chapter_index,start_seconds,end_seconds,
-                    title,summary,keywords_json,confidence,source,
-                    created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    int(transcript_id),index,
-                    float(group[0]["start_seconds"]),
-                    float(group[-1]["end_seconds"]),
-                    title,summary,json.dumps(keywords),
-                    0.62,"heuristic",now,now
-                )
-            )
-        return self.chapters(transcript_id)
-
-    def _keywords(self, text, limit=6):
-        words = re.findall(r"\b[a-zA-Z][a-zA-Z'-]{2,}\b",text.lower())
-        stop = {
-            "the","and","that","this","with","from","have","just","were","they",
-            "your","youre","about","there","what","when","then","into","really",
-            "going","because","would","could","should","some","more","like",
-            "okay","yeah","well","right","here","where","while","been","also"
-        }
-        counts = {}
-        for word in words:
-            if word in stop:
-                continue
-            counts[word] = counts.get(word,0)+1
-        return [
-            word for word,_ in sorted(
-                counts.items(),key=lambda item:(-item[1],item[0])
-            )[:limit]
+            for index, group in enumerate(groups)
         ]
 
-    def _chapter_title(self, text, keywords, index):
-        sentences = re.split(r"(?<=[.!?])\s+",text.strip())
-        first = sentences[0].strip() if sentences else ""
-        first = re.sub(r"\s+"," ",first)
-        if 5 <= len(first) <= 80:
-            return first.rstrip(".!?")
-        if keywords:
-            return " / ".join(word.title() for word in keywords[:3])
-        return f"Chapter {index+1}"
+        now = datetime.now().isoformat()
+        try:
+            self.db.execute(
+                """UPDATE transcript_chapters SET chapter_index=(-100000-id)
+                   WHERE transcript_id=? AND source='manual'""",
+                (int(transcript_id),),
+            )
+            self.db.execute(
+                """DELETE FROM transcript_chapters
+                   WHERE transcript_id=? AND COALESCE(source,'')<>'manual'""",
+                (int(transcript_id),),
+            )
+            for index, (group, details) in enumerate(zip(groups, metadata)):
+                self.db.execute(
+                    """INSERT INTO transcript_chapters(
+                        transcript_id,chapter_index,start_seconds,end_seconds,
+                        title,summary,keywords_json,confidence,source,
+                        created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        int(transcript_id), 100000 + index,
+                        float(group[0]["start_seconds"]),
+                        float(group[-1]["end_seconds"]),
+                        details["title"], details["summary"],
+                        json.dumps(details["keywords"]), details["confidence"],
+                        "semantic-v2", now, now,
+                    ),
+                )
+        finally:
+            self._reindex_chapters_safely(int(transcript_id))
+        return self.chapters(transcript_id)
 
-    def _summary(self, text, max_chars=280):
-        clean = re.sub(r"\s+"," ",text).strip()
-        if len(clean) <= max_chars:
-            return clean
-        cut = clean[:max_chars].rsplit(" ",1)[0]
-        return cut + "…"
+    def _semantic_chapter_groups(
+        self, segments, manual_ranges, *, target_seconds,
+        minimum_seconds, maximum_seconds
+    ):
+        rows = [
+            row.to_dict()
+            for _, row in segments.sort_values(
+                ["start_seconds", "end_seconds", "segment_index"]
+            ).iterrows()
+        ]
+        prepared = [
+            {**row, "_terms": self._chapter_terms(str(row.get("text") or ""))}
+            for row in rows
+        ]
+        zoned_groups = []
+        current = []
+        zone = 0
+
+        def flush():
+            nonlocal current
+            if current:
+                zoned_groups.append((zone, current))
+                current = []
+
+        for index, row in enumerate(prepared):
+            start = float(row["start_seconds"])
+            end = float(row["end_seconds"])
+            if any(
+                start < manual_end and end > manual_start
+                for manual_start, manual_end in manual_ranges
+            ):
+                flush()
+                zone += 1
+                continue
+            if current and self._is_semantic_chapter_boundary(
+                current,
+                row,
+                prepared[index:index + 3],
+                target_seconds=target_seconds,
+                minimum_seconds=minimum_seconds,
+                maximum_seconds=maximum_seconds,
+            ):
+                flush()
+            current.append(row)
+        flush()
+
+        merged = []
+        for current_zone, group in zoned_groups:
+            duration = (
+                float(group[-1]["end_seconds"])
+                - float(group[0]["start_seconds"])
+            )
+            if (
+                merged
+                and merged[-1][0] == current_zone
+                and duration < minimum_seconds
+            ):
+                merged[-1][1].extend(group)
+            else:
+                merged.append((current_zone, group))
+        return [group for _, group in merged]
+
+    def _is_semantic_chapter_boundary(
+        self, current, incoming, incoming_context, *, target_seconds,
+        minimum_seconds, maximum_seconds
+    ):
+        start = float(current[0]["start_seconds"])
+        duration = float(current[-1]["end_seconds"]) - start
+        gap = max(
+            0.0,
+            float(incoming["start_seconds"])
+            - float(current[-1]["end_seconds"]),
+        )
+        if duration >= maximum_seconds:
+            return True
+        if duration < minimum_seconds:
+            return False
+        recent = Counter(
+            term for row in current[-6:] for term in row.get("_terms", [])
+        )
+        upcoming = Counter(
+            term for row in incoming_context for term in row.get("_terms", [])
+        )
+        similarity = self._counter_cosine(recent, upcoming)
+        enough_terms = sum(recent.values()) >= 6 and sum(upcoming.values()) >= 4
+        topic_shift = enough_terms and similarity < 0.16
+        transition = bool(
+            _CHAPTER_TRANSITION_PATTERN.search(str(incoming.get("text") or ""))
+        )
+        long_gap = gap >= max(20.0, min(90.0, target_seconds * 0.12))
+        return bool(
+            long_gap
+            or transition
+            or (
+                duration >= target_seconds * 0.70
+                and topic_shift
+                and gap >= 4.0
+            )
+            or (duration >= target_seconds and topic_shift)
+            or duration >= target_seconds * 1.25
+        )
+
+    @staticmethod
+    def _counter_cosine(first, second):
+        if not first or not second:
+            return 0.0
+        shared = set(first) & set(second)
+        numerator = sum(first[token] * second[token] for token in shared)
+        left = math.sqrt(sum(value * value for value in first.values()))
+        right = math.sqrt(sum(value * value for value in second.values()))
+        return numerator / (left * right) if left and right else 0.0
+
+    @staticmethod
+    def _chapter_terms(text):
+        terms = []
+        previous = None
+        for raw in re.findall(
+            r"\b[A-Za-z][A-Za-z'-]{2,}\b", str(text).lower()
+        ):
+            token = raw.replace("'", "")
+            if token == previous:
+                continue
+            previous = token
+            if token in _CHAPTER_STOP_WORDS or token in _CHAPTER_FILLER_WORDS:
+                continue
+            terms.append(token)
+        return terms
+
+    @staticmethod
+    def _chapter_group_text(group):
+        return " ".join(
+            str(row.get("text") or "").strip() for row in group
+        ).strip()
+
+    def _semantic_chapter_metadata(
+        self, group, *, document_frequency, document_count, fallback_index
+    ):
+        counts = Counter(
+            term for row in group for term in row.get("_terms", [])
+        )
+        term_scores = {}
+        for term, count in counts.items():
+            inverse_frequency = math.log(
+                (1.0 + document_count)
+                / (1.0 + document_frequency.get(term, 0))
+            ) + 1.0
+            repetition_safe_tf = 1.0 + math.log(min(3, count))
+            action_penalty = 0.78 if term in _CHAPTER_ACTION_WORDS else 1.0
+            term_scores[term] = (
+                repetition_safe_tf * inverse_frequency * action_penalty
+            )
+        ranked_terms = sorted(
+            term_scores,
+            key=lambda term: (
+                term in _CHAPTER_GENERIC_CONTENT,
+                -term_scores[term],
+                term,
+            ),
+        )
+        keywords = [
+            term for term in ranked_terms
+            if term not in _CHAPTER_GENERIC_CONTENT
+        ][:8]
+        representatives = self._representative_chapter_segments(
+            group, term_scores
+        )
+        title = self._semantic_chapter_title(
+            group, representatives, keywords, term_scores, fallback_index
+        )
+        summary = self._representative_chapter_summary(representatives, group)
+        confidences = []
+        for row in group:
+            try:
+                value = float(row.get("confidence"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                confidences.append(max(0.0, min(1.0, value)))
+        transcript_confidence = (
+            sum(confidences) / len(confidences) if confidences else 0.5
+        )
+        semantic_support = min(
+            1.0,
+            sum(term_scores.get(term, 0.0) for term in keywords[:3]) / 8.0,
+        )
+        confidence = round(
+            min(
+                0.95,
+                transcript_confidence * 0.65
+                + semantic_support * 0.20
+                + 0.15,
+            ),
+            2,
+        )
+        return {
+            "title": title,
+            "summary": summary,
+            "keywords": keywords[:6],
+            "confidence": confidence,
+        }
+
+    def _representative_chapter_segments(self, group, term_scores):
+        scored = []
+        for index, row in enumerate(group):
+            text = self._clean_spoken_text(str(row.get("text") or ""))
+            terms = list(dict.fromkeys(row.get("_terms", [])))
+            specific_terms = [
+                term for term in terms
+                if term not in _CHAPTER_GENERIC_CONTENT
+                and term not in _CHAPTER_ACTION_WORDS
+            ]
+            if not text or not specific_terms:
+                continue
+            score = sum(
+                term_scores.get(term, 0.0) for term in terms
+            ) / math.sqrt(len(terms))
+            if any(term in _CHAPTER_ACTION_WORDS for term in terms):
+                score += 0.8
+            if "?" in text or "!" in text:
+                score += 0.25
+            scored.append((score, index, text, row))
+        selected = []
+        seen = set()
+        for _, index, text, row in sorted(
+            scored, key=lambda item: (-item[0], item[1])
+        ):
+            signature = " ".join(self._chapter_terms(text)[:8])
+            if not signature or signature in seen:
+                continue
+            seen.add(signature)
+            selected.append((index, text, row))
+            if len(selected) >= 3:
+                break
+        return sorted(selected, key=lambda item: item[0])
+
+    def _semantic_chapter_title(
+        self, group, representatives, keywords, term_scores, fallback_index
+    ):
+        ranked_representatives = sorted(
+            representatives,
+            key=lambda item: -sum(
+                term_scores.get(term, 0.0)
+                for term in set(item[2].get("_terms", []))
+            ),
+        )
+        for _, text, _ in ranked_representatives:
+            candidate = self._event_chapter_title(text, term_scores)
+            if candidate and not self._is_generic_chapter_title(candidate):
+                return candidate
+        phrase = self._best_chapter_phrase(group, term_scores)
+        if phrase and not self._is_generic_chapter_title(phrase):
+            return phrase
+        specific = [
+            term for term in keywords if term not in _CHAPTER_ACTION_WORDS
+        ]
+        if specific:
+            candidate = " & ".join(term.title() for term in specific[:2])
+            if not self._is_generic_chapter_title(candidate):
+                return candidate
+        return f"Chapter {fallback_index + 1} — Needs Review"
+
+    def _event_chapter_title(self, text, term_scores):
+        clean = self._clean_spoken_text(text)
+        if re.search(
+            r"\bout (?:of )?(?:ammo|ammunition)\b", clean, re.IGNORECASE
+        ):
+            noun = (
+                "Ammunition"
+                if re.search(r"\bammunition\b", clean, re.IGNORECASE)
+                else "Ammo"
+            )
+            return f"Running Out of {noun}"
+        raw_words = re.findall(r"\b[A-Za-z][A-Za-z'-]*\b", clean)
+        lowered = [word.lower().replace("'", "") for word in raw_words]
+        for action_index, action in enumerate(lowered):
+            label = _CHAPTER_ACTION_ROOTS.get(action)
+            if not label:
+                continue
+            nearby = []
+            for offset in range(
+                max(0, action_index - 4),
+                min(len(lowered), action_index + 9),
+            ):
+                token = lowered[offset]
+                if (
+                    token in _CHAPTER_STOP_WORDS
+                    or token in _CHAPTER_FILLER_WORDS
+                    or token in _CHAPTER_GENERIC_CONTENT
+                    or token in _CHAPTER_ACTION_WORDS
+                    or len(token) < 3
+                ):
+                    continue
+                nearby.append(
+                    (term_scores.get(token, 0.0), offset, raw_words[offset])
+                )
+            if not nearby:
+                continue
+            ordered_nearby = sorted(nearby, key=lambda item: item[1])
+            before_action = [
+                item for item in ordered_nearby if item[1] < action_index
+            ]
+            after_action = [
+                item for item in ordered_nearby if item[1] > action_index
+            ]
+            if action in {"attack", "attacked"} and before_action:
+                attacker = before_action[-1][2].title()
+                target_words = [item[2].title() for item in after_action[:2]]
+                if target_words:
+                    return f"{attacker} Attack on {' '.join(target_words)}"
+                return f"{attacker} Attack"
+            if action in {
+                "build", "built", "discover", "discovered", "find", "found",
+                "loot", "looted", "looting", "plan", "planned", "planning",
+            } and after_action:
+                subject_words = [item[2].title() for item in after_action[:2]]
+                subject = " ".join(subject_words)
+                if label == "Finding" and not subject_words[-1].lower().endswith("s"):
+                    subject = f"the {subject}"
+                return f"{label} {subject}"
+            nearby.sort(
+                key=lambda item: (
+                    -item[0], abs(item[1] - action_index), item[1]
+                )
+            )
+            best_score = nearby[0][0]
+            objects = [(nearby[0][1], nearby[0][2])]
+            for score, offset, word in nearby[1:]:
+                if (
+                    score >= best_score * 0.88
+                    and word.lower() != objects[0][1].lower()
+                ):
+                    objects.append((offset, word))
+                    break
+            ordered_objects = sorted(objects)
+            if (
+                len(ordered_objects) == 2
+                and ordered_objects[1][0] == ordered_objects[0][0] + 1
+            ):
+                subject = " ".join(
+                    word.title() for _, word in ordered_objects
+                )
+            else:
+                subject = " and ".join(
+                    word.title() for _, word in ordered_objects
+                )
+            return f"{label} {subject}"
+        if ("?" in clean or "!" in clean) and 4 <= len(raw_words) <= 11:
+            quote = clean.strip(" .!?")
+            if not self._is_generic_chapter_title(quote):
+                return quote.title()
+        return None
+
+    def _best_chapter_phrase(self, group, term_scores):
+        phrases = Counter()
+        displays = {}
+        for row in group:
+            text = self._clean_spoken_text(str(row.get("text") or ""))
+            raw = re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", text)
+            content = [
+                (word.lower().replace("'", ""), word)
+                for word in raw
+                if word.lower().replace("'", "") not in _CHAPTER_STOP_WORDS
+                and word.lower().replace("'", "") not in _CHAPTER_FILLER_WORDS
+                and word.lower().replace("'", "") not in _CHAPTER_GENERIC_CONTENT
+                and word.lower().replace("'", "") not in _CHAPTER_ACTION_WORDS
+            ]
+            for offset in range(max(0, len(content) - 1)):
+                key = (content[offset][0], content[offset + 1][0])
+                if key[0] == key[1]:
+                    continue
+                phrases[key] += 1
+                displays.setdefault(
+                    key, (content[offset][1], content[offset + 1][1])
+                )
+        if not phrases:
+            return None
+        best = max(
+            phrases,
+            key=lambda phrase: (
+                sum(term_scores.get(term, 0.0) for term in phrase)
+                + math.log1p(min(3, phrases[phrase])),
+                phrase,
+            ),
+        )
+        return " ".join(word.title() for word in displays[best])
+
+    def _is_generic_chapter_title(self, title):
+        words = [
+            word.lower().replace("'", "")
+            for word in re.findall(r"[A-Za-z']+", title)
+        ]
+        if not words:
+            return True
+        content = [
+            word for word in words
+            if word not in _CHAPTER_STOP_WORDS
+            and word not in _CHAPTER_FILLER_WORDS
+        ]
+        if not content or all(
+            word in _CHAPTER_GENERIC_CONTENT for word in content
+        ):
+            return True
+        repeated_ratio = 1.0 - len(set(words)) / max(1, len(words))
+        if repeated_ratio >= 0.34:
+            return True
+        generic_phrases = {
+            "hey hey hey", "you guys", "its the", "im not sure",
+            "wait wait wait", "run run run", "said the stream", "not need",
+            "its not bad",
+        }
+        return " ".join(words) in generic_phrases
+
+    @staticmethod
+    def _clean_spoken_text(text):
+        clean = re.sub(r"\s+", " ", str(text)).strip()
+        clean = re.sub(
+            r"\b([A-Za-z][A-Za-z'-]*)\b(?:[\s,]+\1\b)+",
+            r"\1",
+            clean,
+            flags=re.IGNORECASE,
+        )
+        clean = re.sub(
+            r"^(?:(?:hey|hello|hi|hmm|huh|meh|oh|okay|uh|um|well|yeah|yep)"
+            r"\b[,.!?]?\s*)+",
+            "",
+            clean,
+            flags=re.IGNORECASE,
+        )
+        return clean.strip()
+
+    def _representative_chapter_summary(
+        self, representatives, group, max_chars=320
+    ):
+        texts = [text for _, text, _ in representatives]
+        if not texts:
+            texts = []
+            for row in group:
+                clean = self._clean_spoken_text(str(row.get("text") or ""))
+                specific = [
+                    term for term in self._chapter_terms(clean)
+                    if term not in _CHAPTER_GENERIC_CONTENT
+                    and term not in _CHAPTER_ACTION_WORDS
+                ]
+                if clean and specific:
+                    texts.append(clean)
+                if len(texts) >= 2:
+                    break
+        if not texts:
+            return "Insufficient semantic context; review this chapter manually."
+        summary = " ".join(
+            text if text.endswith((".", "!", "?")) else f"{text}."
+            for text in texts
+        )
+        summary = re.sub(r"\s+", " ", summary).strip()
+        if len(summary) <= max_chars:
+            return summary
+        cut = summary[:max_chars].rsplit(" ", 1)[0]
+        return cut.rstrip(" ,.;:") + "…"
+
+    def _reindex_chapters_safely(self, transcript_id):
+        self.db.execute(
+            """UPDATE transcript_chapters SET chapter_index=(300000+id)
+               WHERE transcript_id=?""",
+            (int(transcript_id),),
+        )
+        rows = self.db.frame(
+            """SELECT id FROM transcript_chapters WHERE transcript_id=?
+               ORDER BY start_seconds,end_seconds,id""",
+            (int(transcript_id),),
+        )
+        for index, row in rows.iterrows():
+            self.db.execute(
+                "UPDATE transcript_chapters SET chapter_index=? WHERE id=?",
+                (int(index), int(row["id"])),
+            )
 
     def chapters(self, transcript_id):
         return self.db.frame(

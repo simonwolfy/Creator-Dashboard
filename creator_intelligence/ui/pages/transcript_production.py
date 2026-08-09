@@ -39,6 +39,7 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
             ("Discover clips", self.discover_clips),
             ("Analyze selected", self.analyze_selected_clips),
             ("View intelligence", self.view_clip_intelligence),
+            ("Edit range", self.edit_selected_clip_range),
             ("Approve", lambda: self._review_selected_clips("Approved")),
             ("Reject", lambda: self._review_selected_clips("Rejected")),
             ("Needs work", lambda: self._review_selected_clips("Needs work")),
@@ -243,6 +244,58 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
         )
         QMessageBox.information(self, "Clip intelligence", message)
 
+    def edit_selected_clip_range(self) -> None:
+        clip_ids = self._selected_clip_ids()
+        if len(clip_ids) != 1:
+            QMessageBox.information(
+                self, "Edit clip range", "Select exactly one clip to edit."
+            )
+            return
+        transcript_id = self.selected_transcript_id()
+        if transcript_id is None:
+            return
+        full = self.service.clip_candidates(int(transcript_id))
+        match = full[full["id"] == int(clip_ids[0])]
+        if match.empty:
+            return
+        row = match.iloc[0]
+        duration = float(
+            self.service.transcript(int(transcript_id)).get("duration_seconds")
+            or row["end_seconds"]
+        )
+        start, ok = QInputDialog.getDouble(
+            self,
+            "Edit clip range",
+            "Start time in seconds",
+            float(row["start_seconds"]),
+            0.0,
+            max(duration, float(row["end_seconds"])),
+            2,
+        )
+        if not ok:
+            return
+        end, ok = QInputDialog.getDouble(
+            self,
+            "Edit clip range",
+            "End time in seconds",
+            float(row["end_seconds"]),
+            start + 0.01,
+            max(duration, start + 0.01),
+            2,
+        )
+        if not ok:
+            return
+        try:
+            self.service.edit_clip_candidate_range(int(clip_ids[0]), start, end)
+        except Exception as exc:
+            QMessageBox.critical(self, "Clip range update failed", str(exc))
+            return
+        self.action_status.setText(
+            f"Updated clip {clip_ids[0]} to {self._clock(start)}–{self._clock(end)}. "
+            "Reapprove it before sending it to Production."
+        )
+        self._refresh_clip_candidates(selected_id=int(clip_ids[0]))
+
     def _review_selected_clips(self, status: str) -> None:
         clip_ids = self._selected_clip_ids()
         if not clip_ids:
@@ -315,6 +368,7 @@ class TranscriptProductionPage(PolishedTranscriptEditorPage):
                 )
                 visible = [
                     "id", "time", "title", "discovery_rank", "creator_dna_score",
+                    "discovery_chapter_title",
                     "viral_score", "hook_score",
                     "humor_score", "surprise_score", "emotion_score", "quote_score",
                     "suggested_title", "review_status", "sent_to_production",

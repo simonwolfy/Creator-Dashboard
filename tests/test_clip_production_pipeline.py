@@ -83,6 +83,7 @@ def test_clip_queue_status_notes_dashboard_and_exports(tmp_path):
         transcript_id, 10, 20, "Reaction", "Zoom on reaction", 90,
         "creator-selection",
     )
+    transcripts.set_clip_review_status([clip_id], "Approved")
     job_id = transcripts.send_clips_to_production([clip_id])[0]
 
     production.update_clip_job(job_id, status="Editing", destination="exports/shorts")
@@ -121,6 +122,39 @@ def test_rejected_clip_cannot_enter_production(tmp_path):
     try:
         transcripts.send_clips_to_production([clip_id])
     except ValueError as exc:
-        assert "Rejected clips" in str(exc)
+        assert "Only approved clips" in str(exc)
     else:
         raise AssertionError("Rejected clip was sent to production")
+
+
+def test_range_edit_requires_reapproval_and_handoff_uses_exact_boundaries(tmp_path):
+    transcripts, production, transcript_id = make_services(tmp_path)
+    clip_id = transcripts.add_clip_candidate(
+        transcript_id, 10, 30, "Reaction and payoff", "Keep both beats", 85,
+        "creator-selection",
+    )
+    transcripts.set_clip_review_status([clip_id], "Approved")
+
+    edited = transcripts.edit_clip_candidate_range(clip_id, 12.5, 27.25)
+
+    assert edited["review_status"] == "Needs work"
+    assert float(edited["start_seconds"]) == 12.5
+    assert float(edited["end_seconds"]) == 27.25
+    events = transcripts.db.frame(
+        """SELECT event_type FROM creator_learning_events
+           WHERE clip_id=? ORDER BY id""",
+        (clip_id,),
+    )
+    assert "clip_range_edited" in set(events["event_type"])
+    try:
+        transcripts.send_clips_to_production([clip_id])
+    except ValueError as exc:
+        assert "Only approved clips" in str(exc)
+    else:
+        raise AssertionError("Edited clip bypassed creator reapproval")
+
+    transcripts.set_clip_review_status([clip_id], "Approved")
+    job_id = transcripts.send_clips_to_production([clip_id])[0]
+    job = production.clip_job(job_id)
+    assert float(job["start_seconds"]) == 12.5
+    assert float(job["end_seconds"]) == 27.25

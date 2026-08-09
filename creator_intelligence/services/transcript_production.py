@@ -7,7 +7,11 @@ from collections.abc import Iterable
 from datetime import datetime
 
 CLIP_REVIEW_STATUSES = ("Unreviewed", "Approved", "Rejected", "Needs work")
-TRANSCRIPT_DISCOVERY_SOURCE = "automatic-transcript-discovery-v1"
+TRANSCRIPT_DISCOVERY_SOURCE = "automatic-transcript-discovery-v2"
+LEGACY_TRANSCRIPT_DISCOVERY_SOURCES = (
+    "automatic-transcript-discovery-v1",
+    TRANSCRIPT_DISCOVERY_SOURCE,
+)
 
 
 class TranscriptProductionMixin:
@@ -95,6 +99,9 @@ class TranscriptProductionMixin:
             "discovery_run_id": "INTEGER",
             "discovery_rank": "REAL",
             "creator_dna_score": "REAL",
+            "discovery_chapter_id": "INTEGER",
+            "discovery_chapter_title": "TEXT",
+            "range_edited_at": "TEXT",
         }
         for name, sql_type in columns.items():
             if name not in existing:
@@ -110,6 +117,8 @@ class TranscriptProductionMixin:
                         c.suggested_end_seconds,c.suggested_title,c.suggested_caption,
                         c.suggested_hashtags_json,c.intelligence_version,c.analyzed_at,
                         c.discovery_run_id,c.discovery_rank,c.creator_dna_score,
+                        c.discovery_chapter_id,c.discovery_chapter_title,
+                        c.range_edited_at,
                         CASE WHEN j.id IS NULL THEN 0 ELSE 1 END AS sent_to_production,
                         j.id AS production_job_id,j.status AS production_status
                  FROM transcript_clip_candidates c
@@ -174,31 +183,43 @@ class TranscriptProductionMixin:
         try:
             segments = self.segments(transcript_id)
             ordered = self._discovery_segments(segments)
+            chapters = self.chapters(transcript_id)
+            if ordered and chapters.empty:
+                self.build_chapters(transcript_id)
+                chapters = self.chapters(transcript_id)
+            discovery_chapters = self._discovery_chapters(chapters)
             if replace_unreviewed:
                 self.db.execute(
                     """DELETE FROM transcript_clip_candidates
-                       WHERE transcript_id=? AND source=?
+                       WHERE transcript_id=? AND source IN (?,?)
                          AND review_status='Unreviewed'
                          AND NOT EXISTS(
                              SELECT 1 FROM production_clip_jobs j
                              WHERE j.clip_candidate_id=transcript_clip_candidates.id
                          )""",
-                    (transcript_id, TRANSCRIPT_DISCOVERY_SOURCE),
+                    (transcript_id, *LEGACY_TRANSCRIPT_DISCOVERY_SOURCES),
                 )
             protected = self._protected_clip_ranges(transcript_id)
 
             windows = self._candidate_windows(
                 ordered,
+                chapters=discovery_chapters,
                 min_score=min_score,
                 min_seconds=min_seconds,
                 max_seconds=max_seconds,
             )
+            transcript = self.transcript(transcript_id)
+            metadata = str(transcript.get("title") or "")
+            windows = [
+                self._enrich_discovery_window(window, metadata)
+                for window in windows
+            ]
             considered = len(windows)
             selected: list[dict] = []
             duplicates_removed = 0
             for window in sorted(
                 windows,
-                key=lambda item: (-item["viral_score"], item["start_seconds"]),
+                key=lambda item: (-item["discovery_rank"], item["start_seconds"]),
             ):
                 interval = (window["start_seconds"], window["end_seconds"])
                 conflicts = protected + [
@@ -222,21 +243,48 @@ class TranscriptProductionMixin:
                     window["start_seconds"],
                     window["end_seconds"],
                     window["suggested_title"],
-                    "Automatically discovered from the complete transcript; creator review required.",
+                    window["selection_reason"],
                     window["viral_score"],
                     TRANSCRIPT_DISCOVERY_SOURCE,
                 )
                 analysis = self.analyze_clip_candidate(clip_id)
+                analysis["suggested_start_seconds"] = round(
+                    max(
+                        float(window["start_seconds"]),
+                        float(analysis["suggested_start_seconds"]),
+                    ),
+                    2,
+                )
+                analysis["suggested_end_seconds"] = round(
+                    min(
+                        float(window["end_seconds"]),
+                        float(analysis["suggested_end_seconds"]),
+                    ),
+                    2,
+                )
                 dna_score = self._creator_dna_candidate_score(analysis)
                 discovery_rank = self._discovery_rank(analysis, dna_score)
+                reason = self._discovery_reason(
+                    analysis,
+                    dna_score,
+                    discovery_rank,
+                    window.get("chapter_title"),
+                )
                 self.db.execute(
                     """UPDATE transcript_clip_candidates
-                       SET discovery_run_id=?,discovery_rank=?,creator_dna_score=?,updated_at=?
+                       SET discovery_run_id=?,discovery_rank=?,creator_dna_score=?,
+                           discovery_chapter_id=?,discovery_chapter_title=?,reason=?,
+                           suggested_start_seconds=?,suggested_end_seconds=?,updated_at=?
                        WHERE id=?""",
                     (
                         run_id,
                         discovery_rank,
                         dna_score,
+                        window.get("chapter_id"),
+                        window.get("chapter_title"),
+                        reason,
+                        analysis["suggested_start_seconds"],
+                        analysis["suggested_end_seconds"],
                         datetime.now().isoformat(),
                         clip_id,
                     ),
@@ -293,10 +341,34 @@ class TranscriptProductionMixin:
             rows.append({"start": max(0.0, start), "end": end, "text": text})
         return rows
 
+    @staticmethod
+    def _discovery_chapters(frame) -> list[dict]:
+        if frame.empty:
+            return []
+        chapters: list[dict] = []
+        for _, raw in frame.sort_values(
+            ["start_seconds", "end_seconds", "chapter_index"]
+        ).iterrows():
+            try:
+                start = float(raw["start_seconds"])
+                end = float(raw["end_seconds"])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+                continue
+            chapters.append({
+                "id": int(raw["id"]),
+                "start": max(0.0, start),
+                "end": end,
+                "title": str(raw.get("title") or "").strip(),
+            })
+        return chapters
+
     def _candidate_windows(
         self,
         segments: list[dict],
         *,
+        chapters: list[dict] | None = None,
         min_score: float,
         min_seconds: float,
         max_seconds: float,
@@ -309,20 +381,49 @@ class TranscriptProductionMixin:
             )
             if float(anchor["viral_score"]) < anchor_floor:
                 continue
-            target_start = max(0.0, segment["start"] - 8.0)
-            target_end = min(target_start + max_seconds, segment["end"] + 22.0)
+            midpoint = (segment["start"] + segment["end"]) / 2.0
+            chapter = next(
+                (
+                    item for item in (chapters or [])
+                    if item["start"] <= midpoint <= item["end"]
+                ),
+                None,
+            )
+            chapter_start = float(chapter["start"]) if chapter else 0.0
+            chapter_end = float(chapter["end"]) if chapter else math.inf
+            target_start = max(chapter_start, segment["start"] - 8.0)
+            target_end = min(
+                chapter_end,
+                target_start + max_seconds,
+                segment["end"] + 22.0,
+            )
             left = index
-            while left > 0 and segments[left - 1]["end"] > target_start:
+            while (
+                left > 0
+                and segments[left - 1]["end"] > target_start
+                and segments[left - 1]["start"] >= chapter_start
+            ):
                 left -= 1
             right = index
-            while right + 1 < len(segments) and segments[right + 1]["start"] < target_end:
+            while (
+                right + 1 < len(segments)
+                and segments[right + 1]["start"] < target_end
+                and segments[right + 1]["end"] <= chapter_end
+            ):
                 right += 1
-            while right + 1 < len(segments) and segments[right]["end"] - segments[left]["start"] < min_seconds:
-                if segments[right + 1]["end"] - segments[left]["start"] > max_seconds:
+            while (
+                right + 1 < len(segments)
+                and segments[right]["end"] - segments[left]["start"] < min_seconds
+                and segments[right + 1]["end"] <= chapter_end
+            ):
+                if (
+                    segments[right + 1]["end"] - segments[left]["start"]
+                    > max_seconds
+                ):
                     break
                 right += 1
-            start = segments[left]["start"]
-            end = min(segments[right]["end"], start + max_seconds)
+            start = max(chapter_start, segments[left]["start"])
+            end = min(chapter_end, segments[right]["end"], start + max_seconds)
             if end - start < min_seconds:
                 continue
             text = " ".join(
@@ -336,9 +437,92 @@ class TranscriptProductionMixin:
                 "start_seconds": round(start, 2),
                 "end_seconds": round(end, 2),
                 "text": text,
+                "chapter_id": chapter.get("id") if chapter else None,
+                "chapter_title": chapter.get("title") if chapter else None,
                 **analysis,
             })
         return windows
+
+    def _enrich_discovery_window(self, window: dict, metadata: str) -> dict:
+        from creator_intelligence.services.creator_packaging_context import (
+            extract_packaging_context,
+        )
+
+        enriched = dict(window)
+        context = extract_packaging_context(
+            str(window.get("text") or ""), metadata, window
+        ).as_dict()
+        candidates = self._title_options(context)
+        titles, ranking = self._rank_titles_for_creator(
+            candidates, 0, include_scores=True
+        )
+        title = titles[0] if titles else str(window.get("suggested_title") or "")
+        selected = next(
+            (
+                item for item in ranking
+                if str(item.get("title") or "") == title
+            ),
+            ranking[0] if ranking else {},
+        )
+        style = float(selected.get("style_score") or 0.0)
+        similarity = float(selected.get("duplicate_similarity") or 0.0)
+        dna_score = round(
+            max(0.0, min(100.0, 50.0 + style - similarity * 20.0)), 1
+        )
+        preview_rank = round(
+            max(
+                0.0,
+                min(
+                    100.0,
+                    float(window.get("viral_score") or 0.0) * 0.8
+                    + dna_score * 0.2,
+                ),
+            ),
+            1,
+        )
+        enriched.update({
+            "suggested_title": title,
+            "creator_dna_score": dna_score,
+            "discovery_rank": preview_rank,
+            "selection_reason": self._discovery_reason(
+                window,
+                dna_score,
+                preview_rank,
+                window.get("chapter_title"),
+            ),
+        })
+        return enriched
+
+    @staticmethod
+    def _discovery_reason(
+        analysis: dict,
+        dna_score: float,
+        discovery_rank: float,
+        chapter_title: str | None,
+    ) -> str:
+        dimensions = {
+            "hook": float(analysis.get("hook_score") or 0.0),
+            "humor": float(analysis.get("humor_score") or 0.0),
+            "surprise": float(analysis.get("surprise_score") or 0.0),
+            "emotion": float(analysis.get("emotion_score") or 0.0),
+            "standalone quote": float(analysis.get("quote_score") or 0.0),
+        }
+        strongest = sorted(
+            dimensions.items(), key=lambda item: (-item[1], item[0])
+        )[:2]
+        signals = " and ".join(
+            f"{label} {score:.0f}" for label, score in strongest
+        )
+        chapter = (
+            f' in chapter “{str(chapter_title).strip()}”'
+            if str(chapter_title or "").strip()
+            else ""
+        )
+        return (
+            f"Full-transcript candidate{chapter}: {signals}; Creator DNA "
+            f"fit {float(dna_score):.0f}; ranked {float(discovery_rank):.1f}/100. "
+            "Creator approval is required before Production."
+        )
 
     def _protected_clip_ranges(self, transcript_id: int) -> list[tuple[float, float]]:
         frame = self.db.frame(
@@ -408,6 +592,13 @@ class TranscriptProductionMixin:
             text = str(clip.get("title") or "").strip()
 
         analysis = self._score_clip_text(text, start, end)
+        if str(clip.get("source") or "") in LEGACY_TRANSCRIPT_DISCOVERY_SOURCES:
+            analysis["suggested_start_seconds"] = round(
+                max(start, float(analysis["suggested_start_seconds"])), 2
+            )
+            analysis["suggested_end_seconds"] = round(
+                min(end, float(analysis["suggested_end_seconds"])), 2
+            )
         now = datetime.now().isoformat()
         self.db.execute(
             """UPDATE transcript_clip_candidates SET
@@ -556,6 +747,79 @@ class TranscriptProductionMixin:
                 tags.append(tag)
         return tags[:6]
 
+    def edit_clip_candidate_range(
+        self, clip_id: int, start_seconds: float, end_seconds: float
+    ) -> dict:
+        clip_id = int(clip_id)
+        start = float(start_seconds)
+        end = float(end_seconds)
+        if not math.isfinite(start) or not math.isfinite(end):
+            raise ValueError("Clip boundaries must be finite numbers.")
+        if start < 0 or end <= start:
+            raise ValueError("Clip end time must be after its non-negative start time.")
+        frame = self.db.frame(
+            "SELECT * FROM transcript_clip_candidates WHERE id=?", (clip_id,)
+        )
+        if frame.empty:
+            raise KeyError(clip_id)
+        before = frame.iloc[0].to_dict()
+        handed_off = self.db.frame(
+            "SELECT id FROM production_clip_jobs WHERE clip_candidate_id=?",
+            (clip_id,),
+        )
+        if not handed_off.empty:
+            raise ValueError(
+                "This clip is already in Production. Edit the Production job instead."
+            )
+        transcript_id = int(before["transcript_id"])
+        transcript = self.transcript(transcript_id)
+        duration = float(transcript.get("duration_seconds") or 0.0)
+        if duration > 0 and end > duration + 0.01:
+            raise ValueError(
+                f"Clip end time cannot exceed transcript duration ({duration:.2f}s)."
+            )
+
+        self.set_clip_review_status([clip_id], "Needs work")
+        now = datetime.now().isoformat()
+        self.db.execute(
+            """UPDATE transcript_clip_candidates SET
+               start_seconds=?,end_seconds=?,suggested_start_seconds=NULL,
+               suggested_end_seconds=NULL,hook_score=NULL,humor_score=NULL,
+               surprise_score=NULL,emotion_score=NULL,quote_score=NULL,
+               viral_score=NULL,discovery_rank=NULL,creator_dna_score=NULL,
+               analyzed_at=NULL,range_edited_at=?,updated_at=? WHERE id=?""",
+            (start, end, now, now, clip_id),
+        )
+        analysis = self.analyze_clip_candidate(clip_id)
+        analysis["suggested_start_seconds"] = round(start, 2)
+        analysis["suggested_end_seconds"] = round(end, 2)
+        self.db.execute(
+            """UPDATE transcript_clip_candidates SET
+               suggested_start_seconds=?,suggested_end_seconds=?,updated_at=?
+               WHERE id=?""",
+            (start, end, datetime.now().isoformat(), clip_id),
+        )
+        from creator_intelligence.services.creator_dna import CreatorDNAService
+
+        dna = CreatorDNAService(self.db)
+        dna.record_event(
+            "clip_range_edited",
+            clip_id=clip_id,
+            subject_type="clip",
+            subject_id=clip_id,
+            field_name="time_range",
+            old_value={
+                "start_seconds": before.get("start_seconds"),
+                "end_seconds": before.get("end_seconds"),
+            },
+            new_value={"start_seconds": start, "end_seconds": end},
+            metadata={"clip": dna._clip_snapshot(clip_id), "analysis": analysis},
+            source="transcript_review",
+        )
+        return self.db.frame(
+            "SELECT * FROM transcript_clip_candidates WHERE id=?", (clip_id,)
+        ).iloc[0].to_dict()
+
     def set_clip_review_status(self, clip_ids: Iterable[int], status: str) -> int:
         if status not in CLIP_REVIEW_STATUSES:
             raise ValueError(status)
@@ -621,17 +885,18 @@ class TranscriptProductionMixin:
             if frame.empty:
                 raise KeyError(clip_id)
             row = frame.iloc[0].to_dict()
-            if row.get("review_status") == "Rejected":
-                raise ValueError("Rejected clips cannot be sent to production.")
+            if row.get("review_status") != "Approved":
+                raise ValueError(
+                    "Only approved clips can be sent to Production. Review and approve "
+                    "the clip first."
+                )
             existing = self.db.frame(
                 "SELECT id FROM production_clip_jobs WHERE clip_candidate_id=?",
                 (clip_id,),
             )
             if not existing.empty:
                 job_id = int(existing.iloc[0]["id"])
-                created_new = False
             else:
-                created_new = True
                 job_id = int(self.db.execute(
                     """INSERT INTO production_clip_jobs(
                         clip_candidate_id,transcript_id,title,start_seconds,end_seconds,
@@ -642,8 +907,18 @@ class TranscriptProductionMixin:
                         clip_id,
                         int(row["transcript_id"]),
                         str(row.get("suggested_title") or row.get("title") or f"Clip {clip_id}"),
-                        float(row.get("suggested_start_seconds") or row["start_seconds"]),
-                        float(row.get("suggested_end_seconds") or row["end_seconds"]),
+                        float(
+                            row["start_seconds"]
+                            if row.get("range_edited_at")
+                            else row.get("suggested_start_seconds")
+                            or row["start_seconds"]
+                        ),
+                        float(
+                            row["end_seconds"]
+                            if row.get("range_edited_at")
+                            else row.get("suggested_end_seconds")
+                            or row["end_seconds"]
+                        ),
                         priority,
                         export_preset,
                         destination,
@@ -652,25 +927,8 @@ class TranscriptProductionMixin:
                         now,
                     ),
                 ))
-                self.db.execute(
-                    """UPDATE transcript_clip_candidates
-                       SET review_status='Approved',updated_at=? WHERE id=?""",
-                    (now, clip_id),
-                )
             created.append(job_id)
             after = dna._clip_snapshot(clip_id)
-            if created_new and str(row.get("review_status") or "Unreviewed") != "Approved":
-                dna.record_event(
-                    "clip_approved",
-                    clip_id=clip_id,
-                    subject_type="clip",
-                    subject_id=clip_id,
-                    field_name="decision",
-                    old_value=row.get("review_status") or "Unreviewed",
-                    new_value="Approved",
-                    metadata={"clip": after},
-                    source="transcript_production",
-                )
             job = self.db.frame(
                 "SELECT * FROM production_clip_jobs WHERE id=?", (job_id,)
             ).iloc[0].to_dict()

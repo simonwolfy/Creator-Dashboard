@@ -166,6 +166,7 @@ def test_batch_analysis_and_production_use_packaged_title_and_trim(tmp_path):
     analyzed = service.analyze_clip_candidates([clip_id, clip_id])
     assert len(analyzed) == 1
 
+    service.set_clip_review_status([clip_id], "Approved")
     job_id = service.send_clips_to_production([clip_id])[0]
     job = service.db.frame(
         "SELECT * FROM production_clip_jobs WHERE id=?", (job_id,)
