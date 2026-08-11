@@ -33,8 +33,16 @@ InfoBeforeFile=privacy.txt
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
+[Types]
+Name: "full"; Description: "Complete installation"
+
+[Components]
+Name: "application"; Description: "Creator Intelligence application"; Types: full; Flags: fixed
+Name: "application\pythonruntime"; Description: "Private Python runtime and application libraries (required)"; Types: full; Flags: fixed
+
 [Files]
-Source: "..\dist\CreatorIntelligence\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
+Source: "..\dist\CreatorIntelligence\CreatorIntelligence.exe"; DestDir: "{app}"; Components: application
+Source: "..\dist\CreatorIntelligence\_internal\*"; DestDir: "{app}\_internal"; Components: application\pythonruntime; Flags: recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

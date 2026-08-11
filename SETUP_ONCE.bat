@@ -1,9 +1,13 @@
 @echo off
+setlocal
 cd /d "%~dp0"
-py -m venv .venv
-call .venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\setup_once.ps1"
+if errorlevel 1 (
+  echo.
+  echo Setup did not finish. Review the error above, then run SETUP_ONCE.bat again.
+  pause
+  exit /b 1
+)
 echo.
-echo Creator Intelligence 3.0 setup complete.
+echo Creator Intelligence Setup Once is complete.
 pause

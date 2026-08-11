@@ -15,6 +15,7 @@ from creator_intelligence.core.workspace import WorkspaceManager
 from creator_intelligence.data.database import Database
 from creator_intelligence.services.backup import BackupService
 from creator_intelligence.services.update_checker import UpdateChecker
+from creator_intelligence.services.runtime_setup import RuntimeSetupService
 from creator_intelligence.utils.paths import PROJECT_ROOT
 
 
@@ -156,6 +157,7 @@ class CreatorIntelligenceApplication:
         self._context, self._registry = bootstrap_application(self._db, settings=self._settings)
         self._context.set("application", self)
         self._context.set("workspace", self.workspace)
+        self._context.set("runtime_setup", RuntimeSetupService())
         self._context.set(
             "update_checker",
             UpdateChecker(

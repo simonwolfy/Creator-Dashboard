@@ -62,6 +62,18 @@ def test_release_pipeline_has_privacy_history_gate_and_artifacts():
     assert "--release-upgrade-smoke-test" in workflow
     assert "--verify-upgraded-workspace" in workflow
     assert "simulated downgrade" in workflow
+    assert "function Invoke-PackagedCheck" in workflow
+    assert "-Wait -PassThru" in workflow
+    assert "Installed-app smoke test" in workflow
+    assert "Reinstalled-app smoke test" in workflow
+    assert "creator-intelligence-reinstall.log" in workflow
+
+
+def test_local_release_build_waits_for_packaged_gui_smoke_test():
+    build_script = (ROOT / "tools" / "build_release.ps1").read_text(encoding="utf-8")
+    assert "Start-Process -FilePath $PackagedExecutable" in build_script
+    assert "-Wait -PassThru" in build_script
+    assert "$SmokeProcess.ExitCode" in build_script
 
 
 def test_installer_preserves_external_workspaces_and_creates_shortcuts():
@@ -81,6 +93,10 @@ def test_installer_preserves_external_workspaces_and_creates_shortcuts():
     assert "CompareStr" in installer
     assert "SuppressibleMsgBox" in installer
     assert "\n      MsgBox(" not in installer
+    assert 'Name: "application\\pythonruntime"' in installer
+    assert "Private Python runtime and application libraries (required)" in installer
+    assert 'Source: "..\\dist\\CreatorIntelligence\\_internal\\*"' in installer
+    assert "Components: application\\pythonruntime" in installer
 
 
 def test_installer_release_rank_orders_prereleases_and_prevents_downgrades():
@@ -198,8 +214,19 @@ def test_standalone_bundle_contract_rejects_runtime_state(tmp_path):
     bundle = tmp_path / "CreatorIntelligence"
     (bundle / "_internal" / "config").mkdir(parents=True)
     (bundle / "CreatorIntelligence.exe").write_bytes(b"exe")
+    (bundle / "_internal" / "python312.dll").write_bytes(b"python")
     (bundle / "_internal" / "config" / "modules.json").write_text("{}", encoding="utf-8")
-    assert len(verify_bundle(bundle)) == 2
+    assert len(verify_bundle(bundle)) == 3
     (bundle / "_internal" / "workspace.json").write_text("{}", encoding="utf-8")
     with pytest.raises(RuntimeError, match="runtime data"):
+        verify_bundle(bundle)
+
+
+def test_standalone_bundle_requires_private_python_runtime(tmp_path):
+    bundle = tmp_path / "CreatorIntelligence"
+    (bundle / "_internal" / "config").mkdir(parents=True)
+    (bundle / "CreatorIntelligence.exe").write_bytes(b"exe")
+    (bundle / "_internal" / "config" / "modules.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="private Python runtime"):
         verify_bundle(bundle)

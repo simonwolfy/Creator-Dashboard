@@ -74,7 +74,7 @@ class TwitchIntelligenceService:
 
     def daily(self, start=None, end=None):
         df = self.db.frame("SELECT * FROM twitch_daily ORDER BY date")
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce", format="mixed")
         numeric = [c for c in df.columns if c not in {"date","source_file","imported_at"}]
         for c in numeric:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
@@ -90,7 +90,9 @@ class TwitchIntelligenceService:
             df = df[df["date"] >= pd.Timestamp(start)]
         if end:
             df = df[df["date"] <= pd.Timestamp(end)]
-        return df
+        return df.sort_values("date", kind="stable", na_position="last").reset_index(
+            drop=True
+        )
 
     def summary(self, start=None, end=None):
         df = self.daily(start, end)

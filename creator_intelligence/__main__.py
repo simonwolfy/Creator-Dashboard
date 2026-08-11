@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from creator_intelligence.core.application import CreatorIntelligenceApplication
 from creator_intelligence.core.onboarding import OnboardingService
+from creator_intelligence.services.runtime_setup import RuntimeSetupService
 from creator_intelligence.ui.dialogs.onboarding import OnboardingWizard
 from creator_intelligence.ui.main_window import MainWindow
 
@@ -29,7 +30,7 @@ def main(argv=None):
     app.setApplicationVersion(CreatorIntelligenceApplication.VERSION)
     app.setOrganizationName("Creator Intelligence")
 
-    onboarding = OnboardingService()
+    onboarding = OnboardingService(runtime_setup=RuntimeSetupService())
     if onboarding.needs_onboarding():
         wizard = OnboardingWizard(onboarding)
         if not wizard.exec():

@@ -97,7 +97,16 @@ jobs:
       - name: Audit standalone bundle contents
         run: python -m creator_intelligence.core.release_verification --bundle dist\CreatorIntelligence
       - name: Smoke test standalone app and packaged OAuth runtime
-        run: dist\CreatorIntelligence\CreatorIntelligence.exe --release-smoke-test
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist\CreatorIntelligence\CreatorIntelligence.exe" `
+            -ArgumentList @("--release-smoke-test") `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "The standalone packaged smoke test failed with exit code $($process.ExitCode)."
+          }
       - name: Install Inno Setup
         run: choco install innosetup --version=6.7.1 --no-progress -y
       - name: Build installer
@@ -122,28 +131,67 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
+          function Invoke-PackagedCheck {
+            param(
+              [Parameter(Mandatory = $true)][string]$Executable,
+              [Parameter(Mandatory = $true)][string[]]$Arguments,
+              [Parameter(Mandatory = $true)][string]$Description
+            )
+            $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "$Description failed with exit code $($process.ExitCode)."
+            }
+          }
+          function Show-InstallerLog {
+            param([Parameter(Mandatory = $true)][string]$Path)
+            if (Test-Path -LiteralPath $Path) {
+              Write-Host "Installer diagnostic log: $Path"
+              Get-Content -LiteralPath $Path -Tail 200
+            }
+          }
           $installers = @(Get-ChildItem release -File -Filter *.exe -ErrorAction Stop)
           if ($installers.Count -ne 1) { throw "Expected exactly one installer, found $($installers.Count)." }
           $installer = $installers[0]
           $installDir = Join-Path $env:RUNNER_TEMP "CreatorIntelligenceInstalled"
           $upgradeWorkspace = Join-Path $env:RUNNER_TEMP "CreatorIntelligenceExternalWorkspace"
           python -m creator_intelligence.core.release_smoke --prepare-n-minus-one $upgradeWorkspace
-          $arguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir")
-          $first = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
-          if ($first.ExitCode -ne 0) { throw "Clean installation failed with exit code $($first.ExitCode)." }
-          & (Join-Path $installDir "CreatorIntelligence.exe") --release-smoke-test
+          $installedExe = Join-Path $installDir "CreatorIntelligence.exe"
+          $firstLog = Join-Path $env:RUNNER_TEMP "creator-intelligence-first-install.log"
+          $firstArguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir", "/LOG=$firstLog")
+          $first = Start-Process -FilePath $installer.FullName -ArgumentList $firstArguments -Wait -PassThru
+          if ($first.ExitCode -ne 0) {
+            Show-InstallerLog $firstLog
+            throw "Clean installation failed with exit code $($first.ExitCode)."
+          }
+          Invoke-PackagedCheck `
+            -Executable $installedExe `
+            -Arguments @("--release-smoke-test") `
+            -Description "Installed-app smoke test"
 
           $rankKey = "HKCU:\Software\Creator Intelligence"
           Set-ItemProperty -Path $rankKey -Name ReleaseRank -Value ("9" * 21)
-          $downgrade = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
+          $downgradeLog = Join-Path $env:RUNNER_TEMP "creator-intelligence-downgrade.log"
+          $downgradeArguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir", "/LOG=$downgradeLog")
+          $downgrade = Start-Process -FilePath $installer.FullName -ArgumentList $downgradeArguments -Wait -PassThru
           if ($downgrade.ExitCode -eq 0) { throw "The installer accepted a simulated downgrade." }
           $releaseRank = python -m creator_intelligence.core.release_verification --print-release-rank
           Set-ItemProperty -Path $rankKey -Name ReleaseRank -Value $releaseRank
 
-          & (Join-Path $installDir "CreatorIntelligence.exe") --release-upgrade-smoke-test $upgradeWorkspace
-          $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
-          if ($upgrade.ExitCode -ne 0) { throw "Reinstallation failed with exit code $($upgrade.ExitCode)." }
-          & (Join-Path $installDir "CreatorIntelligence.exe") --release-smoke-test
+          Invoke-PackagedCheck `
+            -Executable $installedExe `
+            -Arguments @("--release-upgrade-smoke-test", $upgradeWorkspace) `
+            -Description "Installed-app N-1 upgrade smoke test"
+          $upgradeLog = Join-Path $env:RUNNER_TEMP "creator-intelligence-reinstall.log"
+          $upgradeArguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir", "/LOG=$upgradeLog")
+          $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList $upgradeArguments -Wait -PassThru
+          if ($upgrade.ExitCode -ne 0) {
+            Show-InstallerLog $upgradeLog
+            throw "Reinstallation failed with exit code $($upgrade.ExitCode)."
+          }
+          Invoke-PackagedCheck `
+            -Executable $installedExe `
+            -Arguments @("--release-smoke-test") `
+            -Description "Reinstalled-app smoke test"
           $uninstallers = @(Get-ChildItem $installDir -File -Filter unins*.exe)
           if ($uninstallers.Count -ne 1) { throw "Expected exactly one uninstaller." }
           $uninstall = Start-Process -FilePath $uninstallers[0].FullName -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru

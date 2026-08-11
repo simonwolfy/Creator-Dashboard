@@ -11,6 +11,47 @@ from creator_intelligence.ui.table_utils import friendly_header
 from creator_intelligence.services.reporting import ReportingService
 from creator_intelligence.utils.paths import EXPORT_DIR
 
+
+def prepare_time_trend(frame, value_column, aggregation="mean"):
+    """Return a chronological, readable trend for the selected date range."""
+    if frame.empty or not {"date", value_column} <= set(frame.columns):
+        return pd.DataFrame(columns=["date", value_column]), "daily"
+
+    trend = frame[["date", value_column]].copy()
+    trend["date"] = pd.to_datetime(
+        trend["date"], errors="coerce", format="mixed"
+    ).dt.normalize()
+    trend[value_column] = pd.to_numeric(trend[value_column], errors="coerce")
+    trend = trend.dropna(subset=["date", value_column]).sort_values(
+        "date", kind="stable"
+    )
+    if trend.empty:
+        return trend, "daily"
+
+    span_days = int((trend["date"].max() - trend["date"].min()).days)
+    if span_days > 730:
+        frequency, resolution = "MS", "monthly"
+    elif span_days > 180 or len(trend) > 180:
+        frequency, resolution = "W-MON", "weekly"
+    else:
+        frequency, resolution = "D", "daily"
+
+    trend = (
+        trend.set_index("date")[value_column]
+        .resample(frequency)
+        .agg(aggregation)
+        .dropna()
+        .reset_index()
+        .sort_values("date", kind="stable")
+        .reset_index(drop=True)
+    )
+    return trend, resolution
+
+
+def trend_title(base_title, resolution):
+    return base_title if resolution == "daily" else f"{base_title} ({resolution})"
+
+
 class FrameModel(QAbstractTableModel):
     def __init__(self, frame):
         super().__init__()
@@ -198,9 +239,32 @@ class TwitchPage(QWidget):
             "follows","followers_per_hour","watch_hours","total_revenue","revenue_per_hour",
             "chat_messages","messages_per_hour"
         ]].sort_values("date",ascending=False)))
-        if not df.empty:
-            self.viewer_chart.line(df["date"],df["average_viewers"],"Viewers")
-            self.revenue_chart.line(df["date"],df["total_revenue"],"Revenue")
+        viewer_trend, viewer_resolution = prepare_time_trend(
+            df, "average_viewers", "mean"
+        )
+        revenue_trend, revenue_resolution = prepare_time_trend(
+            df, "total_revenue", "sum"
+        )
+        self.viewer_chart.title = trend_title(
+            "Average viewers over time", viewer_resolution
+        )
+        self.revenue_chart.title = trend_title(
+            "Revenue over time", revenue_resolution
+        )
+        if not viewer_trend.empty:
+            self.viewer_chart.line(
+                viewer_trend["date"], viewer_trend["average_viewers"], "Viewers"
+            )
+        else:
+            self.viewer_chart.clear()
+            self.viewer_chart.canvas.draw_idle()
+        if not revenue_trend.empty:
+            self.revenue_chart.line(
+                revenue_trend["date"], revenue_trend["total_revenue"], "Revenue"
+            )
+        else:
+            self.revenue_chart.clear()
+            self.revenue_chart.canvas.draw_idle()
         weekday=self.service.weekday(start,end)
         if not weekday.empty:
             self.weekday_chart.bar(weekday["weekday"],weekday["average_viewers"],"Viewers")

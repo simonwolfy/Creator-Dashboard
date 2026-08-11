@@ -93,6 +93,13 @@ def test_fresh_workspace_builds_every_page(tmp_path: Path):
             if isinstance(page, ModuleFailurePage)
         }
         assert failures == {}
+        window._open_related_page(
+            "Publishing",
+            {"view": "package_outcomes", "prompt_link": False},
+        )
+        publishing = window.pages_by_key["publishing:Publishing"]
+        assert window.stack.currentWidget() is publishing
+        assert publishing.tabs.currentWidget() is publishing.outcomes_table
     finally:
         if window is not None:
             window.close()

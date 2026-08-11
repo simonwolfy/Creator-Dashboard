@@ -11,6 +11,8 @@ import threading
 import time
 from typing import Callable
 
+from creator_intelligence.core.processes import windowless_popen, windowless_run
+
 
 JOB_TYPES = (
     "Probe metadata",
@@ -410,7 +412,7 @@ class VideoProcessingService:
             asset["source_path"],
         ]
         self._command(job_id, command)
-        result = subprocess.run(command, capture_output=True, text=True)
+        result = windowless_run(command, capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or "FFprobe failed")
         data = json.loads(result.stdout or "{}")
@@ -554,7 +556,7 @@ class VideoProcessingService:
         # FFmpeg writes diagnostic output to stderr while progress is written to
         # stdout. Merging both streams ensures neither OS pipe can fill and block
         # the child process near completion.
-        process = subprocess.Popen(
+        process = windowless_popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

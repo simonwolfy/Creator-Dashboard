@@ -4,8 +4,9 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil
-import subprocess
 from typing import Any, Callable
+
+from creator_intelligence.core.processes import windowless_run
 
 
 class VideoMetadataService:
@@ -14,7 +15,7 @@ class VideoMetadataService:
     def __init__(self, db, *, ffprobe_path: str | None = None, runner: Callable[..., Any] | None = None):
         self.db = db
         self.ffprobe_path = ffprobe_path or shutil.which("ffprobe")
-        self.runner = runner or subprocess.run
+        self.runner = runner or windowless_run
 
     def tool_status(self) -> dict[str, Any]:
         return {

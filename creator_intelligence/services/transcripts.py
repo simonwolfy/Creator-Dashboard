@@ -14,6 +14,8 @@ import subprocess
 import threading
 import uuid
 
+from creator_intelligence.core.processes import windowless_popen
+
 TRANSCRIPT_JOB_TYPES = (
     "Transcribe audio",
     "Import transcript",
@@ -1265,7 +1267,7 @@ class TranscriptService:
                 "--word_timestamps","True",
                 "--verbose","False",
             ]
-            process = subprocess.Popen(
+            process = windowless_popen(
                 command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
                 text=True,bufsize=1
             )
@@ -1304,7 +1306,7 @@ class TranscriptService:
             "--language",language,
             "--output",str(output_file)
         ]
-        process = subprocess.Popen(
+        process = windowless_popen(
             command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
             text=True,bufsize=1
         )
