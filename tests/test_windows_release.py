@@ -62,6 +62,18 @@ def test_release_pipeline_has_privacy_history_gate_and_artifacts():
     assert "--release-upgrade-smoke-test" in workflow
     assert "--verify-upgraded-workspace" in workflow
     assert "simulated downgrade" in workflow
+    assert "function Invoke-PackagedCheck" in workflow
+    assert "-Wait -PassThru" in workflow
+    assert "Installed-app smoke test" in workflow
+    assert "Reinstalled-app smoke test" in workflow
+    assert "creator-intelligence-reinstall.log" in workflow
+
+
+def test_local_release_build_waits_for_packaged_gui_smoke_test():
+    build_script = (ROOT / "tools" / "build_release.ps1").read_text(encoding="utf-8")
+    assert "Start-Process -FilePath $PackagedExecutable" in build_script
+    assert "-Wait -PassThru" in build_script
+    assert "$SmokeProcess.ExitCode" in build_script
 
 
 def test_installer_preserves_external_workspaces_and_creates_shortcuts():
