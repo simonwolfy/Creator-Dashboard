@@ -47,6 +47,9 @@ def test_release_pipeline_has_privacy_history_gate_and_artifacts():
     assert "ISCC.exe" in workflow
     assert "Get-FileHash" in workflow
     assert "upload-artifact" in workflow
+    assert "name: CreatorIntelligence-Windows-Setup" in workflow
+    assert "path: release/*" in workflow
+    assert "if-no-files-found: error" in workflow
     assert "--release-smoke-test" in workflow
     assert "release_verification --artifacts release" in workflow
     assert "release_verification --bundle" in workflow
