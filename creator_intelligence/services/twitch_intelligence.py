@@ -17,6 +17,61 @@ class TwitchIntelligenceService:
     def connected_status(self):
         return self.live.latest_twitch_status()
 
+    def historical_health_summary(self):
+        row = self.db.frame(
+            """SELECT COUNT(*) AS stream_days,
+                      SUM(CASE WHEN mapping_status='Source-backed' THEN 1 ELSE 0 END) AS source_backed,
+                      SUM(CASE WHEN mapping_status='Unresolved' THEN 1 ELSE 0 END) AS unresolved,
+                      SUM(CASE WHEN game_count=1 THEN 1 ELSE 0 END) AS single_game,
+                      SUM(CASE WHEN game_count>=2 THEN 1 ELSE 0 END) AS multi_game
+               FROM historical_stream_days"""
+        ).iloc[0].to_dict()
+        row["matched_events"] = self.db.scalar(
+            "SELECT COUNT(*) FROM historical_game_events"
+        )
+        row["events_for_review"] = self.db.scalar(
+            "SELECT COUNT(*) FROM historical_game_event_review"
+        )
+        return {key: int(value or 0) for key, value in row.items()}
+
+    def historical_stream_days(self):
+        return self.db.frame(
+            """SELECT date,canonical_game_sequence,game_count,mapping_status,
+                      mapping_confidence,evidence_coverage,mapping_source,
+                      minutes_streamed,average_viewers,peak_viewers,follows,
+                      chat_messages,quality_flags
+               FROM historical_stream_days ORDER BY date DESC"""
+        )
+
+    def historical_game_events(self):
+        return self.db.frame(
+            """SELECT stream_day_date,event_ts,event_type,game,changed_by,
+                      parse_method,source_line,source_file
+               FROM historical_game_events ORDER BY event_ts DESC"""
+        )
+
+    def historical_event_review(self):
+        return self.db.frame(
+            """SELECT stream_day_date,event_ts,event_type,game,review_reason,
+                      source_line,source_file
+               FROM historical_game_event_review ORDER BY event_ts DESC"""
+        )
+
+    def historical_single_game_benchmarks(self):
+        """Daily metrics are safe to associate with a game only on one-game days."""
+        return self.db.frame(
+            """SELECT canonical_game_sequence AS game, COUNT(*) AS stream_days,
+                      ROUND(AVG(minutes_streamed) / 60.0, 2) AS average_hours,
+                      ROUND(AVG(average_viewers), 2) AS average_viewers,
+                      MAX(peak_viewers) AS peak_viewers,
+                      SUM(follows) AS follows,
+                      SUM(chat_messages) AS chat_messages
+               FROM historical_stream_days
+               WHERE game_count=1 AND mapping_status='Source-backed'
+               GROUP BY canonical_game_sequence
+               ORDER BY stream_days DESC, average_viewers DESC"""
+        )
+
     def daily(self, start=None, end=None):
         df = self.db.frame("SELECT * FROM twitch_daily ORDER BY date")
         df["date"] = pd.to_datetime(df["date"], errors="coerce")

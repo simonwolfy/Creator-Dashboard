@@ -15,6 +15,9 @@ from creator_intelligence.data.google_drive_metadata_migration import (
     GOOGLE_DRIVE_METADATA_MIGRATIONS,
 )
 from creator_intelligence.data.google_drive_migrations import GOOGLE_DRIVE_MIGRATIONS
+from creator_intelligence.data.historical_stream_migration import (
+    HISTORICAL_STREAM_MIGRATIONS,
+)
 from creator_intelligence.data.migration_manager import MigrationManager, MigrationRecord
 from creator_intelligence.data.migrations import MIGRATIONS
 from creator_intelligence.data.runtime_foundation_migration import (
@@ -37,6 +40,7 @@ class Database:
                 *GOOGLE_DRIVE_METADATA_MIGRATIONS,
                 *VIDEO_METADATA_MIGRATIONS,
                 *RUNTIME_FOUNDATION_MIGRATIONS,
+                *HISTORICAL_STREAM_MIGRATIONS,
             ]
         )
         self.last_applied_migrations: list[MigrationRecord] = []

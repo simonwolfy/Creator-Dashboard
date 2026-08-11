@@ -146,7 +146,8 @@ def test_n_minus_one_workspace_upgrade_is_backed_up_and_preserves_data(tmp_path)
     assert latest_version not in applied
     assert "video_asset_metadata" in tables
     assert "content_pipeline" in tables
-    assert "granted_scopes_json" not in drive_columns
+    assert "granted_scopes_json" in drive_columns
+    assert "historical_stream_days" not in tables
 
     assert run_upgrade_smoke(root) == 0
     assert verify_upgraded_workspace(root) == 0
@@ -155,7 +156,16 @@ def test_n_minus_one_workspace_upgrade_is_backed_up_and_preserves_data(tmp_path)
             str(row[1])
             for row in connection.execute("PRAGMA table_info(google_drive_connections)")
         }
+        upgraded_tables = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
     assert {"granted_scopes_json", "token_expires_at", "last_synced_at"} <= upgraded_columns
+    assert {
+        "historical_stream_days",
+        "historical_game_events",
+        "historical_game_event_review",
+    } <= upgraded_tables
 
 
 def test_source_release_contract_and_exact_tag():

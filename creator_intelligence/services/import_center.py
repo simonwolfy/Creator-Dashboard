@@ -10,6 +10,8 @@ import shutil
 import sqlite3
 import uuid
 
+import pandas as pd
+
 @dataclass
 class DetectionResult:
     export_type: str
@@ -21,6 +23,86 @@ class DetectionResult:
 
 class ImportCenterService:
     DETECTORS = {
+        "twitch_game_history": {
+            "platform": "Twitch",
+            "required_any": [
+                {
+                    "date",
+                    "canonical game sequence",
+                    "mapping confidence",
+                    "mapping source",
+                },
+                {
+                    "date",
+                    "starting game",
+                    "ending game",
+                    "games played",
+                },
+            ],
+            "destination": "historical_stream_days",
+            "aliases": {
+                "stream day id": "stream_day_id",
+                "date": "date",
+                "minutes streamed": "minutes_streamed",
+                "minutes watched": "minutes_watched",
+                "average viewers": "average_viewers",
+                "peak viewers": "peak_viewers",
+                "maximum viewers": "peak_viewers",
+                "unique viewers": "unique_viewers",
+                "follows": "follows",
+                "chatters": "chatters",
+                "live views": "live_views",
+                "raid viewers %": "raid_viewers_pct",
+                "chat messages": "chat_messages",
+                "clips created": "clips_created",
+                "clip views": "clip_views",
+                "new engaged viewers": "new_engaged_viewers",
+                "returning engaged viewers": "returning_engaged_viewers",
+                "prime subs": "prime_subs",
+                "total paid subs": "total_paid_subs",
+                "total gifted subs": "total_gifted_subs",
+                "canonical game sequence": "canonical_game_sequence",
+                "games played": "canonical_game_sequence",
+                "first observed game": "first_observed_game",
+                "starting game": "first_observed_game",
+                "last observed game": "last_observed_game",
+                "ending game": "last_observed_game",
+                "game count": "game_count",
+                "observed category changes": "observed_category_changes",
+                "category changes": "observed_category_changes",
+                "mapping status": "mapping_status",
+                "mapping confidence": "mapping_confidence",
+                "confidence": "mapping_confidence",
+                "evidence coverage": "evidence_coverage",
+                "mapping source": "mapping_source",
+                "source": "mapping_source",
+                "original game sequence": "original_game_sequence",
+                "original mapping status": "original_mapping_status",
+                "original confidence": "original_confidence",
+                "data quality flags": "quality_flags",
+                "quality flags": "quality_flags",
+            },
+        },
+        "twitch_game_events": {
+            "platform": "Twitch",
+            "required_any": [
+                {"event timestamp", "event type", "game"},
+                {"date", "time", "event type", "game"},
+            ],
+            "destination": "historical_game_events",
+            "aliases": {
+                "date": "stream_day_date",
+                "event timestamp": "event_ts",
+                "event type": "event_type",
+                "game": "game",
+                "changed by": "changed_by",
+                "parse method": "parse_method",
+                "next distinct game timestamp": "next_distinct_game_ts",
+                "source line": "source_line",
+                "raw source text": "raw_source_text",
+                "matches stream day": "matches_stream_day",
+            },
+        },
         "twitch_daily": {
             "platform": "Twitch",
             "required_any": [
@@ -126,6 +208,8 @@ class ImportCenterService:
                 rows_inserted INTEGER DEFAULT 0,
                 rows_updated INTEGER DEFAULT 0,
                 rows_skipped INTEGER DEFAULT 0,
+                rows_unchanged INTEGER DEFAULT 0,
+                rows_review INTEGER DEFAULT 0,
                 rows_rejected INTEGER DEFAULT 0,
                 warning_json TEXT DEFAULT '[]',
                 error_message TEXT,
@@ -135,7 +219,7 @@ class ImportCenterService:
                 started_at TEXT NOT NULL,
                 finished_at TEXT
             )""",
-            """CREATE UNIQUE INDEX IF NOT EXISTS idx_import_jobs_hash_success
+            """CREATE INDEX IF NOT EXISTS idx_import_jobs_hash_success
                ON import_jobs(file_hash)
                WHERE status IN ('Completed','Completed with warnings')""",
             """CREATE TABLE IF NOT EXISTS import_staging_rows(
@@ -184,6 +268,23 @@ class ImportCenterService:
         ]
         for statement in statements:
             self.db.execute(statement)
+        import_job_columns = {
+            str(row["name"])
+            for _, row in self.db.frame("PRAGMA table_info(import_jobs)").iterrows()
+        }
+        for name in ("rows_unchanged", "rows_review"):
+            if name not in import_job_columns:
+                self.db.execute(
+                    f"ALTER TABLE import_jobs ADD COLUMN {name} INTEGER DEFAULT 0"
+                )
+        # Older workspaces used a unique successful-file hash index. Historical
+        # imports intentionally allow re-import so idempotence can be audited.
+        self.db.execute("DROP INDEX IF EXISTS idx_import_jobs_hash_success")
+        self.db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_import_jobs_hash_success
+               ON import_jobs(file_hash)
+               WHERE status IN ('Completed','Completed with warnings')"""
+        )
         youtube_columns = {
             str(row["name"])
             for _, row in self.db.frame("PRAGMA table_info(youtube_content)").iterrows()
@@ -208,14 +309,87 @@ class ImportCenterService:
         canonical = json.dumps(data, sort_keys=True, default=str, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _rows_equal(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+        """Compare SQL values without treating NULL/NaN or 1/1.0 as changes."""
+        for key, incoming_value in incoming.items():
+            existing_value = existing.get(key)
+            existing_blank = existing_value is None or (
+                not isinstance(existing_value, (list, dict, str))
+                and pd.isna(existing_value)
+            )
+            incoming_blank = incoming_value is None or (
+                not isinstance(incoming_value, (list, dict, str))
+                and pd.isna(incoming_value)
+            )
+            if existing_blank and incoming_blank:
+                continue
+            if existing_blank != incoming_blank:
+                return False
+            if isinstance(existing_value, (int, float)) and isinstance(
+                incoming_value, (int, float)
+            ):
+                if float(existing_value) != float(incoming_value):
+                    return False
+            elif str(existing_value) != str(incoming_value):
+                return False
+        return True
+
+    def _header_match_score(self, headers) -> float:
+        header_set = {self._normalize_header(header) for header in headers}
+        return max(
+            (
+                max(
+                    len(signature & header_set) / max(len(signature), 1)
+                    for signature in definition["required_any"]
+                )
+                for definition in self.DETECTORS.values()
+            ),
+            default=0.0,
+        )
+
+    def _xlsx_sheet(self, path: Path) -> str:
+        workbook = pd.ExcelFile(path)
+        ranked = []
+        for index, sheet in enumerate(workbook.sheet_names):
+            try:
+                headers = list(pd.read_excel(path, sheet_name=sheet, nrows=0).columns)
+            except Exception:
+                continue
+            ranked.append((self._header_match_score(headers), -index, sheet))
+        if not ranked or max(ranked)[0] < 0.35:
+            raise ValueError("No supported analytics table was found in the workbook.")
+        return max(ranked)[2]
+
     def read_headers(self, path):
         path = Path(path)
+        if path.suffix.lower() in {".xlsx", ".xlsm"}:
+            return list(
+                pd.read_excel(
+                    path,
+                    sheet_name=self._xlsx_sheet(path),
+                    nrows=0,
+                ).columns
+            )
         if path.suffix.lower() not in {".csv", ".tsv"}:
-            raise ValueError("Only CSV and TSV files are currently supported.")
+            raise ValueError("Only CSV, TSV, XLSX, and XLSM files are supported.")
         delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.reader(handle, delimiter=delimiter)
             return next(reader, [])
+
+    def _source_rows(self, path: Path):
+        if path.suffix.lower() in {".xlsx", ".xlsm"}:
+            frame = pd.read_excel(
+                path,
+                sheet_name=self._xlsx_sheet(path),
+                dtype=object,
+            )
+            frame = frame.where(pd.notna(frame), None)
+            return frame.to_dict(orient="records")
+        delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            return list(csv.DictReader(handle, delimiter=delimiter))
 
     def detect(self, path) -> DetectionResult:
         path = Path(path)
@@ -283,9 +457,16 @@ class ImportCenterService:
             "max_viewers","unique_viewers","follows","minutes_streamed",
             "minutes_watched","chat_messages","duration_seconds","views",
             "engaged_views","subscribers_gained","subscribers_lost","likes",
-            "comments","shares","impressions","viewer_count"
+            "comments","shares","impressions","viewer_count","peak_viewers",
+            "chatters","live_views","clips_created","clip_views",
+            "new_engaged_viewers","returning_engaged_viewers","prime_subs",
+            "total_paid_subs","total_gifted_subs","game_count",
+            "observed_category_changes","source_line",
         }
-        numeric_float = {"average_viewers","total_revenue","watch_time_hours","ctr"}
+        numeric_float = {
+            "average_viewers","total_revenue","watch_time_hours","ctr",
+            "raid_viewers_pct",
+        }
         if column in numeric_int:
             return int(float(text.replace(",", "").replace("%", "")))
         if column in numeric_float:
@@ -301,6 +482,13 @@ class ImportCenterService:
             return "|".join(str(row.get(k) or "") for k in (
                 "occurred_at","source_channel","viewer_count"
             ))
+        if export_type == "twitch_game_history":
+            return str(row.get("date") or "")
+        if export_type == "twitch_game_events":
+            return "|".join(
+                str(row.get(column) or "")
+                for column in ("event_ts", "event_type", "game", "source_file")
+            )
         return self._row_hash(row)
 
     def _existing_record(self, export_type, key):
@@ -314,16 +502,124 @@ class ImportCenterService:
                    WHERE occurred_at=? AND source_channel=? AND viewer_count=?""",
                 tuple(key.split("|", 2)),
             ),
+            "twitch_game_history": (
+                "SELECT * FROM historical_stream_days WHERE date=?",
+                (key,),
+            ),
+            "twitch_game_events": (
+                """SELECT * FROM historical_game_events
+                   WHERE event_ts=? AND event_type=? AND game=? AND source_file=?""",
+                tuple(key.split("|", 3)),
+            ),
         }
         if export_type not in queries:
             return None
         sql, params = queries[export_type]
         frame = self.db.frame(sql, params)
-        return frame.iloc[0].to_dict() if not frame.empty else None
+        if not frame.empty:
+            return frame.iloc[0].to_dict()
+        if export_type == "twitch_game_events":
+            review = self.db.frame(
+                """SELECT * FROM historical_game_event_review
+                   WHERE event_ts=? AND event_type=? AND game=? AND source_file=?""",
+                tuple(key.split("|", 3)),
+            )
+            if not review.empty:
+                return review.iloc[0].to_dict()
+        return None
+
+    @staticmethod
+    def _iso_date(value) -> str | None:
+        if value is None or str(value).strip() == "":
+            return None
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _sequence_games(value) -> list[str]:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        for delimiter in (" → ", "→", " -> ", "->", " | ", "|", ";"):
+            if delimiter in text:
+                return [part.strip() for part in text.split(delimiter) if part.strip()]
+        return [text]
+
+    @staticmethod
+    def _iso_timestamp(value) -> str | None:
+        if value is None or str(value).strip() == "":
+            return None
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.isna(parsed):
+            return str(value).strip()
+        rendered = parsed.strftime("%Y-%m-%dT%H:%M:%S")
+        return rendered[:-3] if rendered.endswith(":00") else rendered
+
+    def _prepare_historical_row(self, row: dict[str, Any], source_file: str):
+        row["date"] = self._iso_date(row.get("date"))
+        games = self._sequence_games(row.get("canonical_game_sequence"))
+        row["canonical_game_sequence"] = " → ".join(games) or None
+        row["stream_day_id"] = row.get("stream_day_id") or (
+            f"day-{row['date']}" if row.get("date") else None
+        )
+        row["first_observed_game"] = row.get("first_observed_game") or (
+            games[0] if games else None
+        )
+        row["last_observed_game"] = row.get("last_observed_game") or (
+            games[-1] if games else None
+        )
+        row["game_count"] = int(row.get("game_count") or len(games))
+        row["mapping_status"] = row.get("mapping_status") or (
+            "Source-backed" if games else "Unresolved"
+        )
+        row["mapping_confidence"] = row.get("mapping_confidence") or (
+            "None" if not games else None
+        )
+        row["original_game_sequence"] = (
+            row.get("original_game_sequence") or row.get("canonical_game_sequence")
+        )
+        row["original_mapping_status"] = (
+            row.get("original_mapping_status") or row.get("mapping_status")
+        )
+        row["original_confidence"] = (
+            row.get("original_confidence") or row.get("mapping_confidence")
+        )
+        if (
+            row.get("raid_viewers_pct") is not None
+            and float(row["raid_viewers_pct"]) > 100
+            and "raid" not in str(row.get("quality_flags") or "").lower()
+        ):
+            flag = "Raid viewers percentage exceeds 100"
+            row["quality_flags"] = "; ".join(
+                value for value in (row.get("quality_flags"), flag) if value
+            )
+        row["source_file"] = source_file
+        return row
+
+    def _prepare_event_row(self, row: dict[str, Any], source_file: str):
+        row["stream_day_date"] = self._iso_date(row.get("stream_day_date"))
+        row["event_ts"] = self._iso_timestamp(row.get("event_ts"))
+        row["next_distinct_game_ts"] = self._iso_timestamp(
+            row.get("next_distinct_game_ts")
+        )
+        declared_match = str(row.pop("matches_stream_day", "") or "").strip().lower()
+        row["_matches_stream_day"] = (
+            True if declared_match in {"yes", "true", "1"}
+            else False if declared_match in {"no", "false", "0"}
+            else None
+        )
+        row["source_file"] = source_file
+        return row
 
     def stage(self, path, allow_duplicate_file=False):
         info = self.inspect_file(path)
-        if info["duplicate_file"] and not allow_duplicate_file:
+        historical_type = info["export_type"] in {
+            "twitch_game_history",
+            "twitch_game_events",
+        }
+        if info["duplicate_file"] and not allow_duplicate_file and not historical_type:
             raise ValueError(
                 f"This exact file was already imported in job {info['previous_import_id']}."
             )
@@ -346,66 +642,107 @@ class ImportCenterService:
         )
 
         path = Path(path)
-        delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
         counts = {
             "rows_detected": 0, "rows_staged": 0, "rows_skipped": 0,
-            "rows_rejected": 0
+            "rows_unchanged": 0, "rows_review": 0, "rows_rejected": 0,
         }
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle, delimiter=delimiter)
-            for row_number, raw in enumerate(reader, start=2):
-                counts["rows_detected"] += 1
-                normalized = {}
-                warnings, errors = [], []
-                for source, destination in info["header_map"].items():
-                    try:
-                        normalized[destination] = self._coerce_value(
-                            destination, raw.get(source)
-                        )
-                    except Exception as exc:
-                        errors.append(f"{source}: {exc}")
+        seen_keys = set()
+        for row_number, raw in enumerate(self._source_rows(path), start=2):
+            counts["rows_detected"] += 1
+            normalized = {}
+            warnings, errors = [], []
+            for source, destination in info["header_map"].items():
+                try:
+                    normalized[destination] = self._coerce_value(
+                        destination, raw.get(source)
+                    )
+                except Exception as exc:
+                    errors.append(f"{source}: {exc}")
 
-                key = self._record_key(info["export_type"], normalized)
-                if not key:
-                    errors.append("Required record key is missing.")
+            if info["export_type"] == "twitch_game_history":
+                normalized = self._prepare_historical_row(normalized, path.name)
+                required = ("date", "stream_day_id")
+            elif info["export_type"] == "twitch_game_events":
+                normalized = self._prepare_event_row(normalized, path.name)
+                required = ("stream_day_date", "event_ts", "event_type", "game")
+            else:
+                required = ()
+            for field in required:
+                if normalized.get(field) in {None, ""}:
+                    errors.append(f"Required field is missing: {field}.")
 
-                existing = self._existing_record(info["export_type"], key)
-                if errors:
-                    disposition = "Rejected"
-                    counts["rows_rejected"] += 1
-                elif existing:
-                    comparable = {
-                        k: existing.get(k) for k in normalized
-                    }
-                    if self._row_hash(comparable) == self._row_hash(normalized):
-                        disposition = "Duplicate"
-                        counts["rows_skipped"] += 1
-                    else:
-                        disposition = "Update"
-                        counts["rows_staged"] += 1
-                else:
-                    disposition = "Insert"
-                    counts["rows_staged"] += 1
+            key = self._record_key(info["export_type"], normalized)
+            if not key:
+                errors.append("Required record key is missing.")
 
-                self.db.execute(
-                    """INSERT INTO import_staging_rows(
-                        batch_id,row_number,raw_json,normalized_json,row_key,
-                        disposition,warning_json,error_json
-                    ) VALUES(?,?,?,?,?,?,?,?)""",
-                    (
-                        batch_id,row_number,json.dumps(raw,default=str),
-                        json.dumps(normalized,default=str),key,disposition,
-                        json.dumps(warnings),json.dumps(errors),
-                    ),
+            persistent_normalized = {
+                key_name: value
+                for key_name, value in normalized.items()
+                if not key_name.startswith("_")
+            }
+            existing = self._existing_record(info["export_type"], key)
+            needs_review = False
+            if info["export_type"] == "twitch_game_events" and not errors:
+                day_exists = bool(
+                    self.db.scalar(
+                        "SELECT COUNT(*) FROM historical_stream_days WHERE date=?",
+                        (normalized.get("stream_day_date"),),
+                    )
                 )
+                needs_review = (
+                    normalized.get("_matches_stream_day") is False or not day_exists
+                )
+                if needs_review:
+                    warnings.append(
+                        "Event has no committed matching historical stream-day and was staged for review."
+                    )
+
+            if errors:
+                disposition = "Rejected"
+                counts["rows_rejected"] += 1
+            elif key in seen_keys:
+                disposition = "Duplicate"
+                counts["rows_skipped"] += 1
+                counts["rows_unchanged"] += 1
+            elif existing:
+                comparable = {
+                    field: existing.get(field) for field in persistent_normalized
+                }
+                if self._rows_equal(comparable, persistent_normalized):
+                    disposition = "Duplicate"
+                    counts["rows_skipped"] += 1
+                    counts["rows_unchanged"] += 1
+                else:
+                    disposition = "Review" if needs_review else "Update"
+                    counts["rows_staged"] += 1
+                    counts["rows_review"] += int(needs_review)
+            else:
+                disposition = "Review" if needs_review else "Insert"
+                counts["rows_staged"] += 1
+                counts["rows_review"] += int(needs_review)
+            seen_keys.add(key)
+
+            self.db.execute(
+                """INSERT INTO import_staging_rows(
+                    batch_id,row_number,raw_json,normalized_json,row_key,
+                    disposition,warning_json,error_json
+                ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    batch_id,row_number,json.dumps(raw,default=str),
+                    json.dumps(normalized,default=str),key,disposition,
+                    json.dumps(warnings),json.dumps(errors),
+                ),
+            )
 
         status = "Ready" if counts["rows_staged"] else "No changes"
         self.db.execute(
             """UPDATE import_jobs SET status=?,rows_detected=?,rows_staged=?,
-               rows_skipped=?,rows_rejected=? WHERE batch_id=?""",
+               rows_skipped=?,rows_unchanged=?,rows_review=?,rows_rejected=?
+               WHERE batch_id=?""",
             (
                 status,counts["rows_detected"],counts["rows_staged"],
-                counts["rows_skipped"],counts["rows_rejected"],batch_id,
+                counts["rows_skipped"],counts["rows_unchanged"],
+                counts["rows_review"],counts["rows_rejected"],batch_id,
             ),
         )
         return self.batch_summary(batch_id)
@@ -442,7 +779,7 @@ class ImportCenterService:
             source_connection.close()
         return destination
 
-    def _upsert(self, export_type, row, batch_id):
+    def _upsert(self, export_type, row, batch_id, disposition="Insert"):
         key = self._record_key(export_type, row)
         before = self._existing_record(export_type, key)
 
@@ -471,6 +808,42 @@ class ImportCenterService:
             required = ["occurred_at","source_channel"]
             table = "raid_events"
             conflict = "occurred_at,source_channel,viewer_count"
+        elif export_type == "twitch_game_history":
+            columns = [
+                "date","stream_day_id","minutes_streamed","minutes_watched",
+                "average_viewers","peak_viewers","unique_viewers","follows",
+                "chatters","live_views","raid_viewers_pct","chat_messages",
+                "clips_created","clip_views","new_engaged_viewers",
+                "returning_engaged_viewers","prime_subs","total_paid_subs",
+                "total_gifted_subs","canonical_game_sequence",
+                "first_observed_game","last_observed_game","game_count",
+                "observed_category_changes","mapping_status","mapping_confidence",
+                "evidence_coverage","mapping_source","original_game_sequence",
+                "original_mapping_status","original_confidence","quality_flags",
+                "source_file","import_batch_id","imported_at",
+            ]
+            row["import_batch_id"] = batch_id
+            row["imported_at"] = datetime.now().isoformat()
+            required = ["date", "stream_day_id", "source_file"]
+            table = "historical_stream_days"
+            conflict = "date"
+        elif export_type == "twitch_game_events":
+            columns = [
+                "stream_day_date","event_ts","event_type","game","changed_by",
+                "parse_method","next_distinct_game_ts","source_line",
+                "raw_source_text","source_file","import_batch_id",
+            ]
+            row.pop("_matches_stream_day", None)
+            row["import_batch_id"] = batch_id
+            required = ["event_ts", "event_type", "game", "source_file"]
+            if disposition == "Review":
+                table = "historical_game_event_review"
+                columns.extend(["review_reason", "reviewed_at"])
+                row["review_reason"] = "No committed matching historical stream-day; retained for review."
+                row["reviewed_at"] = None
+            else:
+                table = "historical_game_events"
+            conflict = "event_ts,event_type,game,source_file"
         else:
             raise ValueError(f"Unsupported export type: {export_type}")
 
@@ -484,10 +857,13 @@ class ImportCenterService:
             column for column in available if column not in conflict.split(",")
         ]
         placeholders = ",".join("?" for _ in available)
+        conflict_clause = (
+            " DO UPDATE SET " + ",".join(f"{c}=excluded.{c}" for c in update_columns)
+            if update_columns else " DO NOTHING"
+        )
         sql = f"""INSERT INTO {table}({','.join(available)})
                   VALUES({placeholders})
-                  ON CONFLICT({conflict}) DO UPDATE SET
-                  {','.join(f'{c}=excluded.{c}' for c in update_columns)}"""
+                  ON CONFLICT({conflict}){conflict_clause}"""
         self.db.execute(sql, values)
         after = self._existing_record(export_type, key)
         operation = "Update" if before else "Insert"
@@ -526,10 +902,13 @@ class ImportCenterService:
 
             staged = self.staging_rows(batch_id)
             for _, staged_row in staged.iterrows():
-                if staged_row["disposition"] not in {"Insert","Update"}:
+                if staged_row["disposition"] not in {"Insert","Update","Review"}:
                     continue
                 normalized = json.loads(staged_row["normalized_json"])
-                operation = self._upsert(job["detected_type"], normalized, batch_id)
+                operation = self._upsert(
+                    job["detected_type"], normalized, batch_id,
+                    disposition=staged_row["disposition"],
+                )
                 if operation == "Insert":
                     inserted += 1
                 else:
@@ -545,7 +924,7 @@ class ImportCenterService:
                 shutil.copy2(source_path, archived)
                 archived_path = str(archived)
 
-            warning_count = int(job.get("rows_rejected") or 0)
+            warning_count = int(job.get("rows_rejected") or 0) + int(job.get("rows_review") or 0)
             status = "Completed with warnings" if warning_count else "Completed"
             self.db.execute(
                 """UPDATE import_jobs SET status=?,rows_inserted=?,rows_updated=?,
@@ -600,7 +979,7 @@ class ImportCenterService:
         return self.db.frame(
             """SELECT id,batch_id,file_name,platform,detected_type,status,
                rows_detected,rows_staged,rows_inserted,rows_updated,
-               rows_skipped,rows_rejected,rollback_available,
+               rows_skipped,rows_unchanged,rows_review,rows_rejected,rollback_available,
                started_at,finished_at,error_message
                FROM import_jobs ORDER BY id DESC LIMIT 1000"""
         )
@@ -640,11 +1019,13 @@ class ImportCenterService:
         pattern = "**/*" if folder["recursive"] else "*"
         results = []
         for path in root.glob(pattern):
-            if not path.is_file() or path.suffix.lower() not in {".csv",".tsv"}:
+            if not path.is_file() or path.suffix.lower() not in {".csv",".tsv",".xlsx",".xlsm"}:
                 continue
             try:
                 inspection = self.inspect_file(path)
-                if inspection["duplicate_file"]:
+                if inspection["duplicate_file"] and inspection["export_type"] not in {
+                    "twitch_game_history", "twitch_game_events"
+                }:
                     results.append({"file":str(path),"status":"Already imported"})
                     continue
                 batch = self.stage(path)
