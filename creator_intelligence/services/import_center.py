@@ -577,15 +577,16 @@ class ImportCenterService:
         row["mapping_confidence"] = row.get("mapping_confidence") or (
             "None" if not games else None
         )
-        row["original_game_sequence"] = (
-            row.get("original_game_sequence") or row.get("canonical_game_sequence")
-        )
-        row["original_mapping_status"] = (
-            row.get("original_mapping_status") or row.get("mapping_status")
-        )
-        row["original_confidence"] = (
-            row.get("original_confidence") or row.get("mapping_confidence")
-        )
+        # An explicitly blank original mapping is meaningful historical evidence:
+        # it says the workbook did not know the game before later source evidence
+        # established the canonical sequence. Only synthesize legacy fallbacks when
+        # the source shape did not contain the original fields at all.
+        if "original_game_sequence" not in row:
+            row["original_game_sequence"] = row.get("canonical_game_sequence")
+        if "original_mapping_status" not in row:
+            row["original_mapping_status"] = row.get("mapping_status")
+        if "original_confidence" not in row:
+            row["original_confidence"] = row.get("mapping_confidence")
         if (
             row.get("raid_viewers_pct") is not None
             and float(row["raid_viewers_pct"]) > 100

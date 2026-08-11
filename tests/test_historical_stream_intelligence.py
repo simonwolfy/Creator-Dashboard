@@ -105,3 +105,32 @@ def test_excel_detection_and_single_game_benchmark_safety(tmp_path: Path):
     assert benchmark["game"].tolist() == ["Game A"]
     assert int(benchmark.iloc[0]["stream_days"]) == 1
     assert float(benchmark.iloc[0]["average_viewers"]) == 12.0
+
+
+def test_import_preserves_explicitly_unknown_original_mapping(tmp_path: Path):
+    db, importer = service(tmp_path)
+    source = tmp_path / "history.csv"
+    write_csv(source, [{
+        "Stream Day ID": "day-2026-01-04",
+        "Date": "2026-01-04",
+        "Minutes Streamed": 120,
+        "Canonical Game Sequence": "Game A",
+        "Game Count": 1,
+        "Mapping Status": "Source-backed",
+        "Mapping Confidence": "High",
+        "Mapping Source": "category event evidence",
+        "Original Game Sequence": "",
+        "Original Mapping Status": "Unresolved",
+        "Original Confidence": "None",
+    }])
+
+    staged = importer.stage(source)
+    importer.commit(staged["batch_id"], archive_source=False)
+
+    imported = db.frame(
+        "SELECT * FROM historical_stream_days WHERE date='2026-01-04'"
+    ).iloc[0]
+    assert imported["canonical_game_sequence"] == "Game A"
+    assert imported["original_game_sequence"] in {None, ""}
+    assert imported["original_mapping_status"] == "Unresolved"
+    assert imported["original_confidence"] == "None"
