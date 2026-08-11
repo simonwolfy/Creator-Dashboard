@@ -115,6 +115,7 @@ class TwitchPage(QWidget):
         self.tabs.addTab(self._timeline(),"Timeline editor")
         self.tabs.addTab(self._raids(),"Raids")
         self.tabs.addTab(self._comparison(),"Period comparison")
+        self.tabs.addTab(self._historical(),"Historical data")
         self.tabs.addTab(self._connected_api(),"Connected Twitch API")
         layout.addWidget(self.tabs)
         self.refresh_all()
@@ -181,6 +182,28 @@ class TwitchPage(QWidget):
     def _comparison(self):
         page=QWidget(); layout=QVBoxLayout(page)
         self.compare_table=QTableView(); layout.addWidget(self.compare_table)
+        return page
+
+    def _historical(self):
+        page=QWidget(); layout=QVBoxLayout(page)
+        self.historical_health=QLabel(); self.historical_health.setWordWrap(True)
+        layout.addWidget(self.historical_health)
+        warning=QLabel(
+            "Historical metrics use one row per calendar stream-day. Daily metrics are "
+            "attributed to a category only for source-backed single-game days; multi-game "
+            "days remain visible but are never falsely assigned to one game."
+        )
+        warning.setWordWrap(True); layout.addWidget(warning)
+        tabs=QTabWidget()
+        self.historical_days_table=QTableView(); self.historical_days_table.setSortingEnabled(True)
+        self.historical_benchmarks_table=QTableView(); self.historical_benchmarks_table.setSortingEnabled(True)
+        self.historical_events_table=QTableView(); self.historical_events_table.setSortingEnabled(True)
+        self.historical_review_table=QTableView(); self.historical_review_table.setSortingEnabled(True)
+        tabs.addTab(self.historical_days_table,"Stream days")
+        tabs.addTab(self.historical_benchmarks_table,"Single-game benchmarks")
+        tabs.addTab(self.historical_events_table,"Category evidence")
+        tabs.addTab(self.historical_review_table,"Needs review")
+        layout.addWidget(tabs)
         return page
 
     def _connected_api(self):
@@ -264,6 +287,20 @@ class TwitchPage(QWidget):
         self.timeline_table.setModel(FrameModel(self.service.game_segments().sort_values("segment_start_ts",ascending=False)))
         self.raid_table.setModel(FrameModel(self.service.raids()))
         self.compare_table.setModel(FrameModel(self.service.period_comparison(start,end)))
+        health=self.service.historical_health_summary()
+        self.historical_health.setText(
+            f'{health["stream_days"]:,} stream days | '
+            f'{health["source_backed"]:,} source-backed | '
+            f'{health["unresolved"]:,} unresolved retained | '
+            f'{health["single_game"]:,} single-game | '
+            f'{health["multi_game"]:,} multi-game | '
+            f'{health["matched_events"]:,} matched events | '
+            f'{health["events_for_review"]:,} events retained for review'
+        )
+        self.historical_days_table.setModel(FrameModel(self.service.historical_stream_days()))
+        self.historical_benchmarks_table.setModel(FrameModel(self.service.historical_single_game_benchmarks()))
+        self.historical_events_table.setModel(FrameModel(self.service.historical_game_events()))
+        self.historical_review_table.setModel(FrameModel(self.service.historical_event_review()))
         connected=self.service.connected_status()
         if connected:
             live="Live" if int(connected.get("is_live") or 0) else "Offline"

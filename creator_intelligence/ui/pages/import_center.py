@@ -11,7 +11,7 @@ from creator_intelligence.ui.pages.twitch import FrameModel
 
 class DropZone(QLabel):
     def __init__(self, callback):
-        super().__init__("Drop Twitch or YouTube CSV/TSV exports here")
+        super().__init__("Drop Twitch or YouTube CSV, TSV, or Excel exports here")
         self.callback = callback
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumHeight(120)
@@ -100,7 +100,7 @@ class ImportCenterPage(QWidget):
 
     def choose_files(self):
         paths,_=QFileDialog.getOpenFileNames(
-            self,"Choose analytics exports","","CSV/TSV (*.csv *.tsv)"
+            self,"Choose analytics exports","","Analytics exports (*.csv *.tsv *.xlsx *.xlsm)"
         )
         self.handle_paths(paths)
 
@@ -114,7 +114,8 @@ class ImportCenterPage(QWidget):
                 messages.append(
                     f'{batch["file_name"]}: {batch["detected_type"]} '
                     f'({batch["rows_staged"]} changes, '
-                    f'{batch["rows_skipped"]} duplicates, '
+                    f'{batch.get("rows_unchanged", 0)} unchanged, '
+                    f'{batch.get("rows_review", 0)} retained for review, '
                     f'{batch["rows_rejected"]} rejected)'
                 )
             except Exception as exc:

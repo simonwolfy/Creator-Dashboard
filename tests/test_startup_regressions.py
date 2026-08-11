@@ -25,6 +25,9 @@ FOUNDATIONAL_TABLES = {
     "youtube_cities",
     "youtube_content",
     "youtube_geography",
+    "historical_stream_days",
+    "historical_game_events",
+    "historical_game_event_review",
 }
 
 
@@ -33,7 +36,7 @@ def test_fresh_database_creates_runtime_foundation(tmp_path: Path):
 
     applied = db.migrate()
 
-    assert applied[-1].name == "google_drive_connection_lifecycle"
+    assert applied[-1].name == "historical_stream_foundation"
     assert "runtime_foundation" in {migration.name for migration in applied}
     with db.connect() as con:
         tables = {
