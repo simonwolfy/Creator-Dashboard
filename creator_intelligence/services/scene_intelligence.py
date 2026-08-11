@@ -5,7 +5,8 @@ from typing import Any
 import json
 import math
 import re
-import subprocess
+
+from creator_intelligence.core.processes import windowless_run
 
 class SceneIntelligenceService:
     def __init__(
@@ -437,7 +438,7 @@ class SceneIntelligenceService:
             "-af",f"silencedetect=noise={float(noise_db)}dB:d={float(minimum_duration)}",
             "-f","null","-"
         ]
-        process = subprocess.run(
+        process = windowless_run(
             command,capture_output=True,text=True,check=False
         )
         output = (process.stderr or "") + "\n" + (process.stdout or "")

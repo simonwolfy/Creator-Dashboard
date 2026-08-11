@@ -8,6 +8,8 @@ import shutil
 import subprocess
 from typing import Any, Callable
 
+from creator_intelligence.core.processes import windowless_run
+
 
 @dataclass(frozen=True)
 class FFmpegStatus:
@@ -38,7 +40,7 @@ class FFmpegManagerService:
         environ: dict[str, str] | None = None,
     ):
         self.db = db
-        self.runner = runner or subprocess.run
+        self.runner = runner or windowless_run
         self.which = which or shutil.which
         self.environ = environ if environ is not None else os.environ
         workspace_root = Path(db.path).resolve().parent.parent

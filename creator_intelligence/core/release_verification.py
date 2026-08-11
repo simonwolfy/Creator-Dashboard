@@ -4,13 +4,13 @@ import argparse
 import hashlib
 import json
 import re
-import subprocess
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
 from packaging.version import Version
 
+from creator_intelligence.core.processes import windowless_run
 from creator_intelligence.core.privacy_audit import audit_repository, tracked_paths
 from creator_intelligence.core.versioning import APPLICATION_VERSION, WORKSPACE_SCHEMA_VERSION
 
@@ -65,7 +65,7 @@ def verify_source(root: Path, *, tag: str | None = None) -> list[str]:
         raise RuntimeError("The tagged release signing gate is incomplete.")
     checks.append("tagged releases require and verify Authenticode signatures")
 
-    ignored_tracked = subprocess.run(
+    ignored_tracked = windowless_run(
         ["git", "ls-files", "-ci", "--exclude-standard"],
         cwd=root,
         capture_output=True,
@@ -173,7 +173,7 @@ def write_manifest(
     digest = _checksum_value(checksum.read_text(encoding="ascii"), installer_name)
     if _sha256(installer) != digest:
         raise RuntimeError("Cannot write a manifest for an installer with an invalid checksum.")
-    commit = commit or subprocess.run(
+    commit = commit or windowless_run(
         ["git", "rev-parse", "HEAD"],
         cwd=release_dir.parent,
         capture_output=True,

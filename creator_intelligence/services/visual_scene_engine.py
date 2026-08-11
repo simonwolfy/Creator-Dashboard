@@ -6,6 +6,8 @@ import re
 import subprocess
 from typing import Any, Callable
 
+from creator_intelligence.core.processes import windowless_popen
+
 
 _SHOWINFO_TIME = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 _SHOWINFO_SCORE = re.compile(r"scene_score=([0-9]+(?:\.[0-9]+)?)")
@@ -112,7 +114,7 @@ class VisualSceneEngineService:
             "-f", "null",
             "-",
         ]
-        process = subprocess.Popen(
+        process = windowless_popen(
             command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,

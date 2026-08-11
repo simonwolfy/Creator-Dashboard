@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+
+from creator_intelligence.core.processes import windowless_run
 
 FORBIDDEN_RUNTIME_SUFFIXES = {
     ".db", ".sqlite", ".sqlite3", ".mp4", ".mkv", ".mov", ".webm",
@@ -106,7 +107,7 @@ def audit_repository(root: str | Path, paths: Iterable[str | Path] | None = None
 
 
 def tracked_paths(root: str | Path) -> list[Path]:
-    result = subprocess.run(
+    result = windowless_run(
         ["git", "ls-files", "-z"], cwd=Path(root), capture_output=True, check=True,
     )
     return [
@@ -117,7 +118,7 @@ def tracked_paths(root: str | Path) -> list[Path]:
 
 def audit_git_history(root: str | Path) -> list[PrivacyFinding]:
     """Report sensitive artifact names ever committed, without reading their values."""
-    result = subprocess.run(
+    result = windowless_run(
         ["git", "log", "--all", "--name-only", "--pretty=format:"],
         cwd=Path(root), capture_output=True, text=True, encoding="utf-8",
         errors="ignore", check=True,
