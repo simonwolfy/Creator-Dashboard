@@ -32,6 +32,8 @@ page after a release is published.
 - Connects supported platform accounts and synchronizes permitted statistics.
 - Organizes local media and metadata in an asset library.
 - Watches selected folders for new content.
+- Turns folders of finished videos into reviewable publishing drafts without
+  moving or deleting the original files.
 - Connects Google Drive using read-only metadata access.
 - Extracts video metadata and creates proxies and thumbnails with FFmpeg.
 - Imports, searches, edits, and exports timestamped transcripts.
@@ -328,6 +330,30 @@ directly into unrelated clips.
 
 The current publishing planner organizes and tracks releases. It does not directly
 publish content to every connected social platform.
+
+### Schedule already-edited videos
+
+1. Open **Publishing > Edited Content Inbox**.
+2. Select **Add ready-to-publish folder** and choose the folder containing your
+   finished videos. MP4, MOV, M4V, WebM, AVI, and MKV files are supported.
+3. Review the detected title, description, platform, content type, and preferred
+   publish time. Creator Intelligence never moves, renames, or deletes the original
+   video.
+4. Select one or more videos and choose **Approve** or **Schedule selected**.
+   Scheduled videos appear in the normal publishing queue and 30-day calendar.
+5. After publishing, sync the corresponding platform and choose **Connect published
+   content** using that platform's content ID. This connects verified statistics to
+   the intake record and strengthens future recommendations.
+
+Newly detected videos are neutral evidence. Creator DNA learns only after you edit,
+approve, reject, publish, or connect performance data. Re-scanning is idempotent,
+and identical files are detected by SHA-256 checksum so the same export is not
+queued twice.
+
+Optional sidecar metadata can be stored beside a video. A same-name JSON file may
+contain `title`, `description`, `platform`, `content_type`, and
+`planned_publish_at`. A same-name text file uses its first non-empty line as the
+title and the remaining lines as the description.
 
 ## Backups and updates
 

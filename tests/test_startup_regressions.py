@@ -1,6 +1,6 @@
-from pathlib import Path
-import sqlite3
 import os
+import sqlite3
+from pathlib import Path
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
@@ -10,7 +10,6 @@ from creator_intelligence.data.database import Database
 from creator_intelligence.services.import_schema_compat import upgrade_legacy_import_jobs
 from creator_intelligence.ui.charts import safe_numeric_values
 from creator_intelligence.ui.main_window import MainWindow, ModuleFailurePage
-
 
 FOUNDATIONAL_TABLES = {
     "chat_events",
@@ -28,6 +27,8 @@ FOUNDATIONAL_TABLES = {
     "historical_stream_days",
     "historical_game_events",
     "historical_game_event_review",
+    "edited_content_sources",
+    "edited_content_intake",
 }
 
 
@@ -36,8 +37,9 @@ def test_fresh_database_creates_runtime_foundation(tmp_path: Path):
 
     applied = db.migrate()
 
-    assert applied[-1].name == "historical_stream_foundation"
+    assert applied[-1].name == "edited_content_intake"
     assert "runtime_foundation" in {migration.name for migration in applied}
+    assert "historical_stream_foundation" in {migration.name for migration in applied}
     with db.connect() as con:
         tables = {
             str(row[0])

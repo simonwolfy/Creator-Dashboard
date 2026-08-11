@@ -10,6 +10,9 @@ from typing import Any
 import pandas as pd
 
 from creator_intelligence.core.exceptions import DatabaseError, MigrationError
+from creator_intelligence.data.edited_content_migration import (
+    EDITED_CONTENT_MIGRATIONS,
+)
 from creator_intelligence.data.google_drive_folder_migration import GOOGLE_DRIVE_FOLDER_MIGRATIONS
 from creator_intelligence.data.google_drive_metadata_migration import (
     GOOGLE_DRIVE_METADATA_MIGRATIONS,
@@ -41,6 +44,7 @@ class Database:
                 *VIDEO_METADATA_MIGRATIONS,
                 *RUNTIME_FOUNDATION_MIGRATIONS,
                 *HISTORICAL_STREAM_MIGRATIONS,
+                *EDITED_CONTENT_MIGRATIONS,
             ]
         )
         self.last_applied_migrations: list[MigrationRecord] = []
