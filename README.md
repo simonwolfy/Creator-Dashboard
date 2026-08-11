@@ -39,10 +39,13 @@ and become the recommended download.
 
 Creator Intelligence currently targets 64-bit Windows 10 or Windows 11.
 
-For the source version you need:
+Installed and source setups differ:
 
-- Python 3.11 or newer; Python 3.12 is recommended.
-- An internet connection for the initial dependency installation.
+- The Windows installer includes Python and all application libraries. Installed
+  users do not need to install Python separately.
+- Source users need Python 3.11 or newer; Setup Once installs Python 3.12 through
+  WinGet when Python is missing.
+- An internet connection for Setup Once to obtain FFmpeg and the Whisper base model.
 - Git, unless you download the repository as a ZIP file.
 - FFmpeg and FFprobe for media processing. These are optional during setup and can
   be installed or selected later inside the app.
@@ -59,6 +62,7 @@ When a signed installer is available:
 3. Download the matching `.sha256` file if you want to verify it independently.
 4. Run the installer and follow the prompts.
 5. Open **Creator Intelligence** from the Start menu.
+6. In the welcome wizard, select **Run Setup Once for FFmpeg and Whisper**.
 
 The installer changes application files only. Your selected workspace remains in
 its original location during upgrades and uninstall.
@@ -93,9 +97,11 @@ Double-click:
 SETUP_ONCE.bat
 ```
 
-This creates a private Python environment in `.venv` and installs the required
-packages. It does not need to run before every launch. Run it again only after
-dependency files change, or if the `.venv` folder is removed or damaged.
+This installs Python 3.12 through WinGet when needed, creates a private Python
+environment in `.venv`, installs the application libraries, installs FFmpeg and
+FFprobe, and downloads the Whisper base model. It does not need to run before
+every launch. Run it again only after dependency files change, if `.venv` is
+removed or damaged, or if Settings reports a missing local component.
 
 ### 3. Launch the dashboard
 
@@ -139,12 +145,11 @@ If PowerShell blocks environment activation, the activation step can be skipped:
 
 The welcome wizard guides you through initial setup:
 
-1. Choose a workspace folder.
-2. Enter a workspace and channel name.
-3. Review the local-data privacy notice.
-4. Run the computer and dependency check.
-5. Select the platforms you plan to use, or skip connections for now.
-6. Finish setup and allow the empty local database to initialize.
+1. Review the local-data privacy notice.
+2. Choose a workspace folder and enter the workspace and channel names.
+3. Run the computer check and **Setup Once** for FFmpeg, FFprobe, and Whisper.
+4. Select the platforms you plan to use, or skip connections for now.
+5. Finish setup and allow the empty local database to initialize.
 
 Choose a workspace outside the Git repository, such as:
 
@@ -160,13 +165,15 @@ You can reopen the wizard later from **Settings > Open welcome and workspace set
 
 ## Recommended setup order
 
-### 1. Configure FFmpeg
+### 1. Complete local processing setup
 
-Open **FFmpeg Manager**.
+Open **Settings → Local processing setup → Open Setup Once** if you skipped it
+during the welcome wizard.
 
-- Click the WinGet installation option, or select a folder containing both
-  `ffmpeg.exe` and `ffprobe.exe`.
-- Confirm the page reports that both tools are ready.
+- Keep both installation options selected and choose **Run Setup Once**.
+- Confirm Python/application libraries, Whisper, FFmpeg, and the base model all
+  report **Ready**.
+- GPU drivers and CUDA are optional. Whisper automatically falls back to CPU.
 - Restart Creator Intelligence after changing FFmpeg paths if an open processing
   page still shows the previous status.
 
@@ -347,6 +354,13 @@ Python launcher during setup. Close and reopen the terminal afterward.
 
 Open **FFmpeg Manager**, use the guided WinGet installation, or select the `bin`
 folder containing both FFmpeg executables.
+
+### Whisper model is not ready
+
+Open **Settings → Local processing setup → Open Setup Once** and run the model
+download again. Partial downloads are safe to retry. The model is stored under
+your local application-data folder and is shared by all Creator Intelligence
+workspaces.
 
 ### A platform will not connect
 

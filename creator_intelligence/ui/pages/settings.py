@@ -38,6 +38,7 @@ class SettingsPage(QWidget):
         self.context = context
         self.onboarding = context.services.get("onboarding") if context else None
         self.update_checker = context.services.get("update_checker") if context else None
+        self.runtime_setup = context.services.get("runtime_setup") if context else None
         self.update_release = None
         self.update_worker = None
         self.download_worker = None
@@ -164,6 +165,16 @@ class SettingsPage(QWidget):
         update_form.addRow(update_actions)
         layout.addWidget(updates)
 
+        runtime = QGroupBox("Local processing setup")
+        runtime_form = QFormLayout(runtime)
+        self.runtime_status = QLabel(); self.runtime_status.setWordWrap(True)
+        runtime_button = QPushButton("Open Setup Once")
+        runtime_button.clicked.connect(self.open_runtime_setup)
+        runtime_form.addRow("Status", self.runtime_status)
+        runtime_form.addRow(runtime_button)
+        layout.addWidget(runtime)
+        self.refresh_runtime_status()
+
         buttons = QHBoxLayout()
         backup = QPushButton("Create database backup")
         backup.clicked.connect(self.make_backup)
@@ -241,6 +252,26 @@ class SettingsPage(QWidget):
             return
         from creator_intelligence.ui.dialogs.onboarding import OnboardingWizard
         OnboardingWizard(self.onboarding,self).exec()
+
+    def refresh_runtime_status(self):
+        if not self.runtime_setup:
+            self.runtime_status.setText("Runtime setup is unavailable in this session.")
+            return
+        result = self.runtime_setup.status()
+        missing = [component.name for component in result.components if not component.ready]
+        self.runtime_status.setText(
+            "All local processing components are ready."
+            if not missing else "Setup needed: " + ", ".join(missing)
+        )
+
+    def open_runtime_setup(self):
+        if not self.runtime_setup:
+            QMessageBox.information(self, "Setup Once", "Runtime setup is unavailable in this session.")
+            return
+        from creator_intelligence.ui.dialogs.runtime_setup import RuntimeSetupDialog
+
+        RuntimeSetupDialog(self.runtime_setup, self).exec()
+        self.refresh_runtime_status()
 
     def check_updates(self):
         if not self.update_checker:

@@ -65,23 +65,47 @@ def test_job_settings_accept_json_and_invalid_values():
     assert service._job_settings({"settings_json": None}) == {}
 
 
-def test_auto_model_falls_back_to_cpu(monkeypatch):
+def test_auto_model_falls_back_to_cpu(monkeypatch, tmp_path):
     service = service_without_init()
     calls = []
 
     class FakeModel:
-        def __init__(self, model_name, device, compute_type):
-            calls.append((model_name, device, compute_type))
+        def __init__(self, model_name, device, compute_type, download_root=None):
+            calls.append((model_name, device, compute_type, download_root))
             if device == "cuda":
                 raise RuntimeError("CUDA unavailable")
 
     fake_module = SimpleNamespace(WhisperModel=FakeModel)
     monkeypatch.setitem(__import__("sys").modules, "faster_whisper", fake_module)
+    model_path = tmp_path / "models" / "faster-whisper-base"
+    monkeypatch.setattr(
+        "creator_intelligence.services.local_whisper_transcripts.whisper_model_path",
+        lambda _name: model_path,
+    )
 
     model = service._load_model("base", "auto", "auto")
 
     assert isinstance(model, FakeModel)
     assert calls == [
-        ("base", "cuda", "float16"),
-        ("base", "cpu", "int8"),
+        ("base", "cuda", "float16", str(model_path.parent)),
+        ("base", "cpu", "int8", str(model_path.parent)),
     ]
+
+
+def test_prepared_model_directory_is_used_directly(monkeypatch, tmp_path):
+    service = service_without_init(); calls = []
+    model_path = tmp_path / "faster-whisper-base"; model_path.mkdir()
+    for name in ("model.bin", "config.json", "tokenizer.json"):
+        (model_path / name).write_bytes(b"fixture")
+
+    class FakeModel:
+        def __init__(self, model_name, **kwargs):
+            calls.append((model_name, kwargs))
+
+    monkeypatch.setitem(__import__("sys").modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeModel))
+    monkeypatch.setattr(
+        "creator_intelligence.services.local_whisper_transcripts.whisper_model_path",
+        lambda _name: model_path,
+    )
+    service._load_model("base", "cpu", "int8")
+    assert calls[0][0] == str(model_path)

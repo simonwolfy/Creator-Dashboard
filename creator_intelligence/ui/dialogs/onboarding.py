@@ -33,6 +33,8 @@ class OnboardingWizard(QWizard):
         self.diagnostics_table.horizontalHeader().setStretchLastSection(True); d_layout.addWidget(self.diagnostics_table)
         self.diagnostics_progress=QProgressBar(); self.diagnostics_progress.setFormat("%v of %m checks ready"); d_layout.addWidget(self.diagnostics_progress)
         rerun=QPushButton("Run checks again"); rerun.clicked.connect(self.run_diagnostics); d_layout.addWidget(rerun); self.addPage(diagnostics)
+        setup_once=QPushButton("Run Setup Once for FFmpeg and Whisper")
+        setup_once.clicked.connect(self.open_runtime_setup); d_layout.addWidget(setup_once)
         connections=QWizardPage(); connections.setTitle("Optional platform connections")
         c_layout=QVBoxLayout(connections); text=QLabel("Choose the platforms you want to configure after setup. You can skip all of them and use the dashboard locally.")
         text.setWordWrap(True); c_layout.addWidget(text); self.platforms={}
@@ -55,6 +57,12 @@ class OnboardingWizard(QWizard):
         for row,check in enumerate(checks):
             values=(check.name,"Ready" if check.ready else "Required" if check.required else "Optional",check.detail)
             for column,value in enumerate(values):self.diagnostics_table.setItem(row,column,QTableWidgetItem(str(value)))
+
+    def open_runtime_setup(self):
+        from creator_intelligence.ui.dialogs.runtime_setup import RuntimeSetupDialog
+
+        RuntimeSetupDialog(getattr(self.service, "runtime_setup", None), self).exec()
+        self.run_diagnostics()
 
     def accept(self):
         try:

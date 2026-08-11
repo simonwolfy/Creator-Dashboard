@@ -49,8 +49,9 @@ def test_dependency_diagnostics_separate_required_and_optional_tools(tmp_path):
     checks={check.name:check for check in onboarding.diagnostics(tmp_path/"workspace")}
     assert checks["Python"].required and checks["Python"].ready
     assert checks["Workspace folder"].required and checks["Workspace folder"].ready
-    assert checks["FFmpeg"].required is False and checks["FFmpeg"].ready
-    assert checks["FFprobe"].required is False and not checks["FFprobe"].ready
+    assert checks["FFmpeg and FFprobe"].required is False
+    assert checks["FFmpeg and FFprobe"].ready is False
+    assert checks["Whisper base model"].required is False
 
 
 def test_existing_workspace_migration_preserves_identity_and_database(tmp_path):

@@ -33,6 +33,10 @@ Creator Intelligence sends requests only when needed for features you enable:
   That unauthenticated request identifies the application version but does not
   include creator content, workspace paths, or provider credentials. Automatic
   checks can be disabled in Settings.
+- Setup Once contacts Windows Package Manager sources to install FFmpeg when it
+  is missing and Hugging Face to download the selected open-source Whisper model.
+  These downloads do not include creator content, workspace data, platform
+  credentials, or account identifiers. Setup Once runs only when the user selects it.
 
 The current application has no product-usage telemetry, advertising tracker, or
 automatic crash-reporting service. Transcription engines currently supported by
