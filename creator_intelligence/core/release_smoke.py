@@ -28,6 +28,7 @@ UPGRADE_MARKER_VALUE = "preserve-across-upgrade-and-uninstall"
 def run_release_smoke() -> int:
     """Exercise packaged imports, startup, migrations, and an empty disposable workspace."""
     _verify_packaged_oauth_dependencies()
+    _verify_packaged_transcription_dependency()
     with tempfile.TemporaryDirectory(prefix="creator-intelligence-release-smoke-") as temporary:
         workspace = Path(temporary) / "workspace"
         app = CreatorIntelligenceApplication(workspace)
@@ -64,6 +65,15 @@ def _verify_packaged_oauth_dependencies() -> None:
     if float(getattr(keyring.get_keyring(), "priority", 0)) <= 0:
         raise RuntimeError("The packaged operating-system credential backend is unavailable.")
     _verify_oauth_loopback_round_trip(InstalledAppFlow)
+
+
+def _verify_packaged_transcription_dependency() -> None:
+    # Import the runtime used by the Transcripts page so a release cannot succeed
+    # with transcription silently omitted from the standalone executable.
+    from faster_whisper import WhisperModel
+
+    if not callable(WhisperModel):
+        raise RuntimeError("The packaged faster-whisper runtime is unavailable.")
 
 
 def _verify_oauth_loopback_round_trip(installed_app_flow) -> None:

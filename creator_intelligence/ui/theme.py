@@ -59,6 +59,10 @@ def build_stylesheet(theme: str, accent: str) -> str:
         border = "#cfd7e7"
         header = "#e5eaf3"
         disabled = "#a7afbf"
+        success_background = "#dcfce7"
+        success_text = "#166534"
+        error_background = "#fee2e2"
+        error_text = "#991b1b"
     else:
         background = "#0d1018"
         surface = "#131827"
@@ -69,6 +73,10 @@ def build_stylesheet(theme: str, accent: str) -> str:
         border = "#303a5e"
         header = "#202841"
         disabled = "#626b82"
+        success_background = "#123a2a"
+        success_text = "#86efac"
+        error_background = "#401f27"
+        error_text = "#fca5a5"
 
     return f"""
 QMainWindow, QDialog, QWidget {{
@@ -125,6 +133,28 @@ QMenu {{ background: {surface}; color: {text}; border: 1px solid {border}; paddi
 QMenu::item {{ padding: 8px 24px 8px 12px; border-radius: 5px; }}
 QMenu::item:selected {{ background: {accent}; color: {accent_text}; }}
 QStatusBar {{ background: {surface}; color: {muted}; }}
+#tableEmptyState {{ color: {muted}; background: transparent; font-size: 14px; }}
+#statusBanner {{
+    background: {surface_alt}; color: {text}; border: 1px solid {border};
+    border-radius: 7px; padding: 8px 10px;
+}}
+#statusBanner[statusLevel="success"] {{
+    background: {success_background}; color: {success_text};
+}}
+#statusBanner[statusLevel="error"] {{
+    background: {error_background}; color: {error_text};
+}}
+#connectionStatusPanel {{
+    background: {surface_alt}; border: 1px solid {border};
+    border-radius: 8px; padding: 8px;
+}}
+#connectionState {{ font-size: 16px; font-weight: 700; }}
+#connectionState[connectionState="connected"] {{ color: {success_text}; }}
+#connectionState[connectionState="limited"] {{ color: {accent_hover}; }}
+#connectionState[connectionState="expired"],
+#connectionState[connectionState="revoked"],
+#connectionState[connectionState="error"] {{ color: {error_text}; }}
+#connectionAccount, #connectionPermissions {{ color: {muted}; }}
 QScrollBar:horizontal, QScrollBar:vertical {{ background: {background}; border: none; }}
 #pageTitle {{ font-size: 27px; font-weight: 700; padding: 8px 0 14px 0; }}
 #metricCard {{ background: {surface}; border: 1px solid {border}; border-radius: 12px; padding: 8px; }}
@@ -132,5 +162,12 @@ QScrollBar:horizontal, QScrollBar:vertical {{ background: {background}; border: 
 #metricValue {{ font-size: 24px; font-weight: 700; }}
 #metricSubtitle {{ color: {muted}; }}
 #navigationGroup {{ font-weight: 700; color: {muted}; }}
+#sidebarPanel {{ background: {surface}; border-right: 1px solid {border}; }}
+#sidebarToggle {{
+    background: {surface_alt}; color: {text}; padding: 7px 8px;
+    border: 1px solid {border}; border-radius: 6px;
+}}
+#sidebarToggle:hover {{ background: {header}; }}
+#contentScroll {{ background: {background}; border: none; }}
 #accentPreview {{ background: {accent}; border: 1px solid {border}; border-radius: 6px; }}
 """

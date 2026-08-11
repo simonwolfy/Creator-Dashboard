@@ -5,6 +5,17 @@ import numpy as np
 class TwitchIntelligenceService:
     def __init__(self, db):
         self.db = db
+        from creator_intelligence.services.live_stream import LiveStreamService
+        self.live = LiveStreamService(db)
+
+    def sync_connected_account(self):
+        return self.live.sync_twitch_content()
+
+    def connected_content(self):
+        return self.live.twitch_api_content()
+
+    def connected_status(self):
+        return self.live.latest_twitch_status()
 
     def daily(self, start=None, end=None):
         df = self.db.frame("SELECT * FROM twitch_daily ORDER BY date")

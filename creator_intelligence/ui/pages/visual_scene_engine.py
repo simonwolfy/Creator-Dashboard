@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 from creator_intelligence.ui.pages.twitch import FrameModel
+from creator_intelligence.ui.widgets import set_button_enabled
 
 
 class SceneWorker(QObject):
@@ -126,7 +127,9 @@ class VisualSceneEnginePage(QWidget):
         if self._thread is not None:
             return
 
-        self.run_button.setEnabled(False)
+        set_button_enabled(
+            self.run_button, False, "Visual scene analysis is already running."
+        )
         self.status.setText("Starting visual scene analysis…")
 
         thread = QThread()
@@ -172,7 +175,7 @@ class VisualSceneEnginePage(QWidget):
     def _cleanup(self):
         self._thread = None
         self._worker = None
-        self.run_button.setEnabled(True)
+        set_button_enabled(self.run_button, True)
 
     def closeEvent(self, event):
         thread = self._thread

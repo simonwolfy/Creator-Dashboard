@@ -139,12 +139,23 @@ def test_n_minus_one_workspace_upgrade_is_backed_up_and_preserves_data(tmp_path)
             str(row[0])
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
+        drive_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(google_drive_connections)")
+        }
     assert latest_version not in applied
     assert "video_asset_metadata" in tables
-    assert "content_pipeline" not in tables
+    assert "content_pipeline" in tables
+    assert "granted_scopes_json" not in drive_columns
 
     assert run_upgrade_smoke(root) == 0
     assert verify_upgraded_workspace(root) == 0
+    with closing(sqlite3.connect(workspace.paths.database)) as connection:
+        upgraded_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(google_drive_connections)")
+        }
+    assert {"granted_scopes_json", "token_expires_at", "last_synced_at"} <= upgraded_columns
 
 
 def test_source_release_contract_and_exact_tag():

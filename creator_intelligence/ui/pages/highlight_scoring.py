@@ -1,12 +1,17 @@
 import json, pandas as pd
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QTableView,QAbstractItemView,QMessageBox,QInputDialog,QPlainTextEdit
 from creator_intelligence.ui.pages.twitch import FrameModel
+from creator_intelligence.ui.widgets import set_button_enabled
 class HighlightScoringPage(QWidget):
+    navigation_requested=Signal(str,object)
     def __init__(self,service):
-        super().__init__();self.service=service;layout=QVBoxLayout(self);title=QLabel('Highlight Scoring Engine');title.setObjectName('pageTitle');layout.addWidget(title)
+        super().__init__();self.service=service;self.production_project_id=None;layout=QVBoxLayout(self);title=QLabel('Highlight Scoring Engine');title.setObjectName('pageTitle');layout.addWidget(title)
         row=QHBoxLayout()
         for label,fn in [('Generate highlights',self.generate),('Approve',lambda:self.review('Approved')),('Reject',lambda:self.review('Rejected')),('Needs changes',lambda:self.review('Needs changes')),('Override score',self.override),('Edit boundaries',self.boundaries),('Merge IDs',self.merge),('Send to production',self.send),('Refresh',self.refresh)]:
             b=QPushButton(label);b.clicked.connect(fn);row.addWidget(b)
+        self.open_production_button=QPushButton('Open production project');self.open_production_button.clicked.connect(self.open_production)
+        set_button_enabled(self.open_production_button,False,'Send an approved highlight to production first.');row.addWidget(self.open_production_button)
         row.addStretch();layout.addLayout(row);self.summary=QPlainTextEdit();self.summary.setReadOnly(True);self.summary.setMaximumHeight(140);layout.addWidget(self.summary)
         self.transcripts=QTableView();self.transcripts.setSelectionBehavior(QAbstractItemView.SelectRows);layout.addWidget(self.transcripts)
         self.highlights=QTableView();self.highlights.setSelectionBehavior(QAbstractItemView.SelectRows);layout.addWidget(self.highlights);self.transcripts.clicked.connect(lambda _:self.refresh_highlights());self.refresh()
@@ -54,5 +59,8 @@ class HighlightScoringPage(QWidget):
     def send(self):
         hid=self.hid()
         if not hid:return
-        try:pid=self.service.send_to_production(hid);QMessageBox.information(self,'Production project',f'Project {pid} was created.');self.refresh_highlights()
+        try:
+            pid=self.service.send_to_production(hid);self.production_project_id=pid;set_button_enabled(self.open_production_button,True);QMessageBox.information(self,'Production project',f'Project {pid} was created.');self.refresh_highlights()
         except Exception as e:QMessageBox.warning(self,'Cannot send',str(e))
+    def open_production(self):
+        if self.production_project_id is not None:self.navigation_requested.emit('Production',self.production_project_id)

@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
-from datetime import datetime
-import json
-import re
-
 import pandas as pd
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
@@ -131,6 +126,23 @@ class TranscriptsPage(QWidget):
         if not index.isValid():
             return None
         return int(self.jobs_table.model().frame.iloc[index.row()]["id"])
+
+    def open_transcript(self, transcript_id):
+        """Select a transcript when another workflow links into this page."""
+        self.refresh()
+        model = self.transcripts_table.model()
+        if model is None or model.frame.empty:
+            return
+        matches = model.frame.index[
+            model.frame["id"] == int(transcript_id)
+        ].tolist()
+        if not matches:
+            return
+        row = int(matches[0])
+        self.transcripts_table.selectRow(row)
+        self.transcripts_table.setCurrentIndex(model.index(row, 0))
+        self.refresh_details()
+        self.tabs.setCurrentWidget(self.segments_table)
 
     def refresh(self):
         selected_transcript = self.selected_transcript_id()
@@ -296,8 +308,8 @@ class TranscriptsPage(QWidget):
             self,
             "Chapter target",
             "Target chapter length in minutes",
-            20,
-            5,
+            10,
+            3,
             90,
         )
         if not ok:
@@ -306,8 +318,6 @@ class TranscriptsPage(QWidget):
             chapters = self.service.build_chapters(
                 transcript_id, target_minutes=minutes
             )
-            self._improve_chapter_metadata(transcript_id, chapters)
-            chapters = self.service.chapters(transcript_id)
         except Exception as exc:
             QMessageBox.critical(self, "Chapter generation failed", str(exc))
             return
@@ -323,97 +333,6 @@ class TranscriptsPage(QWidget):
         QMessageBox.information(
             self, "Chapters built", f"{count} chapters were created."
         )
-
-    def _improve_chapter_metadata(self, transcript_id, chapters):
-        if chapters.empty:
-            return
-        stop = {
-            "about", "after", "again", "also", "because", "been", "before",
-            "being", "could", "didnt", "doesnt", "dont", "from", "going",
-            "have", "here", "into", "just", "like", "more", "really", "right",
-            "should", "some", "that", "thats", "their", "them", "then", "there",
-            "these", "they", "thing", "this", "those", "through", "very", "want",
-            "were", "what", "when", "where", "which", "while", "with", "would",
-            "yeah", "your", "youre", "okay", "well", "actually", "little",
-        }
-        now = datetime.now().isoformat()
-        for _, chapter in chapters.iterrows():
-            chapter_segments = self.service.segments(
-                transcript_id,
-                start=float(chapter["start_seconds"]),
-                end=float(chapter["end_seconds"]),
-            )
-            if chapter_segments.empty:
-                continue
-            texts = [str(value).strip() for value in chapter_segments["text"] if str(value).strip()]
-            combined = " ".join(texts)
-            words = [
-                word.lower()
-                for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", combined)
-                if word.lower().replace("'", "") not in stop
-            ]
-            counts = Counter(words)
-            keywords = [word for word, _ in counts.most_common(8)]
-
-            phrases = Counter()
-            for text in texts:
-                tokens = [
-                    word.lower()
-                    for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", text)
-                    if word.lower().replace("'", "") not in stop
-                ]
-                for size in (3, 2):
-                    for offset in range(max(0, len(tokens) - size + 1)):
-                        phrase = tuple(tokens[offset:offset + size])
-                        phrases[phrase] += 1
-
-            title = None
-            ranked_phrases = sorted(
-                phrases.items(),
-                key=lambda item: (
-                    -(item[1] * len(item[0])),
-                    -sum(counts[token] for token in item[0]),
-                    item[0],
-                ),
-            )
-            for phrase, _ in ranked_phrases:
-                candidate = " ".join(word.title() for word in phrase)
-                if 8 <= len(candidate) <= 58:
-                    title = candidate
-                    break
-            if not title and keywords:
-                title = " & ".join(word.title() for word in keywords[:3])
-            if not title:
-                title = f'Chapter {int(chapter["chapter_index"]) + 1}'
-
-            summary_texts = texts[:4]
-            summary = " ".join(summary_texts)
-            summary = re.sub(r"\s+", " ", summary).strip()
-            if len(summary) > 320:
-                summary = summary[:320].rsplit(" ", 1)[0] + "…"
-
-            confidences = pd.to_numeric(
-                chapter_segments.get("confidence", pd.Series(dtype=float)),
-                errors="coerce",
-            ).dropna()
-            transcript_confidence = float(confidences.mean()) if not confidences.empty else 0.5
-            keyword_support = min(1.0, sum(counts[word] for word in keywords[:3]) / 12.0)
-            confidence = round(min(0.95, max(0.35, transcript_confidence * 0.75 + keyword_support * 0.25)), 2)
-
-            self.service.db.execute(
-                """UPDATE transcript_chapters
-                   SET title=?,summary=?,keywords_json=?,confidence=?,
-                       source='topic-heuristic',updated_at=?
-                   WHERE id=?""",
-                (
-                    title,
-                    summary,
-                    json.dumps(keywords[:6]),
-                    confidence,
-                    now,
-                    int(chapter["id"]),
-                ),
-            )
 
     def jump_to_chapter(self, index):
         if not index.isValid() or self._chapters.empty:

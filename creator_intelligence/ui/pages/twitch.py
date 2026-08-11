@@ -1,9 +1,8 @@
-from pathlib import Path
 import pandas as pd
 from PySide6.QtWidgets import (
     QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTableView,QTabWidget,QDateEdit,
-    QPushButton,QMessageBox,QFormLayout,QLineEdit,QComboBox,QDialog,QDialogButtonBox,
-    QDoubleSpinBox,QTableWidget,QTableWidgetItem,QAbstractItemView
+    QPushButton,QMessageBox,QFormLayout,QLineEdit,QDialog,QDialogButtonBox,
+    QDoubleSpinBox,QAbstractItemView
 )
 from PySide6.QtCore import QAbstractTableModel, Qt, QDate
 from creator_intelligence.ui.widgets import MetricCard
@@ -29,7 +28,13 @@ class FrameModel(QAbstractTableModel):
             return str(value)
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole:
-            return friendly_header(self.frame.columns[section]) if orientation == Qt.Horizontal else str(section+1)
+            if orientation == Qt.Horizontal:
+                if 0 <= section < len(self.frame.columns):
+                    return friendly_header(self.frame.columns[section])
+                return None
+            if 0 <= section < len(self.frame):
+                return str(section+1)
+            return None
 
 class TwitchPage(QWidget):
     def __init__(self, service, db):
@@ -45,9 +50,10 @@ class TwitchPage(QWidget):
         self.end=QDateEdit(QDate.currentDate()); self.end.setCalendarPopup(True)
         refresh=QPushButton("Apply date range"); refresh.clicked.connect(self.refresh_all)
         export=QPushButton("Export filtered streams"); export.clicked.connect(self.export_streams)
+        sync=QPushButton("Sync connected Twitch data"); sync.clicked.connect(self.sync_connected_twitch)
         filters.addWidget(QLabel("Start")); filters.addWidget(self.start)
         filters.addWidget(QLabel("End")); filters.addWidget(self.end)
-        filters.addWidget(refresh); filters.addWidget(export); filters.addStretch()
+        filters.addWidget(refresh); filters.addWidget(export); filters.addWidget(sync); filters.addStretch()
         layout.addLayout(filters)
 
         self.cards_row=QHBoxLayout()
@@ -68,6 +74,7 @@ class TwitchPage(QWidget):
         self.tabs.addTab(self._timeline(),"Timeline editor")
         self.tabs.addTab(self._raids(),"Raids")
         self.tabs.addTab(self._comparison(),"Period comparison")
+        self.tabs.addTab(self._connected_api(),"Connected Twitch API")
         layout.addWidget(self.tabs)
         self.refresh_all()
 
@@ -135,6 +142,23 @@ class TwitchPage(QWidget):
         self.compare_table=QTableView(); layout.addWidget(self.compare_table)
         return page
 
+    def _connected_api(self):
+        page=QWidget(); layout=QVBoxLayout(page)
+        self.connected_status_label=QLabel()
+        self.connected_status_label.setWordWrap(True)
+        layout.addWidget(self.connected_status_label)
+        limits=QLabel(
+            "The connection supplies current live status, viewer count, channel title/category, "
+            "followers, subscribers, recent broadcasts, and clips. Twitch does not expose the "
+            "full Creator Dashboard history (including watch time and revenue) through Helix, so "
+            "those historical cards continue to use imported Twitch reports."
+        )
+        limits.setWordWrap(True);layout.addWidget(limits)
+        self.connected_content_table=QTableView()
+        self.connected_content_table.setSortingEnabled(True)
+        layout.addWidget(self.connected_content_table)
+        return page
+
     def refresh_all(self):
         start,end=self.dates()
         summary=self.service.summary(start,end)
@@ -170,12 +194,43 @@ class TwitchPage(QWidget):
         switches=self.service.switch_impact()
         self.switch_table.setModel(FrameModel(switches))
         if not switches.empty:
-            labels=[f'{a} → {b}' for a,b in zip(switches["from_game"],switches["to_game"])]
+            labels=[f'{a} → {b}' for a,b in zip(switches["from_game"],switches["to_game"],strict=True)]
             self.switch_chart.bar(labels,switches["change_15m"].fillna(0),"Viewer change")
 
         self.timeline_table.setModel(FrameModel(self.service.game_segments().sort_values("segment_start_ts",ascending=False)))
         self.raid_table.setModel(FrameModel(self.service.raids()))
         self.compare_table.setModel(FrameModel(self.service.period_comparison(start,end)))
+        connected=self.service.connected_status()
+        if connected:
+            live="Live" if int(connected.get("is_live") or 0) else "Offline"
+            followers=(
+                f'{int(connected.get("followers_total")):,} followers'
+                if connected.get("followers_total") is not None else "Followers unavailable"
+            )
+            self.connected_status_label.setText(
+                f'{live} Â· {int(connected.get("viewers") or 0):,} viewers Â· '
+                f'{followers} Â· '
+                f'Last checked {connected.get("captured_at")}'
+            )
+        else:
+            self.connected_status_label.setText(
+                "No connected Twitch sync yet. Connect Twitch in Live Stream Intelligence, then sync here."
+            )
+        self.connected_content_table.setModel(FrameModel(self.service.connected_content()))
+
+    def sync_connected_twitch(self):
+        try:
+            result=self.service.sync_connected_account()
+        except Exception as exc:
+            QMessageBox.critical(self,"Twitch sync",str(exc));return
+        self.refresh_all()
+        status=result.get("status") or {}
+        state="live" if status.get("is_live") else "offline"
+        QMessageBox.information(
+            self,"Twitch sync complete",
+            f'Twitch is {state}. Synced {result.get("videos",0)} broadcasts and '
+            f'{result.get("clips",0)} clips.'
+        )
 
     def selected_id(self, table):
         index=table.currentIndex()

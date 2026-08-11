@@ -11,7 +11,7 @@ The live module stores:
 - Twitch and OBS connection settings
 - projections and final outcomes
 
-## Current working mode
+## Simulation mode
 
 Simulation mode is fully functional and provides:
 
@@ -30,7 +30,7 @@ Simulation mode is fully functional and provides:
 This allows every dashboard, marker, timeline, and prediction calculation to be
 tested without broadcasting.
 
-## Twitch integration foundation
+## Real Twitch tracking
 
 `TwitchLiveAdapter` maps EventSub payloads into the live-session system:
 
@@ -41,9 +41,30 @@ tested without broadcasting.
 - channel.update
 - channel.chat.message
 
-The adapter also validates whether the required local credentials are
-configured. Network transport, browser OAuth, token refresh, and EventSub
-WebSocket reconnection remain isolated behind the adapter.
+The adapter validates the saved Twitch token at startup and at least hourly while
+the application is running. Connection states distinguish connected, limited
+permissions, expired, revoked, disconnected, and provider errors. A rejected or
+expired access token receives one serialized refresh attempt before the creator
+is asked to reconnect.
+
+Twitch's public-client device-code sign-in fills the broadcaster ID, stores the
+rotating access and refresh token pair in the operating-system vault, and does not
+use a client secret or packaged-app callback. A successful connection immediately
+syncs the current channel status, archived videos, and clips.
+
+Real tracking combines EventSub notifications with periodic Helix polling for:
+
+- online/offline state, title, category, and viewer count
+- follower and subscriber totals when the related permission is granted
+- follows, subscriptions, raids, category updates, and live chat events
+- session snapshots, live markers, projections, and the read-only chat interface
+
+Simulation controls and real tracking are separate. Simulated data cannot be
+written into a real Twitch session.
+
+Full chat messages are live-only by default. The database stores anonymous
+activity counts for marker calculations. The creator may explicitly enable full
+chat retention in the connection settings.
 
 ## OBS integration foundation
 

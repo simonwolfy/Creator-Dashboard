@@ -25,6 +25,7 @@ from creator_intelligence.services.backup import BackupService
 from creator_intelligence.services.update_checker import RELEASES_PAGE_URL, UpdateStatus
 from creator_intelligence.ui.theme import ACCENT_PRESETS, DEFAULT_ACCENT, normalize_accent
 from creator_intelligence.ui.update_worker import UpdateCheckWorker, UpdateDownloadWorker
+from creator_intelligence.ui.widgets import set_button_enabled
 from creator_intelligence.utils.paths import BACKUP_DIR, DB_PATH
 
 
@@ -139,13 +140,19 @@ class SettingsPage(QWidget):
         self.check_update_button.clicked.connect(self.check_updates)
         self.open_update_button = QPushButton("View release")
         self.open_update_button.clicked.connect(self.open_update)
-        self.open_update_button.setEnabled(False)
+        set_button_enabled(
+            self.open_update_button, False, "Check for updates to find a release."
+        )
         self.download_update_button = QPushButton("Download verified installer")
         self.download_update_button.clicked.connect(self.download_update)
-        self.download_update_button.setEnabled(False)
+        set_button_enabled(
+            self.download_update_button, False, "Check for updates to find an installer."
+        )
         self.skip_update_button = QPushButton("Skip this version")
         self.skip_update_button.clicked.connect(self.skip_update)
-        self.skip_update_button.setEnabled(False)
+        set_button_enabled(
+            self.skip_update_button, False, "Check for updates to find a version to skip."
+        )
         update_actions.addWidget(self.check_update_button)
         update_actions.addWidget(self.open_update_button)
         update_actions.addWidget(self.download_update_button)
@@ -243,20 +250,32 @@ class SettingsPage(QWidget):
             return
         self.update_checker.set_channel(str(self.update_channel.currentData()))
         self.update_status.setText("Checking GitHub Releases…")
-        self.check_update_button.setEnabled(False)
+        set_button_enabled(
+            self.check_update_button, False, "An update check is already running."
+        )
         self.update_worker = UpdateCheckWorker(self.update_checker, force=True, parent=self)
         self.update_worker.result_ready.connect(self._update_check_finished)
         self.update_worker.start()
 
     def _update_check_finished(self, result):
-        self.check_update_button.setEnabled(True)
+        set_button_enabled(self.check_update_button, True)
         self.update_status.setText(result.message)
         self.update_release = result.release if result.status == UpdateStatus.AVAILABLE else None
         available = self.update_release is not None
-        self.open_update_button.setEnabled(available)
-        self.skip_update_button.setEnabled(available)
-        self.download_update_button.setEnabled(
-            available and bool(self.update_checker and self.update_checker.packaged)
+        set_button_enabled(
+            self.open_update_button, available, "No newer release was found."
+        )
+        set_button_enabled(
+            self.skip_update_button, available, "No newer version is available to skip."
+        )
+        packaged_download = available and bool(
+            self.update_checker and self.update_checker.packaged
+        )
+        set_button_enabled(
+            self.download_update_button,
+            packaged_download,
+            "Verified installer downloads are available in the installed Windows app."
+            if available else "No newer installer was found.",
         )
         if available and self.update_checker and not self.update_checker.packaged:
             self.download_update_button.setToolTip(
@@ -272,7 +291,9 @@ class SettingsPage(QWidget):
             return
         if self.update_checker.skip(self.update_release.version):
             self.update_status.setText(f"Version {self.update_release.version} will be skipped.")
-            self.skip_update_button.setEnabled(False)
+            set_button_enabled(
+                self.skip_update_button, False, "This version is already being skipped."
+            )
         else:
             self.update_status.setText("The skip preference could not be saved.")
 
@@ -281,7 +302,9 @@ class SettingsPage(QWidget):
             return
         if self.download_worker is not None and self.download_worker.running:
             return
-        self.download_update_button.setEnabled(False)
+        set_button_enabled(
+            self.download_update_button, False, "The installer is downloading now."
+        )
         self.update_status.setText("Downloading and verifying the installer…")
         self.download_worker = UpdateDownloadWorker(
             self.update_checker, self.update_release, parent=self
@@ -292,7 +315,7 @@ class SettingsPage(QWidget):
 
     def _download_finished(self, path):
         self.update_status.setText(f"Verified installer downloaded: {path.name}")
-        self.download_update_button.setEnabled(True)
+        set_button_enabled(self.download_update_button, True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
         QMessageBox.information(
             self,
@@ -302,5 +325,5 @@ class SettingsPage(QWidget):
 
     def _download_failed(self, message):
         self.update_status.setText("The installer could not be downloaded and verified.")
-        self.download_update_button.setEnabled(True)
+        set_button_enabled(self.download_update_button, True)
         QMessageBox.warning(self, "Update download", message)

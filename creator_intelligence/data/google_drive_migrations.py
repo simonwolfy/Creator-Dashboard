@@ -20,4 +20,14 @@ GOOGLE_DRIVE_MIGRATIONS = [
         VALUES(1, 'Not configured', '[]', datetime('now'));
         """,
     ),
+    (
+        12,
+        "google_drive_connection_lifecycle",
+        """
+        ALTER TABLE google_drive_connections ADD COLUMN granted_scopes_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE google_drive_connections ADD COLUMN token_expires_at TEXT;
+        ALTER TABLE google_drive_connections ADD COLUMN last_synced_at TEXT;
+        ALTER TABLE google_drive_connections ADD COLUMN last_sync_summary TEXT;
+        """,
+    ),
 ]

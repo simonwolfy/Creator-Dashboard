@@ -1,8 +1,8 @@
 from __future__ import annotations
 from PySide6.QtWidgets import (
     QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QTableView,QTabWidget,
-    QAbstractItemView,QMessageBox,QInputDialog,QComboBox,QSpinBox,QFormLayout,
-    QDialog,QDialogButtonBox,QLineEdit,QDoubleSpinBox,QTextEdit
+    QAbstractItemView,QMessageBox,QInputDialog,QComboBox,QFormLayout,
+    QDialog,QDialogButtonBox,QLineEdit,QTextEdit
 )
 from creator_intelligence.ui.pages.twitch import FrameModel
 from creator_intelligence.services.production_management import PROJECT_STATUSES
@@ -99,6 +99,19 @@ class ProductionPage(QWidget):
         index=self.projects_table.currentIndex()
         if not index.isValid(): return None
         return int(self.projects_table.model().frame.iloc[index.row()]["id"])
+
+    def open_project(self, project_id):
+        """Select a production project when another workflow links into this page."""
+        self.refresh()
+        model=self.projects_table.model()
+        if model is None or model.frame.empty:return
+        matches=model.frame.index[model.frame["id"]==int(project_id)].tolist()
+        if not matches:return
+        row=int(matches[0])
+        self.projects_table.selectRow(row)
+        self.projects_table.setCurrentIndex(model.index(row,0))
+        self.refresh_project_details()
+        self.tabs.setCurrentWidget(self.projects_table)
 
     def refresh(self):
         dashboard=self.service.dashboard()

@@ -17,14 +17,19 @@ checkpointed so the previous bytes do not remain in the active database or its
 WAL. Database backups created after migration therefore contain no provider
 secrets.
 
-Disconnect controls clear local vault entries. TikTok disconnect also calls the
-official OAuth v2 revoke endpoint before deleting the local values. Other
-providers retain their own account-side permission controls; clearing local
-credentials prevents Creator Intelligence from using the account.
+Disconnect controls clear local vault entries. Twitch, YouTube, and TikTok use
+their provider revocation endpoints before deleting local values. Instagram
+retains its account-side permission controls; clearing local credentials prevents
+Creator Intelligence from using the account.
 
 The logging layer redacts bearer headers, named token/secret/password values,
 and recognizable hosted-service key formats before writing to console or file.
 Connection health reports only configured/missing state and never secret values.
+
+Twitch chat text is not retained by default. Live messages remain in memory for
+the current chat interface while anonymous activity records support message-rate
+and unique-chatter metrics. Full chat retention requires an explicit workspace
+setting.
 
 Security regressions verify vault migration, masking, refresh rotation,
 revocation ordering, local deletion, active-database bytes, generated backups,
