@@ -155,12 +155,14 @@ class HierarchicalNavigation(QTreeWidget):
             event.ignore()
             return
 
-        destination_parent, destination_index = destination
-        if not self.move_item(item, destination_parent, destination_index):
+        # Let QTreeWidget perform the native move. Manually taking and reinserting
+        # an item here while accepting MoveAction lets the source-side drag cleanup
+        # remove the already-moved item a second time on some Qt/Windows builds.
+        super().dropEvent(event)
+        if not event.isAccepted() or item.treeWidget() is not self:
             event.ignore()
             return
-        event.setDropAction(Qt.DropAction.MoveAction)
-        event.accept()
+        self.setCurrentItem(item)
         self.orderChanged.emit()
 
     def move_item(self, item, destination_parent, destination_index: int) -> bool:
@@ -298,6 +300,7 @@ class MainWindow(QMainWindow):
         )
         self.content_scroll.setWidget(self.stack)
         self.pages_by_key: dict[str, QWidget] = {}
+        self._navigation_catalog: dict[str, tuple[str, str]] = {}
 
         navigation = list(self.registry.build_navigation())
         grouped_navigation: dict[str, list] = {}
@@ -339,6 +342,7 @@ class MainWindow(QMainWindow):
                 ),
             ):
                 key = self._navigation_key(item)
+                self._navigation_catalog[key] = (group_name, item.label)
                 try:
                     page = item.factory()
                 except Exception as exc:
@@ -363,6 +367,10 @@ class MainWindow(QMainWindow):
             group_item = self._add_navigation_group("System")
             self._add_navigation_item(group_item, "No modules", "system:no-modules")
             self.pages_by_key["system:no-modules"] = page
+            self._navigation_catalog["system:no-modules"] = (
+                "System",
+                "No modules",
+            )
             self.stack.addWidget(page)
 
         self.nav.currentItemChanged.connect(self._show_current_navigation_page)
@@ -561,6 +569,13 @@ class MainWindow(QMainWindow):
             self.settings.sync()
 
     def _navigation_reordered(self) -> None:
+        self._repair_navigation_inventory()
+        self._persist_navigation_order()
+        # Native drag cleanup finishes after dropEvent returns. Audit once more on
+        # the next event-loop turn so a platform or folder can never stay missing.
+        QTimer.singleShot(0, self._repair_navigation_after_drop)
+
+    def _persist_navigation_order(self) -> None:
         group_order = []
         for index in range(self.nav.topLevelItemCount()):
             group = self.nav.topLevelItem(index)
@@ -573,6 +588,39 @@ class MainWindow(QMainWindow):
             self.settings.setValue(f"navigation/item_order/{group_name}", item_order)
         self.settings.setValue("navigation/group_order", group_order)
         self._save_navigation_state()
+
+    def _repair_navigation_inventory(self) -> list[str]:
+        present = set()
+        groups: dict[str, QTreeWidgetItem] = {}
+        for group_index in range(self.nav.topLevelItemCount()):
+            group = self.nav.topLevelItem(group_index)
+            group_name = str(group.data(0, NAV_GROUP_ROLE))
+            groups[group_name] = group
+            for child_index in range(group.childCount()):
+                key = group.child(child_index).data(0, NAV_KEY_ROLE)
+                if key is not None:
+                    present.add(str(key))
+
+        missing = [key for key in self._navigation_catalog if key not in present]
+        for key in missing:
+            group_name, label = self._navigation_catalog[key]
+            group = groups.get(group_name)
+            if group is None:
+                group = self._add_navigation_group(group_name)
+                groups[group_name] = group
+            self._add_navigation_item(group, label, key)
+        return missing
+
+    def _repair_navigation_after_drop(self) -> None:
+        repaired = self._repair_navigation_inventory()
+        if not repaired:
+            return
+        self._persist_navigation_order()
+        labels = [self._navigation_catalog[key][1] for key in repaired]
+        self.statusBar().showMessage(
+            "Restored navigation item(s): " + ", ".join(labels),
+            5000,
+        )
 
     def _configure_page_tables(self, page: QWidget, page_key: str) -> None:
         attribute_names = {

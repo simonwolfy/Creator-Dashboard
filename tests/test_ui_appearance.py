@@ -235,6 +235,25 @@ def test_main_window_builds_nested_navigation(tmp_path):
     assert window.sidebar_collapsed is False
     assert window.nav.isHidden() is False
 
+    # A missing item is restored immediately and is never persisted as deleted.
+    platforms_group = window.nav.topLevelItem(1)
+    removed_youtube = platforms_group.takeChild(1)
+    assert removed_youtube.text(0) == "YouTube"
+    window._navigation_reordered()
+    assert {
+        platforms_group.child(index).text(0)
+        for index in range(platforms_group.childCount())
+    } == {"Twitch", "YouTube"}
+
+    # Also cover a source-side removal that occurs after dropEvent returns.
+    window._navigation_reordered()
+    platforms_group.takeChild(1)
+    app.processEvents()
+    assert {
+        platforms_group.child(index).text(0)
+        for index in range(platforms_group.childCount())
+    } == {"Twitch", "YouTube"}
+
     system_group = window.nav.takeTopLevelItem(2)
     window.nav.insertTopLevelItem(0, system_group)
     platforms_group = window.nav.topLevelItem(2)
