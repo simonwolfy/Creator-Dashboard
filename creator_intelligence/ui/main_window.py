@@ -510,7 +510,19 @@ class MainWindow(QMainWindow):
             "Production": "open_project",
             "Publishing": "open_item",
         }.get(label)
-        if item_id is not None and page is not None and method_name:
+        if (
+            label == "Publishing"
+            and page is not None
+            and isinstance(item_id, dict)
+            and item_id.get("view") == "package_outcomes"
+        ):
+            opener = getattr(page, "open_outcomes", None)
+            if opener is not None:
+                opener(
+                    item_id.get("package_id"),
+                    prompt_link=bool(item_id.get("prompt_link")),
+                )
+        elif item_id is not None and page is not None and method_name:
             opener = getattr(page, method_name, None)
             if opener is not None:
                 opener(item_id)

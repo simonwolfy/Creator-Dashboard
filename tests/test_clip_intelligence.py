@@ -11,6 +11,34 @@ from creator_intelligence.services.live_stream import LiveStreamService
 from creator_intelligence.services.local_whisper_production import (
     LocalWhisperProductionService,
 )
+from creator_intelligence.ui.pages.creator_packaging_page import (
+    INSUFFICIENT_PUBLISHED_STATISTICS,
+    _outcome_feedback_line,
+)
+
+
+def test_outcome_feedback_uses_published_statistics_safety_net():
+    for missing_score in (None, float("nan"), ""):
+        line = _outcome_feedback_line(
+            "YouTube",
+            {"decision_status": "Published", "actual_score": missing_score},
+        )
+        assert INSUFFICIENT_PUBLISHED_STATISTICS in line
+
+
+def test_outcome_feedback_displays_a_valid_measured_score():
+    line = _outcome_feedback_line(
+        "YouTube",
+        {
+            "decision_status": "Published",
+            "actual_score": 78.25,
+            "match_confidence": 0.91,
+            "milestone_hours": 48,
+        },
+    )
+    assert line == (
+        "YouTube: Published | match 91% | checkpoint 48h | actual score 78.2"
+    )
 
 
 class SQLiteDB:

@@ -153,6 +153,26 @@ class PublishingPage(QWidget):
         self.refresh_dependencies()
         self.tabs.setCurrentWidget(self.items_table)
 
+    def open_outcomes(self, package_id=None, *, prompt_link=False):
+        """Open package outcomes and optionally begin linking a synced post."""
+        self.refresh()
+        self.tabs.setCurrentWidget(self.outcomes_table)
+        if package_id is None:
+            return
+        model = self.outcomes_table.model()
+        if model is None or model.frame.empty:
+            return
+        matches = model.frame.index[
+            model.frame["id"].astype(str) == str(package_id)
+        ].tolist()
+        if not matches:
+            return
+        row = int(matches[0])
+        self.outcomes_table.selectRow(row)
+        self.outcomes_table.setCurrentIndex(model.index(row, 0))
+        if prompt_link:
+            self.link_selected_package()
+
     def refresh(self):
         self.items_table.setModel(FrameModel(self.service.items()))
         self.calendar_table.setModel(FrameModel(self.service.calendar()))
