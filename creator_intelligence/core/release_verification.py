@@ -132,9 +132,17 @@ def verify_bundle(bundle_dir: Path) -> list[str]:
     """Reject creator runtime data and prove required packaged resources are present."""
     bundle_dir = Path(bundle_dir).resolve()
     executable = bundle_dir / "CreatorIntelligence.exe"
-    module_manifest = bundle_dir / "_internal" / "config" / "modules.json"
+    internal_dir = bundle_dir / "_internal"
+    module_manifest = internal_dir / "config" / "modules.json"
     if not executable.is_file() or not module_manifest.is_file():
         raise RuntimeError("The standalone bundle is missing its executable or module manifest.")
+    python_runtimes = [
+        path
+        for path in internal_dir.glob("python*.dll")
+        if re.fullmatch(r"python\d{2,3}\.dll", path.name, flags=re.IGNORECASE)
+    ]
+    if not python_runtimes:
+        raise RuntimeError("The standalone bundle is missing its private Python runtime.")
     top_level = {path.name for path in bundle_dir.iterdir()}
     if top_level != {"CreatorIntelligence.exe", "_internal"}:
         raise RuntimeError("The standalone bundle contains unexpected top-level files or folders.")
@@ -154,6 +162,7 @@ def verify_bundle(bundle_dir: Path) -> list[str]:
         raise RuntimeError("Packaged runtime data is forbidden: " + ", ".join(findings))
     return [
         "standalone executable and module manifest are present",
+        "private Python runtime is bundled",
         "standalone bundle contains no creator runtime state",
     ]
 

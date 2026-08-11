@@ -93,6 +93,10 @@ def test_installer_preserves_external_workspaces_and_creates_shortcuts():
     assert "CompareStr" in installer
     assert "SuppressibleMsgBox" in installer
     assert "\n      MsgBox(" not in installer
+    assert 'Name: "application\\pythonruntime"' in installer
+    assert "Private Python runtime and application libraries (required)" in installer
+    assert 'Source: "..\\dist\\CreatorIntelligence\\_internal\\*"' in installer
+    assert "Components: application\\pythonruntime" in installer
 
 
 def test_installer_release_rank_orders_prereleases_and_prevents_downgrades():
@@ -200,8 +204,19 @@ def test_standalone_bundle_contract_rejects_runtime_state(tmp_path):
     bundle = tmp_path / "CreatorIntelligence"
     (bundle / "_internal" / "config").mkdir(parents=True)
     (bundle / "CreatorIntelligence.exe").write_bytes(b"exe")
+    (bundle / "_internal" / "python312.dll").write_bytes(b"python")
     (bundle / "_internal" / "config" / "modules.json").write_text("{}", encoding="utf-8")
-    assert len(verify_bundle(bundle)) == 2
+    assert len(verify_bundle(bundle)) == 3
     (bundle / "_internal" / "workspace.json").write_text("{}", encoding="utf-8")
     with pytest.raises(RuntimeError, match="runtime data"):
+        verify_bundle(bundle)
+
+
+def test_standalone_bundle_requires_private_python_runtime(tmp_path):
+    bundle = tmp_path / "CreatorIntelligence"
+    (bundle / "_internal" / "config").mkdir(parents=True)
+    (bundle / "CreatorIntelligence.exe").write_bytes(b"exe")
+    (bundle / "_internal" / "config" / "modules.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="private Python runtime"):
         verify_bundle(bundle)
