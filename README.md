@@ -11,14 +11,20 @@ Drive, long-form VODs, clips, editors, and historical content performance.
 > workspace regularly and review generated titles, captions, and recommendations
 > before publishing them.
 
-## Download the current version
+## Download and install the current Windows version
 
-**[Download the current source code (ZIP)](https://github.com/simonwolfy/Creator-Dashboard/archive/refs/heads/main.zip)**
+**[Open the latest successful Windows installer builds](https://github.com/simonwolfy/Creator-Dashboard/actions/workflows/release.yml?query=branch%3Amain+is%3Asuccess)**
 
-This link always downloads the newest version from the default `main` branch.
-When a signed Windows installer is published, it will appear on the
-[GitHub Releases](https://github.com/simonwolfy/Creator-Dashboard/releases) page
-and become the recommended download.
+The recommended preview download is the artifact named
+`CreatorIntelligence-Windows-Setup`. GitHub downloads it as a ZIP containing the
+setup `.exe`, its SHA-256 checksum, and the release manifest at the top level.
+Extract that ZIP before running the setup executable.
+
+GitHub's automatic **Source code (zip)** and **Code > Download ZIP** downloads do
+not contain a generated Windows installer. Use those only when you intend to run
+Creator Intelligence from Python source. Signed public installers will also appear
+on the [GitHub Releases](https://github.com/simonwolfy/Creator-Dashboard/releases)
+page after a release is published.
 
 ## What it does
 
@@ -53,21 +59,30 @@ Installed and source setups differ:
 Platform connections also require credentials from the corresponding provider.
 You can skip all platform connections and configure them later.
 
-## Install with a Windows installer
+## Install with the Windows installer
 
-When a signed installer is available:
+For the newest tested build from `main`:
 
-1. Open the [GitHub Releases](https://github.com/simonwolfy/Creator-Dashboard/releases) page.
-2. Download `CreatorIntelligence-<version>-windows-x64-setup.exe`.
-3. Download the matching `.sha256` file if you want to verify it independently.
-4. Run the installer and follow the prompts.
-5. Open **Creator Intelligence** from the Start menu.
-6. In the welcome wizard, select **Run Setup Once for FFmpeg and Whisper**.
+1. Open [Windows installer builds](https://github.com/simonwolfy/Creator-Dashboard/actions/workflows/release.yml?query=branch%3Amain+is%3Asuccess).
+2. Select the first successful **Windows Release** run in the list.
+3. Scroll to **Artifacts** at the bottom of the run summary.
+4. Download `CreatorIntelligence-Windows-Setup`. GitHub supplies it as a ZIP file
+   and may ask you to sign in first.
+5. Extract the downloaded ZIP. Do not try to run the installer from inside the ZIP.
+6. Run `CreatorIntelligence-<version>-windows-x64-setup.exe`.
+7. Follow the installer prompts, then open **Creator Intelligence** from the Start menu.
+8. In the welcome wizard, choose **Run Setup Once** to prepare FFmpeg, Faster
+   Whisper, and the local speech model used by media-processing jobs.
+
+The ZIP also contains a `.sha256` file and JSON release manifest. Main-branch
+preview installers are automated test builds and may be unsigned, so Windows can
+display a SmartScreen warning. A published signed build should instead be downloaded
+from [GitHub Releases](https://github.com/simonwolfy/Creator-Dashboard/releases).
 
 The installer changes application files only. Your selected workspace remains in
 its original location during upgrades and uninstall.
 
-If no installer is listed yet, use the source installation below.
+If no successful installer build is listed, use the source installation below.
 
 ## Install from source
 
