@@ -29,6 +29,6 @@ Pushing an exact canonical `v*` tag runs regression tests, scans the current tre
 
 ## Automatic update checks
 
-The installed app checks GitHub Releases at most once per day after startup. This work runs in the background and any network failure is nonfatal. Stable is the default channel; preview releases are opt-in under **Settings > Software updates**. A creator may disable automatic checks, check manually, or skip one version.
+The installed app checks GitHub Releases in the background after every launch, and any network failure is nonfatal. Stable is the default channel; preview releases are opt-in under **Settings > Software updates**. A creator may disable automatic checks, check manually, or skip one version.
 
 The app accepts only an exact versioned Windows installer and its exact companion SHA-256 asset. A verified installer can be downloaded to the workspace temporary update folder, but it is never run silently. Source checkouts do not attempt to update themselves.

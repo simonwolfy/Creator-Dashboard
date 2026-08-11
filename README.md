@@ -327,7 +327,7 @@ Open **Settings** to:
 - Select the stable or preview update channel.
 - Check GitHub Releases manually.
 
-Installed builds check for updates in the background at most once per day. A
+Installed builds check for updates in the background after every launch. A
 downloaded installer must pass its matching SHA-256 check and is never run silently.
 Source installations do not update themselves; update them with Git:
 

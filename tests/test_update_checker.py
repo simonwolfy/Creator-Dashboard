@@ -125,8 +125,12 @@ def test_automatic_checks_are_source_safe_throttled_and_skippable(tmp_path):
     first = installed.check()
     assert first.status == UpdateStatus.AVAILABLE
     assert installed.check().status == UpdateStatus.THROTTLED
-    clock[0] += timedelta(days=1, seconds=1)
+    launch_calls = len(installed.transport.fetch_calls)
+    assert installed.check(every_launch=True).status == UpdateStatus.AVAILABLE
+    assert len(installed.transport.fetch_calls) == launch_calls + 1
     installed.skip("5.0.0")
+    assert installed.check(every_launch=True).status == UpdateStatus.SKIPPED
+    clock[0] += timedelta(days=1, seconds=1)
     assert installed.check().status == UpdateStatus.SKIPPED
     assert installed.check(force=True).status == UpdateStatus.AVAILABLE
 

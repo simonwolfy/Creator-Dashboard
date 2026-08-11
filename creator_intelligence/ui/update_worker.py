@@ -8,10 +8,18 @@ from PySide6.QtCore import QObject, Signal
 class UpdateCheckWorker(QObject):
     result_ready = Signal(object)
 
-    def __init__(self, checker, *, force: bool, parent=None):
+    def __init__(
+        self,
+        checker,
+        *,
+        force: bool,
+        every_launch: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
         self.checker = checker
         self.force = force
+        self.every_launch = every_launch
         self.running = False
 
     def start(self) -> None:
@@ -22,7 +30,12 @@ class UpdateCheckWorker(QObject):
 
     def _run(self) -> None:
         try:
-            self.result_ready.emit(self.checker.check(force=self.force))
+            self.result_ready.emit(
+                self.checker.check(
+                    force=self.force,
+                    every_launch=self.every_launch,
+                )
+            )
         finally:
             self.running = False
 

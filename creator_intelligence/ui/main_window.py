@@ -401,14 +401,18 @@ class MainWindow(QMainWindow):
         if (
             self.update_checker is not None
             and getattr(runtime.settings, "auto_check_updates", True)
-            and self.update_checker.should_check()
         ):
             QTimer.singleShot(1500, self._start_automatic_update_check)
 
     def _start_automatic_update_check(self) -> None:
         if self._update_worker is not None and self._update_worker.running:
             return
-        self._update_worker = UpdateCheckWorker(self.update_checker, force=False, parent=self)
+        self._update_worker = UpdateCheckWorker(
+            self.update_checker,
+            force=False,
+            every_launch=True,
+            parent=self,
+        )
         self._update_worker.result_ready.connect(self._handle_automatic_update_result)
         self._update_worker.start()
 

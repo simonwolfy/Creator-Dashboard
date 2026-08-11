@@ -133,7 +133,8 @@ class SettingsPage(QWidget):
         channel_index = self.update_channel.findData(self.config.update_channel)
         self.update_channel.setCurrentIndex(max(0, channel_index))
         self.update_status = QLabel(
-            "Automatic checks use GitHub Releases once per day and never block startup."
+            "Automatic checks use GitHub Releases after every installed-app launch "
+            "and never block startup."
         )
         self.update_status.setWordWrap(True)
         update_actions = QHBoxLayout()

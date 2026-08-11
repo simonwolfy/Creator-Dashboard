@@ -29,7 +29,7 @@ Creator Intelligence sends requests only when needed for features you enable:
 - Google Drive requests metadata-only access. Instagram requests business basic
   and insights permissions. TikTok requests basic user information and video-list
   access. The exact consent screen shown by each provider remains authoritative.
-- The installed app checks public GitHub Releases at most once per day by default.
+- The installed app checks public GitHub Releases after every launch by default.
   That unauthenticated request identifies the application version but does not
   include creator content, workspace paths, or provider credentials. Automatic
   checks can be disabled in Settings.
