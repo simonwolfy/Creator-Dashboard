@@ -13,9 +13,9 @@ The standalone app is written to `dist/CreatorIntelligence`. The unsigned local-
 
 For a quick standalone build without the installer, run `.\tools\build_release.ps1 -SkipInstaller`.
 
-## FFmpeg
+## First-run local processing setup
 
-FFmpeg is deliberately not bundled. On first use, open the FFmpeg settings page to detect an existing copy, select a local `bin` folder, or use the guided Winget installation.
+Python and the application libraries are bundled in the installed application. FFmpeg and the Whisper base model are deliberately prepared after installation so the installer stays smaller and the machine-specific runtime can be repaired without reinstalling the app. On first launch, run **Setup Once** when prompted. The same setup can be checked or retried later under **Settings > Local processing setup**.
 
 ## Upgrades and uninstall
 
