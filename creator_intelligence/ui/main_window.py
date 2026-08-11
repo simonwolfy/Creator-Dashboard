@@ -401,14 +401,18 @@ class MainWindow(QMainWindow):
         if (
             self.update_checker is not None
             and getattr(runtime.settings, "auto_check_updates", True)
-            and self.update_checker.should_check()
         ):
             QTimer.singleShot(1500, self._start_automatic_update_check)
 
     def _start_automatic_update_check(self) -> None:
         if self._update_worker is not None and self._update_worker.running:
             return
-        self._update_worker = UpdateCheckWorker(self.update_checker, force=False, parent=self)
+        self._update_worker = UpdateCheckWorker(
+            self.update_checker,
+            force=False,
+            every_launch=True,
+            parent=self,
+        )
         self._update_worker.result_ready.connect(self._handle_automatic_update_result)
         self._update_worker.start()
 
@@ -510,7 +514,19 @@ class MainWindow(QMainWindow):
             "Production": "open_project",
             "Publishing": "open_item",
         }.get(label)
-        if item_id is not None and page is not None and method_name:
+        if (
+            label == "Publishing"
+            and page is not None
+            and isinstance(item_id, dict)
+            and item_id.get("view") == "package_outcomes"
+        ):
+            opener = getattr(page, "open_outcomes", None)
+            if opener is not None:
+                opener(
+                    item_id.get("package_id"),
+                    prompt_link=bool(item_id.get("prompt_link")),
+                )
+        elif item_id is not None and page is not None and method_name:
             opener = getattr(page, method_name, None)
             if opener is not None:
                 opener(item_id)

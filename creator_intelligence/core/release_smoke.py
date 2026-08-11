@@ -71,9 +71,15 @@ def _verify_packaged_transcription_dependency() -> None:
     # Import the runtime used by the Transcripts page so a release cannot succeed
     # with transcription silently omitted from the standalone executable.
     from faster_whisper import WhisperModel
+    from huggingface_hub import snapshot_download
+    from creator_intelligence.services.runtime_setup import RuntimeSetupService
 
     if not callable(WhisperModel):
         raise RuntimeError("The packaged faster-whisper runtime is unavailable.")
+    if not callable(snapshot_download):
+        raise RuntimeError("The packaged Whisper model downloader is unavailable.")
+    if not RuntimeSetupService(frozen=True).components():
+        raise RuntimeError("The packaged Setup Once runtime is unavailable.")
 
 
 def _verify_oauth_loopback_round_trip(installed_app_flow) -> None:

@@ -13,9 +13,9 @@ The standalone app is written to `dist/CreatorIntelligence`. The unsigned local-
 
 For a quick standalone build without the installer, run `.\tools\build_release.ps1 -SkipInstaller`.
 
-## FFmpeg
+## First-run local processing setup
 
-FFmpeg is deliberately not bundled. On first use, open the FFmpeg settings page to detect an existing copy, select a local `bin` folder, or use the guided Winget installation.
+Python and the application libraries are bundled in the installed application. FFmpeg and the Whisper base model are deliberately prepared after installation so the installer stays smaller and the machine-specific runtime can be repaired without reinstalling the app. On first launch, run **Setup Once** when prompted. The same setup can be checked or retried later under **Settings > Local processing setup**.
 
 ## Upgrades and uninstall
 
@@ -29,6 +29,6 @@ Pushing an exact canonical `v*` tag runs regression tests, scans the current tre
 
 ## Automatic update checks
 
-The installed app checks GitHub Releases at most once per day after startup. This work runs in the background and any network failure is nonfatal. Stable is the default channel; preview releases are opt-in under **Settings > Software updates**. A creator may disable automatic checks, check manually, or skip one version.
+The installed app checks GitHub Releases in the background after every launch, and any network failure is nonfatal. Stable is the default channel; preview releases are opt-in under **Settings > Software updates**. A creator may disable automatic checks, check manually, or skip one version.
 
 The app accepts only an exact versioned Windows installer and its exact companion SHA-256 asset. A verified installer can be downloaded to the workspace temporary update folder, but it is never run silently. Source checkouts do not attempt to update themselves.

@@ -13,6 +13,9 @@ from creator_intelligence.services.transcripts import (
     TranscriptEngineStatus,
     TranscriptService,
 )
+from creator_intelligence.services.runtime_setup import (
+    whisper_model_path, whisper_model_ready,
+)
 
 
 _DLL_DIRECTORY_HANDLES: list[Any] = []
@@ -255,23 +258,31 @@ class LocalWhisperTranscriptService(
         _register_nvidia_dll_directories()
         from faster_whisper import WhisperModel
 
+        installed_model = whisper_model_path(model_name)
+        model_reference = str(installed_model) if whisper_model_ready(installed_model) else model_name
+        download_root = str(installed_model.parent)
         if device != "auto":
             resolved_compute = compute_type
             if resolved_compute == "auto":
                 resolved_compute = "float16" if device == "cuda" else "int8"
-            return WhisperModel(model_name, device=device, compute_type=resolved_compute)
+            return WhisperModel(
+                model_reference, device=device, compute_type=resolved_compute,
+                download_root=download_root,
+            )
 
         try:
             return WhisperModel(
-                model_name,
+                model_reference,
                 device="cuda",
                 compute_type="float16" if compute_type == "auto" else compute_type,
+                download_root=download_root,
             )
         except Exception:
             return WhisperModel(
-                model_name,
+                model_reference,
                 device="cpu",
                 compute_type="int8" if compute_type == "auto" else compute_type,
+                download_root=download_root,
             )
 
     def _job_settings(self, job) -> dict[str, Any]:

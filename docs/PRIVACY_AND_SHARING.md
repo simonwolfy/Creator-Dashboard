@@ -63,7 +63,7 @@ stored values.
 ## Update-check privacy
 
 In the installed Windows app, automatic update checking is enabled by default and
-runs at most once per day after startup. It makes an unauthenticated HTTPS request
+runs in the background after every launch. It makes an unauthenticated HTTPS request
 to the public GitHub Releases API with the application version in the user-agent.
 It does not send channel statistics, transcripts, media, workspace paths, account
 identifiers, provider credentials, or OAuth tokens. The last-check time, selected

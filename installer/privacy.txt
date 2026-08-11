@@ -1,9 +1,11 @@
 Creator Intelligence stores analytics, media metadata, settings, and backups in the workspace you select during first-run setup.
 
+The complete installation includes a private Python runtime and all required application libraries. Creator Intelligence uses this private runtime, so you do not need to install or configure a separate system-wide copy of Python.
+
 Provider credentials are stored in the operating system credential vault. They are not bundled with the application or written to the workspace database.
 
 Uninstalling Creator Intelligence removes the application but preserves your selected workspace. You may delete that workspace separately when you no longer need its data.
 
-FFmpeg is optional and is not bundled. The app can detect an existing installation, guide you to a local binary folder, or offer a Winget installation from its FFmpeg settings page.
+FFmpeg and the local Whisper model are prepared by Setup Once after installation. The app can detect an existing FFmpeg installation or install it through Windows Package Manager. Setup Once downloads only the machine-level processing assets that are not carried inside the installer.
 
 Full privacy notice: https://github.com/simonwolfy/Creator-Dashboard/blob/main/PRIVACY.md

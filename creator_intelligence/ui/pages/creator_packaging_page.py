@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pandas as pd
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -20,8 +22,38 @@ from creator_intelligence.ui.pages.transcript_production import TranscriptProduc
 from creator_intelligence.ui.pages.twitch import FrameModel
 
 
+INSUFFICIENT_PUBLISHED_STATISTICS = (
+    "Not enough published statistics to give an accurate score"
+)
+
+
+def _finite_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _outcome_feedback_line(label, outcome):
+    status = outcome.get("decision_status") or "Pending"
+    actual_score = _finite_number(outcome.get("actual_score"))
+    if actual_score is None:
+        return f"{label}: {status} | {INSUFFICIENT_PUBLISHED_STATISTICS}"
+    match_confidence = _finite_number(outcome.get("match_confidence")) or 0
+    milestone_hours = _finite_number(outcome.get("milestone_hours")) or 0
+    return (
+        f"{label}: {status} | "
+        f"match {match_confidence:.0%} | "
+        f"checkpoint {int(milestone_hours)}h | "
+        f"actual score {actual_score:.1f}"
+    )
+
+
 class CreatorPackagingPage(TranscriptProductionPage):
     """Transcript production page with platform-ready creator packaging."""
+
+    navigation_requested = Signal(str, object)
 
     def __init__(self, service):
         super().__init__(service)
@@ -124,6 +156,8 @@ class CreatorPackagingPage(TranscriptProductionPage):
         reason_lines = "\n".join(f"  • {reason}" for reason in reasons)
         package_lines = []
         outcome_lines = []
+        needs_published_statistics = False
+        connect_package_id = None
         for platform, package in packages.items():
             label = platform.replace("_", " ").title()
             evidence = package.get("historical_evidence") or []
@@ -144,17 +178,23 @@ class CreatorPackagingPage(TranscriptProductionPage):
                 "",
             ])
             package_id = package.get("package_id")
+            if connect_package_id is None and package_id:
+                connect_package_id = package_id
             matched = outcome_frame[outcome_frame["id"] == package_id] if package_id and not outcome_frame.empty else outcome_frame.iloc[0:0]
             if not matched.empty:
                 outcome = matched.iloc[0]
-                actual = outcome.get("actual_score")
-                outcome_lines.append(
-                    f"{label}: {outcome.get('decision_status')} | "
-                    f"match {float(outcome.get('match_confidence') or 0):.0%} | "
-                    f"checkpoint {int(outcome.get('milestone_hours') or 0)}h | "
-                    f"actual score {float(actual):.1f}" if actual == actual else
-                    f"{label}: {outcome.get('decision_status')} | waiting for measured results"
-                )
+                outcome_lines.append(_outcome_feedback_line(label, outcome))
+                if _finite_number(outcome.get("actual_score")) is None:
+                    needs_published_statistics = True
+            else:
+                needs_published_statistics = True
+
+        if not outcome_lines:
+            needs_published_statistics = True
+        outcome_feedback = "\n".join(outcome_lines) or (
+            f"{INSUFFICIENT_PUBLISHED_STATISTICS}. Connect published content "
+            "to begin measuring package results."
+        )
 
         message = (
             f"PACKAGING SCORES\n"
@@ -189,7 +229,7 @@ class CreatorPackagingPage(TranscriptProductionPage):
             f"PLATFORM PACKAGES\n"
             f"{chr(10).join(line for line in package_lines if line is not None)}\n"
             f"OUTCOME FEEDBACK\n"
-            f"{chr(10).join(outcome_lines) or 'Publish and sync these packages to compare predictions with real results.'}"
+            f"{outcome_feedback}"
         )
 
         dialog = QDialog(self)
@@ -212,13 +252,34 @@ class CreatorPackagingPage(TranscriptProductionPage):
         button_row.addWidget(copy_button)
         button_row.addStretch()
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
-        buttons.rejected.connect(dialog.reject)
-        buttons.clicked.connect(dialog.accept)
-        button_row.addWidget(buttons)
+        if needs_published_statistics:
+            connect_button = QPushButton("Connect published content", dialog)
+            connect_button.clicked.connect(
+                lambda: self._connect_published_content(dialog, connect_package_id)
+            )
+            button_row.addWidget(connect_button)
+            continue_button = QPushButton("Continue without a score", dialog)
+            continue_button.clicked.connect(dialog.accept)
+            button_row.addWidget(continue_button)
+        else:
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+            buttons.rejected.connect(dialog.reject)
+            buttons.clicked.connect(dialog.accept)
+            button_row.addWidget(buttons)
         layout.addLayout(button_row)
 
         dialog.exec()
+
+    def _connect_published_content(self, dialog, package_id) -> None:
+        dialog.accept()
+        self.navigation_requested.emit(
+            "Publishing",
+            {
+                "view": "package_outcomes",
+                "package_id": package_id,
+                "prompt_link": bool(package_id),
+            },
+        )
 
     def _refresh_clip_candidates(self, *_args, selected_id: int | None = None) -> None:
         transcript_id = self.selected_transcript_id()

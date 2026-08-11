@@ -50,10 +50,11 @@ def default_workspace_path(home=None) -> Path:
 class OnboardingService:
     """First-run state and workspace initialization; never stores provider secrets."""
 
-    def __init__(self, profile_path=None, *, which=None, python_executable=None):
+    def __init__(self, profile_path=None, *, which=None, python_executable=None, runtime_setup=None):
         self.profile_path = Path(profile_path or default_profile_path())
         self.which = which or shutil.which
         self.python_executable = python_executable or sys.executable
+        self.runtime_setup = runtime_setup
 
     def profile(self) -> InstallationProfile:
         if not self.profile_path.exists():
@@ -74,12 +75,23 @@ class OnboardingService:
         root = Path(workspace_root).expanduser()
         writable, detail = self._writable(root)
         ffmpeg, ffprobe = self.which("ffmpeg"), self.which("ffprobe")
+        if self.runtime_setup is not None:
+            runtime = {component.key: component for component in self.runtime_setup.components()}
+            ffmpeg_ready = runtime["ffmpeg"].ready
+            ffmpeg_detail = runtime["ffmpeg"].detail
+            whisper_ready = runtime["whisper_model"].ready
+            whisper_detail = runtime["whisper_model"].detail
+        else:
+            ffmpeg_ready = bool(ffmpeg and ffprobe)
+            ffmpeg_detail = ffmpeg or "Optional: run Setup Once for FFmpeg and FFprobe."
+            whisper_ready = False
+            whisper_detail = "Optional: run Setup Once to download the local Whisper model."
         return [
             DependencyCheck("Python", True, bool(self.python_executable and Path(self.python_executable).exists()),
                             self.python_executable or "Python executable was not found."),
             DependencyCheck("Workspace folder", True, writable, detail),
-            DependencyCheck("FFmpeg", False, bool(ffmpeg), ffmpeg or "Optional: install FFmpeg for video processing."),
-            DependencyCheck("FFprobe", False, bool(ffprobe), ffprobe or "Optional: install FFmpeg to include FFprobe."),
+            DependencyCheck("FFmpeg and FFprobe", False, ffmpeg_ready, ffmpeg_detail),
+            DependencyCheck("Whisper base model", False, whisper_ready, whisper_detail),
         ]
 
     def complete(self, *, workspace_root, workspace_name, channel_name,

@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Any, Callable
 
+from creator_intelligence.core.processes import windowless_run
+
 
 GPU_JOB_TYPES = {"Generate proxy"}
 CPU_JOB_TYPES = {"Probe metadata", "Extract audio", "Generate thumbnails"}
@@ -45,7 +47,7 @@ class ProcessingSchedulerService:
         logical = max(1, int(os.cpu_count() or 1))
         gpu_name = None
         try:
-            result = subprocess.run(
+            result = windowless_run(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                 capture_output=True,
                 text=True,
@@ -63,7 +65,7 @@ class ProcessingSchedulerService:
         ffmpeg = self.processing.ffmpeg_path
         if ffmpeg:
             try:
-                result = subprocess.run(
+                result = windowless_run(
                     [ffmpeg, "-hide_banner", "-encoders"],
                     capture_output=True,
                     text=True,

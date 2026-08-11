@@ -13,7 +13,11 @@ if (-not $SkipTests) {
 }
 python -m PyInstaller --noconfirm --clean CreatorIntelligence.spec
 python -m creator_intelligence.core.release_verification --bundle dist\CreatorIntelligence
-& (Join-Path $Root "dist\CreatorIntelligence\CreatorIntelligence.exe") --release-smoke-test
+$PackagedExecutable = Join-Path $Root "dist\CreatorIntelligence\CreatorIntelligence.exe"
+$SmokeProcess = Start-Process -FilePath $PackagedExecutable -ArgumentList @("--release-smoke-test") -Wait -PassThru
+if ($SmokeProcess.ExitCode -ne 0) {
+    throw "The standalone packaged smoke test failed with exit code $($SmokeProcess.ExitCode)."
+}
 if (-not $SkipInstaller) {
     if (Test-Path -LiteralPath $ReleaseDir) {
         Remove-Item -LiteralPath $ReleaseDir -Recurse -Force

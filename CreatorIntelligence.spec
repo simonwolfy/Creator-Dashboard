@@ -8,6 +8,10 @@ for package in (
     "google_auth_oauthlib",
     "googleapiclient",
     "keyring.backends",
+    "faster_whisper",
+    "ctranslate2",
+    "huggingface_hub",
+    "tokenizers",
 ):
     hiddenimports.extend(collect_submodules(package))
 hiddenimports = [

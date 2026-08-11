@@ -216,7 +216,12 @@ class UpdateChecker:
         elapsed = self.now() - checked
         return elapsed < timedelta(0) or elapsed >= CHECK_INTERVAL
 
-    def check(self, *, force: bool = False) -> UpdateCheckResult:
+    def check(
+        self,
+        *,
+        force: bool = False,
+        every_launch: bool = False,
+    ) -> UpdateCheckResult:
         current = _version(self.current_version)
         state = self.state_store.load()
         if not force and not self.packaged:
@@ -229,6 +234,7 @@ class UpdateChecker:
         elapsed = self.now() - checked if checked is not None else None
         if (
             not force
+            and not every_launch
             and elapsed is not None
             and timedelta(0) <= elapsed < CHECK_INTERVAL
         ):
