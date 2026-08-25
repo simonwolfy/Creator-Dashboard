@@ -66,7 +66,10 @@ def test_release_pipeline_has_privacy_history_gate_and_artifacts():
     assert "--verify-upgraded-workspace" in workflow
     assert "simulated downgrade" in workflow
     assert "function Invoke-PackagedCheck" in workflow
-    assert "-Wait -PassThru" in workflow
+    assert "function Invoke-BoundedProcess" in workflow
+    assert "WaitForExit" in workflow
+    assert "Stop-Process" in workflow
+    assert "timeout-minutes: 12" in workflow
     assert "Installed-app smoke test" in workflow
     assert "Reinstalled-app smoke test" in workflow
     assert "creator-intelligence-reinstall.log" in workflow
