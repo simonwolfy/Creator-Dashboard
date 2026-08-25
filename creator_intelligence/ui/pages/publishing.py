@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -24,6 +25,22 @@ from PySide6.QtWidgets import (
 
 from creator_intelligence.services.publishing_planner import PLATFORMS, PUBLISH_STATUSES
 from creator_intelligence.ui.pages.twitch import FrameModel
+
+
+class EditedContentIntelligenceWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, service, intake_id: int):
+        super().__init__()
+        self.service = service
+        self.intake_id = int(intake_id)
+
+    def run(self):
+        try:
+            self.completed.emit(self.service.generate_intelligence(self.intake_id))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 class PublishingItemDialog(QDialog):
     def __init__(self, production_projects, parent=None):
@@ -118,6 +135,7 @@ class PublishingPage(QWidget):
         super().__init__()
         self.service=service
         self.intake=intake_service
+        self.intelligence_worker=None
         layout=QVBoxLayout(self)
         title=QLabel("Publishing Planner"); title.setObjectName("pageTitle")
         layout.addWidget(title)
@@ -170,6 +188,7 @@ class PublishingPage(QWidget):
             for label,handler in (
                 ("Add ready-to-publish folder",self.add_intake_folder),
                 ("Scan folders",self.scan_intake_folders),
+                ("Transcribe and create package",self.generate_intake_package),
                 ("Edit selected",self.edit_intake_item),
                 ("Approve",self.approve_intake_items),
                 ("Schedule selected",self.schedule_intake_items),
@@ -179,6 +198,8 @@ class PublishingPage(QWidget):
                 button=QPushButton(label)
                 button.clicked.connect(handler)
                 intake_actions.addWidget(button)
+                if label == "Transcribe and create package":
+                    self.intelligence_button = button
             intake_actions.addStretch()
             intake_layout.addLayout(intake_actions)
             intake_note=QLabel(
@@ -344,6 +365,76 @@ class PublishingPage(QWidget):
             except Exception as exc:
                 QMessageBox.warning(self,"Unable to update video",str(exc))
         self.refresh()
+
+    def generate_intake_package(self):
+        ids=self.selected_intake_ids()
+        if len(ids)!=1:
+            QMessageBox.information(
+                self,"Create package","Select one edited video to transcribe and package."
+            )
+            return
+        if self.intelligence_worker is not None and self.intelligence_worker.isRunning():
+            QMessageBox.information(
+                self,"Create package","A video is already being transcribed."
+            )
+            return
+        self.intelligence_button.setEnabled(False)
+        self.intelligence_button.setText("Transcribing…")
+        self.intelligence_worker=EditedContentIntelligenceWorker(self.intake,ids[0])
+        self.intelligence_worker.completed.connect(self._intake_package_ready)
+        self.intelligence_worker.failed.connect(self._intake_package_failed)
+        self.intelligence_worker.finished.connect(self._intake_worker_finished)
+        self.intelligence_worker.start()
+
+    def _intake_package_ready(self, result):
+        self.refresh()
+        package=result.get("package") or {}
+        if result.get("status") == "Needs more context":
+            QMessageBox.information(
+                self,"More context needed",
+                "The transcript was saved, but there was not enough dependable context "
+                "to invent a title or description. You can edit the transcript and try again."
+            )
+            return
+        title=str(package.get("suggested_title") or "")
+        description=str(
+            ((package.get("platform_packages") or {}).get("youtube_shorts") or {}).get("description")
+            or package.get("suggested_caption") or ""
+        )
+        answer=QMessageBox.question(
+            self,"Package ready",
+            f"Suggested title:\n{title}\n\nSuggested copy:\n{description[:700]}"
+            "\n\nApply this generated copy to the publishing draft? "
+            "The full alternatives remain available in Packaging Review.",
+            QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            try:
+                self.intake.apply_generated_package(int(result["intake_id"]),package)
+            except Exception as exc:
+                QMessageBox.warning(self,"Unable to apply package",str(exc))
+            self.refresh()
+
+    def _intake_package_failed(self, message):
+        self.refresh()
+        QMessageBox.warning(self,"Unable to create package",message)
+
+    def _intake_worker_finished(self):
+        self.intelligence_button.setEnabled(True)
+        self.intelligence_button.setText("Transcribe and create package")
+        self.intelligence_worker.deleteLater()
+        self.intelligence_worker=None
+
+    def closeEvent(self,event):
+        if self.intelligence_worker is not None and self.intelligence_worker.isRunning():
+            QMessageBox.information(
+                self,"Transcription in progress",
+                "Wait for the current local transcription to finish before closing this page."
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def approve_intake_items(self):
         ids=self.selected_intake_ids()

@@ -30,11 +30,15 @@ class EditedContentIntakeService:
         publishing_service,
         folder_watcher: FolderWatcherService | None = None,
         metadata_service: VideoMetadataService | None = None,
+        transcript_service=None,
+        video_processing_service=None,
     ):
         self.db = db
         self.publishing = publishing_service
         self.folders = folder_watcher or FolderWatcherService(db)
         self.metadata = metadata_service or VideoMetadataService(db)
+        self.transcripts = transcript_service
+        self.video_processing = video_processing_service
         self.dna = CreatorDNAService(db)
         self._ensure_schema()
 
@@ -76,6 +80,20 @@ class EditedContentIntakeService:
                ON edited_content_intake(source_platform,source_content_id)""",
         ):
             self.db.execute(statement)
+        columns = {
+            str(row["name"])
+            for _, row in self.db.frame("PRAGMA table_info(edited_content_intake)").iterrows()
+        }
+        for name, definition in (
+            ("transcript_id", "INTEGER"),
+            ("clip_candidate_id", "INTEGER"),
+            ("intelligence_status", "TEXT NOT NULL DEFAULT 'Not started'"),
+            ("intelligence_error", "TEXT"),
+        ):
+            if name not in columns:
+                self.db.execute(
+                    f"ALTER TABLE edited_content_intake ADD COLUMN {name} {definition}"
+                )
 
     def add_folder(self, path: str, *, recursive: bool = True) -> int:
         normalized = str(Path(path).expanduser().resolve())
@@ -269,6 +287,8 @@ class EditedContentIntakeService:
                 metadata.width,metadata.height,metadata.video_codec,
                 intake.source_platform,intake.source_content_id,
                 intake.sidecar_path,intake.publishing_item_id,intake.asset_id,
+                intake.transcript_id,intake.clip_candidate_id,
+                intake.intelligence_status,intake.intelligence_error,
                 intake.updated_at
                 FROM edited_content_intake intake
                 JOIN managed_assets asset ON asset.id=intake.asset_id
@@ -282,6 +302,139 @@ class EditedContentIntakeService:
             params,
         )
         return frame
+
+    def generate_intelligence(self, intake_id: int, *, model_name: str = "base") -> dict[str, Any]:
+        """Transcribe a finished local export and generate reviewable packaging."""
+        if self.transcripts is None or self.video_processing is None:
+            raise RuntimeError("Transcript intelligence is unavailable.")
+        item = self.item(intake_id)
+        asset = self.db.frame(
+            "SELECT location,name FROM managed_assets WHERE id=?", (item["asset_id"],)
+        )
+        if asset.empty:
+            raise FileNotFoundError("The edited video asset is no longer indexed.")
+        source_path = Path(str(asset.iloc[0]["location"])).expanduser().resolve()
+        if not source_path.is_file():
+            raise FileNotFoundError(source_path)
+        self._set_intelligence_state(intake_id, "Transcribing")
+        try:
+            transcript_id = _optional_int(item.get("transcript_id"))
+            if transcript_id is None:
+                media_asset_id = self.video_processing.import_video(
+                    source_path,
+                    display_name=str(asset.iloc[0].get("name") or source_path.name),
+                    auto_probe=False,
+                )
+                job_id = self.transcripts.queue_transcription(
+                    media_asset_id, model_name=model_name
+                )
+                job = self.db.frame(
+                    "SELECT transcript_id FROM transcript_jobs WHERE id=?", (job_id,)
+                )
+                transcript_id = int(job.iloc[0]["transcript_id"])
+                self.db.execute(
+                    "UPDATE edited_content_intake SET transcript_id=?,updated_at=? WHERE id=?",
+                    (transcript_id, _now(), int(intake_id)),
+                )
+                self.transcripts.run_job(job_id)
+            segments = self.transcripts.segments(transcript_id)
+            if segments.empty and transcript_id is not None:
+                pending = self.db.frame(
+                    """SELECT id,status FROM transcript_jobs WHERE transcript_id=?
+                       ORDER BY id DESC LIMIT 1""",
+                    (transcript_id,),
+                )
+                if not pending.empty:
+                    job_id = int(pending.iloc[0]["id"])
+                    if str(pending.iloc[0]["status"]) not in {"Queued", "Running"}:
+                        self.transcripts.retry_job(job_id)
+                    self.transcripts.run_job(job_id)
+                    segments = self.transcripts.segments(transcript_id)
+            if segments.empty:
+                raise RuntimeError("Transcription completed without usable speech segments.")
+            self.transcripts.build_chapters(transcript_id)
+            start = float(segments["start_seconds"].min())
+            end = float(segments["end_seconds"].max())
+            clip_id = _optional_int(item.get("clip_candidate_id"))
+            if clip_id is None:
+                clip_id = int(self.transcripts.add_clip_candidate(
+                    transcript_id,
+                    start,
+                    end,
+                    title=str(item.get("title") or source_path.stem),
+                    reason="Finished local export packaging",
+                    score=0,
+                    source="edited_content_intake",
+                ))
+                self.db.execute(
+                    "UPDATE edited_content_intake SET clip_candidate_id=?,updated_at=? WHERE id=?",
+                    (clip_id, _now(), int(intake_id)),
+                )
+            package = self.transcripts.analyze_clip_candidate(clip_id)
+            status = (
+                "Needs more context"
+                if package.get("packaging_status") == "insufficient_context"
+                else "Ready for review"
+            )
+            self._set_intelligence_state(intake_id, status)
+            return {
+                "intake_id": int(intake_id),
+                "transcript_id": transcript_id,
+                "clip_candidate_id": clip_id,
+                "status": status,
+                "package": package,
+            }
+        except Exception as exc:
+            self._set_intelligence_state(intake_id, "Failed", str(exc))
+            raise
+
+    def apply_generated_package(self, intake_id: int, package: dict[str, Any]) -> dict[str, Any]:
+        """Apply reviewed generated copy to the existing publishing draft."""
+        item = self.item(intake_id)
+        platform = str(item.get("platform") or "").lower()
+        key = {
+            "youtube": "youtube_shorts",
+            "youtube shorts": "youtube_shorts",
+            "tiktok": "tiktok",
+            "instagram": "instagram_reels",
+            "instagram reels": "instagram_reels",
+            "twitch": "twitch",
+        }.get(platform, "youtube_shorts")
+        platform_package = (package.get("platform_packages") or {}).get(key, {})
+        title = platform_package.get("title") or package.get("suggested_title")
+        description = (
+            platform_package.get("description")
+            or platform_package.get("caption")
+            or package.get("suggested_caption")
+        )
+        changes = {}
+        if str(title or "").strip():
+            changes["title"] = str(title).strip()
+        if str(description or "").strip():
+            changes["description"] = str(description).strip()
+        if not changes:
+            raise ValueError("The generated package does not contain usable copy.")
+        updated = self.update_item(intake_id, **changes)
+        self.dna.record_event(
+            "generated_package_applied",
+            subject_type="edited_content",
+            subject_id=intake_id,
+            platform=str(item.get("platform") or ""),
+            evidence_polarity="neutral",
+            evidence_weight=1,
+            field_name="title",
+            new_value=changes.get("title"),
+            metadata={"clip_candidate_id": self.item(intake_id).get("clip_candidate_id")},
+            source="edited_content_intake",
+        )
+        return updated
+
+    def _set_intelligence_state(self, intake_id: int, status: str, error: str | None = None) -> None:
+        self.db.execute(
+            """UPDATE edited_content_intake SET intelligence_status=?,
+               intelligence_error=?,updated_at=? WHERE id=?""",
+            (status, error, _now(), int(intake_id)),
+        )
 
     def item(self, intake_id: int) -> dict[str, Any]:
         frame = self.db.frame(
@@ -624,3 +777,12 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

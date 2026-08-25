@@ -162,12 +162,17 @@ def test_n_minus_one_workspace_upgrade_is_backed_up_and_preserves_data(tmp_path)
             str(row[1])
             for row in connection.execute("PRAGMA table_info(google_drive_connections)")
         }
+        edited_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(edited_content_intake)")
+        }
     assert latest_version not in applied
     assert "video_asset_metadata" in tables
     assert "content_pipeline" in tables
     assert "granted_scopes_json" in drive_columns
     assert "historical_stream_days" in tables
-    assert "edited_content_intake" not in tables
+    assert "edited_content_intake" in tables
+    assert "transcript_id" not in edited_columns
 
     assert run_upgrade_smoke(root) == 0
     assert verify_upgraded_workspace(root) == 0

@@ -37,7 +37,7 @@ def test_fresh_database_creates_runtime_foundation(tmp_path: Path):
 
     applied = db.migrate()
 
-    assert applied[-1].name == "edited_content_intake"
+    assert applied[-1].name == "edited_content_transcript_packaging"
     assert "runtime_foundation" in {migration.name for migration in applied}
     assert "historical_stream_foundation" in {migration.name for migration in applied}
     with db.connect() as con:

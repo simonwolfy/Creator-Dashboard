@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from creator_intelligence.services.local_whisper_transcripts import (
     LocalWhisperTranscriptService,
+    _embedded_vad_available,
 )
 
 
@@ -109,3 +110,21 @@ def test_prepared_model_directory_is_used_directly(monkeypatch, tmp_path):
     )
     service._load_model("base", "cpu", "int8")
     assert calls[0][0] == str(model_path)
+
+
+def test_missing_packaged_vad_asset_is_detected(monkeypatch, tmp_path):
+    package = tmp_path / "faster_whisper"
+    package.mkdir()
+    init_file = package / "__init__.py"
+    init_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "creator_intelligence.services.local_whisper_transcripts.importlib.import_module",
+        lambda name: SimpleNamespace(__file__=str(init_file)),
+    )
+
+    assert _embedded_vad_available() is False
+
+    assets = package / "assets"
+    assets.mkdir()
+    (assets / "silero_vad_v6.onnx").write_bytes(b"model")
+    assert _embedded_vad_available() is True

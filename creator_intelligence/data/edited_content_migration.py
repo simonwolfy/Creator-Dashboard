@@ -41,4 +41,18 @@ EDITED_CONTENT_MIGRATIONS = [
             ON edited_content_intake(source_platform, source_content_id);
         """,
     ),
+    (
+        15,
+        "edited_content_transcript_packaging",
+        """
+        ALTER TABLE edited_content_intake ADD COLUMN transcript_id INTEGER;
+        ALTER TABLE edited_content_intake ADD COLUMN clip_candidate_id INTEGER;
+        ALTER TABLE edited_content_intake ADD COLUMN intelligence_status TEXT NOT NULL DEFAULT 'Not started';
+        ALTER TABLE edited_content_intake ADD COLUMN intelligence_error TEXT;
+        CREATE INDEX IF NOT EXISTS idx_edited_content_transcript
+            ON edited_content_intake(transcript_id);
+        CREATE INDEX IF NOT EXISTS idx_edited_content_clip_candidate
+            ON edited_content_intake(clip_candidate_id);
+        """,
+    ),
 ]
