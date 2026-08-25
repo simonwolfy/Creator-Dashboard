@@ -1,4 +1,4 @@
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 hiddenimports = []
 for package in (
@@ -18,12 +18,14 @@ hiddenimports = [
     module for module in hiddenimports
     if not module.startswith("creator_intelligence.tests")
 ]
+datas = [("config/modules.json", "config")]
+datas.extend(collect_data_files("faster_whisper", includes=["assets/*.onnx"]))
 
 a = Analysis(
     ["creator_intelligence/__main__.py"],
     pathex=["."],
     binaries=[],
-    datas=[("config/modules.json", "config")],
+    datas=datas,
     hiddenimports=hiddenimports,
     excludes=["creator_intelligence.tests", "pytest"],
 )

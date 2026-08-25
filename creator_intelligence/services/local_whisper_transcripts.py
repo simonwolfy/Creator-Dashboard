@@ -22,6 +22,16 @@ _DLL_DIRECTORY_HANDLES: list[Any] = []
 _DLL_DIRECTORIES_REGISTERED = False
 
 
+def _embedded_vad_available() -> bool:
+    """Return whether faster-whisper's optional Silero VAD asset is installed."""
+    try:
+        package = importlib.import_module("faster_whisper")
+        package_file = Path(str(package.__file__))
+    except (ImportError, OSError, AttributeError, TypeError):
+        return False
+    return (package_file.parent / "assets" / "silero_vad_v6.onnx").is_file()
+
+
 def _register_nvidia_dll_directories() -> list[Path]:
     """Expose pip- and toolkit-installed NVIDIA runtime DLLs on Windows."""
     global _DLL_DIRECTORIES_REGISTERED
@@ -206,7 +216,7 @@ class LocalWhisperTranscriptService(
         device = str(settings.get("device") or "auto").lower()
         compute_type = str(settings.get("compute_type") or "auto").lower()
         beam_size = max(1, int(settings.get("beam_size") or 5))
-        vad_filter = bool(settings.get("vad_filter", True))
+        vad_filter = bool(settings.get("vad_filter", True)) and _embedded_vad_available()
 
         model = self._load_model(model_name, device, compute_type)
         segment_iter, info = model.transcribe(
