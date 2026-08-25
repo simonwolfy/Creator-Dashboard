@@ -7,6 +7,8 @@ from creator_intelligence.data.database import Database
 from creator_intelligence.services.edited_content_intake import EditedContentIntakeService
 from creator_intelligence.services.production_management import ProductionManagementService
 from creator_intelligence.services.publishing_planner import PublishingPlannerService
+from creator_intelligence.services.local_whisper_production import LocalWhisperProductionService
+from creator_intelligence.services.video_processing import VideoProcessingService
 
 
 def make_service(tmp_path: Path) -> tuple[Database, PublishingPlannerService, EditedContentIntakeService]:
@@ -187,3 +189,90 @@ def test_rejecting_intake_is_explicit_negative_evidence(tmp_path):
     ).iloc[0]
     assert event["evidence_polarity"] == "negative"
     assert event["evidence_weight"] == 2
+
+
+def test_finished_video_transcription_generates_reviewable_package_without_changing_file(
+    tmp_path, monkeypatch
+):
+    db, publishing, _ = make_service(tmp_path)
+    video_processing = VideoProcessingService(db)
+    transcripts = LocalWhisperProductionService(db, video_processing)
+    service = EditedContentIntakeService(
+        db,
+        publishing,
+        transcript_service=transcripts,
+        video_processing_service=video_processing,
+    )
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    video = ready / "already-edited.mp4"
+    original = b"finished export remains untouched"
+    video.write_bytes(original)
+    service.scan_folder(service.add_folder(str(ready)), probe_metadata=False)
+    intake_id = int(service.items().iloc[0]["id"])
+
+    def fake_run_job(job_id, progress_callback=None):
+        job = db.frame("SELECT transcript_id FROM transcript_jobs WHERE id=?", (job_id,)).iloc[0]
+        transcripts.add_segments(
+            int(job["transcript_id"]),
+            [
+                {"start": 0, "end": 8, "text": "I found the hidden room and nobody expected it."},
+                {"start": 8, "end": 17, "text": "Then the whole plan fell apart and we escaped."},
+            ],
+        )
+        db.execute(
+            "UPDATE transcript_jobs SET status='Completed',progress_percent=100 WHERE id=?",
+            (job_id,),
+        )
+
+    monkeypatch.setattr(transcripts, "run_job", fake_run_job)
+    result = service.generate_intelligence(intake_id)
+
+    assert result["status"] == "Ready for review"
+    assert result["transcript_id"]
+    assert result["clip_candidate_id"]
+    assert result["package"]["suggested_title"]
+    assert result["package"]["platform_packages"]["youtube_shorts"]["description"]
+    assert video.read_bytes() == original
+    stored = service.item(intake_id)
+    assert stored["intelligence_status"] == "Ready for review"
+    assert int(stored["transcript_id"]) == result["transcript_id"]
+
+    applied = service.apply_generated_package(intake_id, result["package"])
+    assert applied["title"] == result["package"]["suggested_title"]
+    assert applied["description"]
+
+
+def test_finished_video_intelligence_failure_is_saved_for_retry(tmp_path):
+    db, publishing, _ = make_service(tmp_path)
+
+    class BrokenTranscripts:
+        def queue_transcription(self, *args, **kwargs):
+            raise RuntimeError("Whisper model unavailable")
+
+    class FakeVideoProcessing:
+        def import_video(self, *args, **kwargs):
+            return 1
+
+    service = EditedContentIntakeService(
+        db,
+        publishing,
+        transcript_service=BrokenTranscripts(),
+        video_processing_service=FakeVideoProcessing(),
+    )
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    (ready / "retry-me.mp4").write_bytes(b"video")
+    service.scan_folder(service.add_folder(str(ready)), probe_metadata=False)
+    intake_id = int(service.items().iloc[0]["id"])
+
+    try:
+        service.generate_intelligence(intake_id)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Expected transcription failure")
+
+    stored = service.item(intake_id)
+    assert stored["intelligence_status"] == "Failed"
+    assert "Whisper model unavailable" in stored["intelligence_error"]

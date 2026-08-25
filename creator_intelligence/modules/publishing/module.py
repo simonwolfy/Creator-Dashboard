@@ -36,6 +36,8 @@ class PublishingModule:
                 ctx.db,
                 registry.resolve("publishing"),
                 registry.resolve("folder_watcher"),
+                transcript_service=registry.resolve("transcripts"),
+                video_processing_service=registry.resolve("video_processing"),
             ),
             module_id=self.metadata.module_id
         ))
