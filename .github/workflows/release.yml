@@ -13,6 +13,7 @@ permissions:
 jobs:
   windows-release:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -127,17 +128,40 @@ jobs:
             throw "The installer Authenticode signature is not valid."
           }
       - name: Install, reject downgrade, upgrade N-1 workspace, reinstall, and uninstall
+        timeout-minutes: 12
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
+          function Invoke-BoundedProcess {
+            param(
+              [Parameter(Mandatory = $true)][string]$FilePath,
+              [Parameter(Mandatory = $true)][string[]]$Arguments,
+              [Parameter(Mandatory = $true)][string]$Description,
+              [int]$TimeoutSeconds = 180
+            )
+            Write-Host "Starting: $Description"
+            $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+              Write-Host "Timed out after $TimeoutSeconds seconds: $Description"
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              throw "$Description timed out after $TimeoutSeconds seconds."
+            }
+            $process.Refresh()
+            Write-Host "Finished with exit code $($process.ExitCode): $Description"
+            return $process
+          }
           function Invoke-PackagedCheck {
             param(
               [Parameter(Mandatory = $true)][string]$Executable,
               [Parameter(Mandatory = $true)][string[]]$Arguments,
               [Parameter(Mandatory = $true)][string]$Description
             )
-            $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -Wait -PassThru
+            $process = Invoke-BoundedProcess `
+              -FilePath $Executable `
+              -Arguments $Arguments `
+              -Description $Description `
+              -TimeoutSeconds 180
             if ($process.ExitCode -ne 0) {
               throw "$Description failed with exit code $($process.ExitCode)."
             }
@@ -158,7 +182,11 @@ jobs:
           $installedExe = Join-Path $installDir "CreatorIntelligence.exe"
           $firstLog = Join-Path $env:RUNNER_TEMP "creator-intelligence-first-install.log"
           $firstArguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir", "/LOG=$firstLog")
-          $first = Start-Process -FilePath $installer.FullName -ArgumentList $firstArguments -Wait -PassThru
+          $first = Invoke-BoundedProcess `
+            -FilePath $installer.FullName `
+            -Arguments $firstArguments `
+            -Description "Clean installation" `
+            -TimeoutSeconds 180
           if ($first.ExitCode -ne 0) {
             Show-InstallerLog $firstLog
             throw "Clean installation failed with exit code $($first.ExitCode)."
@@ -172,7 +200,11 @@ jobs:
           Set-ItemProperty -Path $rankKey -Name ReleaseRank -Value ("9" * 21)
           $downgradeLog = Join-Path $env:RUNNER_TEMP "creator-intelligence-downgrade.log"
           $downgradeArguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir", "/LOG=$downgradeLog")
-          $downgrade = Start-Process -FilePath $installer.FullName -ArgumentList $downgradeArguments -Wait -PassThru
+          $downgrade = Invoke-BoundedProcess `
+            -FilePath $installer.FullName `
+            -Arguments $downgradeArguments `
+            -Description "Simulated downgrade rejection" `
+            -TimeoutSeconds 120
           if ($downgrade.ExitCode -eq 0) { throw "The installer accepted a simulated downgrade." }
           $releaseRank = python -m creator_intelligence.core.release_verification --print-release-rank
           Set-ItemProperty -Path $rankKey -Name ReleaseRank -Value $releaseRank
@@ -183,7 +215,11 @@ jobs:
             -Description "Installed-app N-1 upgrade smoke test"
           $upgradeLog = Join-Path $env:RUNNER_TEMP "creator-intelligence-reinstall.log"
           $upgradeArguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir", "/LOG=$upgradeLog")
-          $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList $upgradeArguments -Wait -PassThru
+          $upgrade = Invoke-BoundedProcess `
+            -FilePath $installer.FullName `
+            -Arguments $upgradeArguments `
+            -Description "Reinstallation" `
+            -TimeoutSeconds 180
           if ($upgrade.ExitCode -ne 0) {
             Show-InstallerLog $upgradeLog
             throw "Reinstallation failed with exit code $($upgrade.ExitCode)."
@@ -194,7 +230,11 @@ jobs:
             -Description "Reinstalled-app smoke test"
           $uninstallers = @(Get-ChildItem $installDir -File -Filter unins*.exe)
           if ($uninstallers.Count -ne 1) { throw "Expected exactly one uninstaller." }
-          $uninstall = Start-Process -FilePath $uninstallers[0].FullName -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
+          $uninstall = Invoke-BoundedProcess `
+            -FilePath $uninstallers[0].FullName `
+            -Arguments @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") `
+            -Description "Uninstallation" `
+            -TimeoutSeconds 180
           if ($uninstall.ExitCode -ne 0) { throw "Uninstall failed with exit code $($uninstall.ExitCode)." }
           if (Test-Path (Join-Path $installDir "CreatorIntelligence.exe")) {
             throw "The installed app remained after uninstall."
