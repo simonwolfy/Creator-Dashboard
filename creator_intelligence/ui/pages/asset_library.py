@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,QFormLayout,QHBoxLayout,QLabel,QLineEdit,QPushButton,QScrollArea,
@@ -94,32 +96,50 @@ class AssetLibraryPage(QWidget):
         if key=="frame_rate":return self._format_fps(row.get(key))
         if key=="aspect_ratio":return self._aspect_ratio(row.get("width"),row.get("height"))
         if key=="bit_rate":return self._format_bitrate(row.get(key))
-        if key=="audio_sample_rate":return f"{int(row[key]):,} Hz" if row.get(key) not in (None,"") else None
-        if key=="rotation":return f"{int(row[key])}°" if row.get(key) not in (None,"") else None
+        if key=="audio_sample_rate":
+            value=self._finite_number(row.get(key));return f"{int(value):,} Hz" if value is not None else None
+        if key=="rotation":
+            value=self._finite_number(row.get(key));return f"{int(value)}°" if value is not None else None
         return row.get(key)
 
     @staticmethod
-    def _resolution(row):
-        w,h=row.get("width"),row.get("height");return f"{int(w)} × {int(h)}" if w and h else "—"
+    def _finite_number(value):
+        if value is None or (isinstance(value,str) and not value.strip()):return None
+        try:number=float(value)
+        except (TypeError,ValueError):return None
+        return number if math.isfinite(number) else None
+
     @staticmethod
-    def _format_fps(value):return "—" if value in (None,"") else f"{float(value):.3f}".rstrip("0").rstrip(".")+" fps"
+    def _resolution(row):
+        w=AssetLibraryPage._finite_number(row.get("width"));h=AssetLibraryPage._finite_number(row.get("height"))
+        return f"{int(w)} × {int(h)}" if w is not None and h is not None and w>0 and h>0 else "—"
+    @staticmethod
+    def _format_fps(value):
+        number=AssetLibraryPage._finite_number(value)
+        return "—" if number is None or number<0 else f"{number:.3f}".rstrip("0").rstrip(".")+" fps"
     @staticmethod
     def _format_duration(value):
-        if value in (None,""):return "—"
-        total=max(0,int(round(float(value))));hours,remainder=divmod(total,3600);minutes,seconds=divmod(remainder,60)
+        number=AssetLibraryPage._finite_number(value)
+        if number is None:return "—"
+        total=max(0,int(round(number)));hours,remainder=divmod(total,3600);minutes,seconds=divmod(remainder,60)
         return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
     @staticmethod
     def _format_bitrate(value):
-        if value in (None,""):return "—"
-        bits=float(value);return f"{bits/1_000_000:.2f} Mbps" if bits>=1_000_000 else f"{bits/1_000:.0f} Kbps"
+        bits=AssetLibraryPage._finite_number(value)
+        if bits is None:return "—"
+        bits=max(0,bits);return f"{bits/1_000_000:.2f} Mbps" if bits>=1_000_000 else f"{bits/1_000:.0f} Kbps"
     @staticmethod
     def _aspect_ratio(width,height):
-        if not width or not height:return "—"
+        width=AssetLibraryPage._finite_number(width);height=AssetLibraryPage._finite_number(height)
+        if width is None or height is None:return "—"
         from math import gcd
-        w,h=int(width),int(height);d=gcd(w,h);return f"{w//d}:{h//d}"
+        w,h=int(width),int(height)
+        if w<=0 or h<=0:return "—"
+        d=gcd(w,h);return f"{w//d}:{h//d}"
     @staticmethod
     def _format_size(value):
-        if value in (None,""):return "—"
-        size=float(value);units=("B","KB","MB","GB","TB");index=0
+        size=AssetLibraryPage._finite_number(value)
+        if size is None:return "—"
+        size=max(0,size);units=("B","KB","MB","GB","TB");index=0
         while size>=1024 and index<len(units)-1:size/=1024;index+=1
         return f"{size:.1f} {units[index]}"
