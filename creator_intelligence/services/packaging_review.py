@@ -16,12 +16,19 @@ LIMITS = {
 class PackagingReviewService:
     """Creator-facing review and publishing handoff for generated packages."""
 
-    def __init__(self, db, planner, transcripts=None):
+    def __init__(self, db, planner, transcripts=None, google_drive=None):
         self.db = db
         self.planner = planner
         self.transcripts = transcripts
         self.outcomes = planner.outcomes
         self.experiments = planner.experiments
+        if transcripts:
+            from creator_intelligence.services.clip_visual_intelligence import ClipVisualIntelligenceService
+            self.visual = ClipVisualIntelligenceService(
+                db, transcripts, google_drive=google_drive
+            )
+        else:
+            self.visual = None
 
     def queue(self, status="All", platform="All"):
         clauses, params = [], []
@@ -42,7 +49,7 @@ class PackagingReviewService:
         return self.db.frame(sql, params)
 
     def detail(self, package_id):
-        package = self.outcomes.package(package_id)
+        package = self.outcomes.begin_review(package_id)
         experiment = self.db.frame("SELECT * FROM packaging_experiments WHERE package_id=?", (package_id,))
         variants = pd.DataFrame()
         if not experiment.empty:
@@ -59,9 +66,15 @@ class PackagingReviewService:
             transcript = self.db.frame("SELECT * FROM transcripts WHERE id=?", (int(row["transcript_id"]),))
             if not transcript.empty:
                 source_path = transcript.iloc[0].get("source_path") if "source_path" in transcript else None
+        provenance = self.outcomes.provenance(package_id)
+        visual_runs = self.db.frame(
+            """SELECT * FROM clip_visual_analysis_runs WHERE clip_candidate_id=?
+               ORDER BY id DESC""", (int(package["clip_candidate_id"]),),
+        ) if self._table_exists("clip_visual_analysis_runs") else pd.DataFrame()
         return {"package": package, "clip": clip.iloc[0].to_dict() if not clip.empty else {},
                 "variants": variants, "transcript": transcript_text,
-                "source_path": source_path, "validation": self.validate(package_id)}
+                "source_path": source_path, "validation": self.validate(package_id),
+                "provenance": provenance, "visual_runs": visual_runs}
 
     def validate(self, package_id, edits=None):
         package = self.outcomes.package(package_id)
@@ -163,6 +176,26 @@ class PackagingReviewService:
         self.reject(package_id)
         return self.transcripts.analyze_clip_candidate(int(package["clip_candidate_id"]))
 
+    def regenerate_with_visual_context(self, package_id, visual_summary="", on_screen_text=""):
+        if not self.transcripts:
+            raise RuntimeError("Transcript intelligence is unavailable.")
+        package = self.outcomes.package(package_id)
+        clip_id = int(package["clip_candidate_id"])
+        self.transcripts.save_clip_visual_context(
+            clip_id, visual_summary=visual_summary, on_screen_text=on_screen_text,
+            confidence=1.0,
+        )
+        self.reject(package_id)
+        return self.transcripts.analyze_clip_candidate(clip_id)
+
+    def automatic_visual_regenerate(self, package_id):
+        if not self.visual:
+            raise RuntimeError("Visual intelligence is unavailable.")
+        evidence = self.visual.analyze_package(package_id)
+        self.reject(package_id)
+        generated = self.transcripts.analyze_clip_candidate(int(evidence["clip_id"]))
+        return {"evidence": evidence, "generated": generated}
+
     def send_to_publishing(self, package_id, planned_publish_at=None):
         package = self.outcomes.package(package_id)
         if package["decision_status"] != "Approved":
@@ -229,3 +262,9 @@ class PackagingReviewService:
     def _json(value, default):
         try: return json.loads(value) if value else default
         except (TypeError, ValueError): return default
+
+    def _table_exists(self, table):
+        frame = self.db.frame(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        )
+        return not frame.empty

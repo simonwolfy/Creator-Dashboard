@@ -8,7 +8,7 @@ from typing import Any, Callable
 from creator_intelligence.core.logging import SensitiveDataFilter
 from creator_intelligence.core.credential_vault import CredentialVault
 
-SCOPES = ("https://www.googleapis.com/auth/drive.metadata.readonly",)
+SCOPES = ("https://www.googleapis.com/auth/drive.readonly",)
 KEYRING_SERVICE = "Creator Intelligence"
 KEYRING_USERNAME = "google-drive-oauth"
 

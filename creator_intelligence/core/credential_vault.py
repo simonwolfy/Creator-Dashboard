@@ -82,7 +82,7 @@ class CredentialVault:
 
     def redact(self,value):
         text=str(value or "")
-        for provider in ("youtube","instagram","tiktok","twitch","obs","google-drive","generic"):
+        for provider in ("youtube","instagram","tiktok","twitch","obs","google-drive","openai-vision","generic"):
             for secret in self.load(provider).values():
                 if secret:text=text.replace(str(secret),"[REDACTED]")
         text=re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s]+",r"\1[REDACTED]",text)

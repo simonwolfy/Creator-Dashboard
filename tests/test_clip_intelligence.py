@@ -112,6 +112,26 @@ def test_caption_is_packaging_copy_not_transcript_dump(tmp_path):
     assert result["performance_prediction"] in {"High", "Moderate", "Experimental"}
 
 
+def test_visual_context_drives_subject_when_transcript_is_ambiguous(tmp_path):
+    service, transcript_id, _ = make_service(tmp_path)
+    service.add_segments(transcript_id, [{
+        "start": 130, "end": 140, "text": "Oh my goodness, look at this little guy.", "confidence": .91,
+    }])
+    clip_id = service.add_clip_candidate(transcript_id, 130, 140, "Little guy", "Visual payoff", 80)
+    service.save_clip_visual_context(
+        clip_id, visual_summary="The player picks up a purple octopus plushie and holds it close.",
+        on_screen_text="Press E to pick up plushie", confidence=.95,
+    )
+
+    result = service.analyze_clip_candidate(clip_id)
+
+    assert result["packaging_context"]["subject"] == "plushie"
+    assert result["packaging_context"]["clip_type"] == "DISCOVERY"
+    assert "visual" in result["packaging_context"]["context_sources"]
+    assert "Plushie" in result["suggested_title"]
+    assert any("Visual context" in reason for reason in result["packaging_reasoning"])
+
+
 def test_sheep_clip_generates_event_specific_package(tmp_path):
     service, transcript_id, _ = make_service(tmp_path)
     service.add_segments(

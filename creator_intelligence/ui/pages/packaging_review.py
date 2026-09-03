@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt,QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -21,7 +21,9 @@ from PySide6.QtWidgets import (
     QTableView,
     QVBoxLayout,
     QWidget,
+    QGroupBox,
 )
+from creator_intelligence.core.credential_vault import MASK
 
 from creator_intelligence.ui.pages.twitch import FrameModel
 
@@ -56,6 +58,23 @@ class PackagingReviewPage(QWidget):
         right_layout.addLayout(preview_row)
         self.transcript=QPlainTextEdit(); self.transcript.setReadOnly(True); self.transcript.setPlaceholderText("Clip transcript")
         self.transcript.setMaximumHeight(120); right_layout.addWidget(self.transcript)
+        visual_form=QFormLayout(); self.visual_summary=QPlainTextEdit(); self.on_screen_text=QLineEdit()
+        self.visual_summary.setMaximumHeight(80); self.visual_summary.setPlaceholderText("What visibly happens in the clip (subject, action, reaction, payoff)")
+        self.on_screen_text.setPlaceholderText("Readable game UI, subtitles, signs, or labels")
+        visual_form.addRow("Visual context",self.visual_summary); visual_form.addRow("On-screen text",self.on_screen_text)
+        right_layout.addLayout(visual_form)
+        visual_regenerate=QPushButton("Save visual context and regenerate")
+        visual_regenerate.clicked.connect(self.regenerate_with_visual_context); right_layout.addWidget(visual_regenerate)
+        auto_group=QGroupBox("Automatic video analysis"); auto_form=QFormLayout(auto_group)
+        self.vision_key=QLineEdit(); self.vision_key.setEchoMode(QLineEdit.Password)
+        self.vision_model=QLineEdit(); configuration=self.service.visual.configuration() if self.service.visual else {}
+        self.vision_key.setPlaceholderText(str(configuration.get("api_key") or "OpenAI API key"))
+        self.vision_model.setText(str(configuration.get("model") or "gpt-5.4-mini"))
+        auto_actions=QHBoxLayout(); save_vision=QPushButton("Save connection"); save_vision.clicked.connect(self.save_vision_connection)
+        analyze_video=QPushButton("Analyze video and regenerate"); analyze_video.clicked.connect(self.automatic_visual_regenerate)
+        auto_actions.addWidget(save_vision); auto_actions.addWidget(analyze_video)
+        auto_form.addRow("API key",self.vision_key); auto_form.addRow("Vision model",self.vision_model); auto_form.addRow(auto_actions)
+        right_layout.addWidget(auto_group)
         form=QFormLayout(); self.title_edit=QLineEdit(); self.description_edit=QPlainTextEdit(); self.caption_edit=QPlainTextEdit()
         self.hook_edit=QLineEdit(); self.hashtags_edit=QLineEdit(); self.description_edit.setMaximumHeight(90); self.caption_edit.setMaximumHeight(90)
         for label,widget in (("Title",self.title_edit),("Description",self.description_edit),
@@ -88,10 +107,24 @@ class PackagingReviewPage(QWidget):
         if not ids:return
         self.current_package_id=ids[0]; detail=self.service.detail(ids[0]); package=detail["package"]; clip=detail["clip"]
         self.source_path=detail["source_path"]
-        self.context.setText(f"{package['platform'].title()} • Clip {package['clip_candidate_id']} • {package['decision_status']} • {package.get('clip_type') or 'Clip'}\nAI prediction: {package.get('predicted_performance') or 'Unknown'}")
+        evidence=[]
+        for _,row in detail["provenance"].iterrows():
+            confidence=row.get("confidence")
+            confidence_text="unknown confidence" if confidence is None else f"{float(confidence):.0%} confidence"
+            source=f"{row.get('source_type')} via {row.get('provider') or 'local'}"
+            model=f" / {row.get('model')}" if row.get("model") else ""
+            evidence.append(f"{source}{model}, {confidence_text}, {row.get('intelligence_version')}")
+        failure=""
+        if not detail["visual_runs"].empty:
+            latest=detail["visual_runs"].iloc[0]
+            if latest.get("status")=="Failed":failure=f"\nLatest visual failure: {latest.get('error')}"
+        evidence_text="\nEvidence: "+("; ".join(evidence) if evidence else "legacy package; no provenance recorded")
+        self.context.setText(f"{package['platform'].title()} • Clip {package['clip_candidate_id']} • {package['decision_status']} • {package.get('clip_type') or 'Clip'}\nAI prediction: {package.get('predicted_performance') or 'Unknown'}{evidence_text}{failure}")
         if clip:self.preview.setText(f"Preview range: {float(clip.get('start_seconds') or 0):.1f}s–{float(clip.get('end_seconds') or 0):.1f}s")
         else:self.preview.setText("No clip preview metadata")
         self.transcript.setPlainText(detail["transcript"])
+        self.visual_summary.setPlainText(str(clip.get("visual_summary") or ""))
+        self.on_screen_text.setText(str(clip.get("on_screen_text") or ""))
         self.title_edit.setText(package.get("used_title") or package.get("generated_title") or "")
         self.description_edit.setPlainText(package.get("used_description") or package.get("generated_description") or "")
         self.caption_edit.setPlainText(package.get("used_caption") or package.get("generated_caption") or "")
@@ -124,6 +157,31 @@ class PackagingReviewPage(QWidget):
     def regenerate(self):
         if not self.current_package_id:return
         self.service.regenerate(self.current_package_id); QMessageBox.information(self,"Regenerated","A fresh package and experiment set was created."); self.refresh()
+
+    def regenerate_with_visual_context(self):
+        if not self.current_package_id:return
+        try:self.service.regenerate_with_visual_context(
+            self.current_package_id,self.visual_summary.toPlainText(),self.on_screen_text.text())
+        except Exception as exc:QMessageBox.warning(self,"Cannot regenerate",str(exc));return
+        QMessageBox.information(self,"Visual context saved","Titles and captions were regenerated using transcript and visual evidence.")
+        self.refresh()
+
+    def save_vision_connection(self):
+        if not self.service.visual:return
+        self.service.visual.save_configuration(api_key=self.vision_key.text(),model=self.vision_model.text())
+        self.vision_key.clear();self.vision_key.setPlaceholderText(MASK)
+        QMessageBox.information(self,"Saved","Automatic visual analysis settings were saved securely.")
+
+    def automatic_visual_regenerate(self):
+        if not self.current_package_id:return
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            result=self.service.automatic_visual_regenerate(self.current_package_id)
+        except Exception as exc:QMessageBox.warning(self,"Visual analysis failed",str(exc));return
+        finally:QApplication.restoreOverrideCursor()
+        evidence=result["evidence"]
+        QMessageBox.information(self,"Video analyzed",f"Analyzed {evidence['frame_count']} frames at {float(evidence['confidence']):.0%} confidence.")
+        self.refresh()
 
     def send_to_publishing(self):
         if not self.current_package_id:return

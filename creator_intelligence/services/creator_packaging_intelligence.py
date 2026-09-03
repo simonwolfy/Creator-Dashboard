@@ -38,6 +38,9 @@ class CreatorPackagingIntelligenceMixin:
             "platform_packages_json": "TEXT",
             "clip_type": "TEXT",
             "packaging_context_json": "TEXT",
+            "visual_summary": "TEXT",
+            "on_screen_text": "TEXT",
+            "visual_context_confidence": "REAL",
         }
         for name, sql_type in columns.items():
             if name not in existing:
@@ -481,15 +484,25 @@ class CreatorPackagingIntelligenceMixin:
             if str(value).strip()
         ).strip() or text
         metadata = str(getattr(self, "_packaging_context_title", "") or "").strip()
+        visual_summary = str(clip.get("visual_summary") or "").strip()
+        on_screen_text = str(clip.get("on_screen_text") or "").strip()
+        visual_text = " ".join(value for value in (visual_summary, on_screen_text) if value)
 
         analysis = self._score_clip_text(text, start, end)
         context = self._extract_context(
-            context_text, metadata, analysis, focus_text=text,
+            " ".join(value for value in (visual_text, context_text) if value), metadata, analysis, focus_text=text,
             context_segment_count=len(context_segments),
         )
         context["segments"] = self._packaging_segment_evidence(
             context_segments, start, end, context
         )
+        context["visual_summary"] = visual_summary
+        context["on_screen_text"] = on_screen_text
+        context["visual_context_confidence"] = float(clip.get("visual_context_confidence") or 0)
+        context["context_sources"] = [
+            source for source, present in (("transcript", bool(text)), ("visual", bool(visual_summary)),
+                                            ("on_screen_text", bool(on_screen_text))) if present
+        ]
         package = self._build_creator_package(text, analysis, context, int(clip_id))
         analysis.update(package)
         now = datetime.now().isoformat()
@@ -578,6 +591,24 @@ class CreatorPackagingIntelligenceMixin:
                 "supports_action": any(term in lowered for term in action_terms.get(action, (action,))),
             })
         return result
+
+    def save_clip_visual_context(self, clip_id: int, *, visual_summary: str = "",
+                                 on_screen_text: str = "", confidence: float = 1.0) -> dict[str, Any]:
+        """Save reviewer- or vision-supplied evidence used during packaging generation."""
+        frame = self.db.frame("SELECT id FROM transcript_clip_candidates WHERE id=?", (int(clip_id),))
+        if frame.empty:
+            raise KeyError(clip_id)
+        summary = re.sub(r"\s+", " ", str(visual_summary)).strip()
+        screen_text = re.sub(r"\s+", " ", str(on_screen_text)).strip()
+        bounded_confidence = max(0.0, min(float(confidence), 1.0)) if (summary or screen_text) else 0.0
+        now = datetime.now().isoformat()
+        self.db.execute(
+            """UPDATE transcript_clip_candidates SET visual_summary=?,on_screen_text=?,
+               visual_context_confidence=?,updated_at=? WHERE id=?""",
+            (summary, screen_text, bounded_confidence, now, int(clip_id)),
+        )
+        return {"clip_id": int(clip_id), "visual_summary": summary,
+                "on_screen_text": screen_text, "confidence": bounded_confidence}
 
     def _build_creator_package(
         self,
@@ -1004,7 +1035,7 @@ class CreatorPackagingIntelligenceMixin:
     @staticmethod
     def _subject(lowered: str) -> str:
         preferred = (
-            "colonist", "colonists", "sheep", "coffee", "tunnel", "colony", "raid", "boss", "wolf", "zombie",
+            "plushie", "octopus", "colonist", "colonists", "sheep", "coffee", "tunnel", "colony", "raid", "boss", "wolf", "zombie",
             "pokemon", "pokémon", "village", "base", "cave", "dragon", "enemy", "chat",
         )
         for token in preferred:
@@ -1030,6 +1061,7 @@ class CreatorPackagingIntelligenceMixin:
             (("attack", "fight", "shot", "shoot"), "fight"),
             (("built", "build"), "build"),
             (("caught", "catch"), "catch"),
+            (("picks up", "pick up", "picked up"), "discover"),
             (("debate", "debating", "discuss", "wear", "wearing"), "discuss"),
         ):
             if any(token in lowered for token in tokens):
@@ -1278,6 +1310,10 @@ class CreatorPackagingIntelligenceMixin:
             f"Event confidence is {float(confidence.get('event', 0)):.0%} using "
             f"{context.get('context_segment_count', 1)} surrounding transcript segment(s)."
         )
+        if context.get("visual_summary"):
+            reasons.append("Visual context supplied subject and action evidence alongside the transcript.")
+        if context.get("on_screen_text"):
+            reasons.append("Readable on-screen text was included as packaging evidence.")
         if context.get("fallback_mode") == "quote":
             reasons.append("Event confidence was below 60%, so titles use the strongest standalone quote.")
         elif context.get("fallback_mode") == "insufficient_context":

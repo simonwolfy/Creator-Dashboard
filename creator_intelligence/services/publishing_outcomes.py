@@ -59,8 +59,46 @@ class PublishingOutcomeService:
             )""",
             "CREATE INDEX IF NOT EXISTS idx_outcome_packages ON publishing_packages(platform,decision_status,created_at)",
             "CREATE INDEX IF NOT EXISTS idx_outcome_snapshots ON publishing_performance_snapshots(package_id,milestone_hours)",
+            """CREATE TABLE IF NOT EXISTS package_provenance(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,package_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,source_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}',
+                confidence REAL,provider TEXT,model TEXT,intelligence_version TEXT NOT NULL,
+                created_at TEXT NOT NULL,FOREIGN KEY(package_id) REFERENCES publishing_packages(id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS platform_outcome_snapshots(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,package_id TEXT NOT NULL,
+                content_item_id TEXT,variant_id TEXT,platform TEXT NOT NULL,
+                external_id TEXT NOT NULL,captured_at TEXT NOT NULL,milestone_hours INTEGER,
+                views REAL,reach REAL,watch_time REAL,retention_rate REAL,ctr REAL,
+                likes REAL,comments REAL,shares REAL,raw_payload_json TEXT NOT NULL,
+                schema_version TEXT NOT NULL DEFAULT 'outcome-v1',
+                UNIQUE(platform,external_id,captured_at),
+                FOREIGN KEY(package_id) REFERENCES publishing_packages(id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS intelligence_metric_events(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,event_type TEXT NOT NULL,
+                package_id TEXT,clip_candidate_id INTEGER,duration_seconds REAL,
+                value REAL,payload_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS intelligence_provider_usage(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,provider TEXT NOT NULL,model TEXT,
+                operation TEXT NOT NULL,package_id TEXT,input_units REAL,output_units REAL,
+                estimated_cost REAL,status TEXT NOT NULL,error TEXT,created_at TEXT NOT NULL
+            )""",
         ):
             self.db.execute(statement)
+        self._ensure_package_columns()
+
+    def _ensure_package_columns(self):
+        existing = {str(row["name"]) for _, row in self.db.frame(
+            "PRAGMA table_info(publishing_packages)"
+        ).iterrows()}
+        for name, sql_type in {
+            "content_item_id": "TEXT", "intelligence_version": "TEXT",
+            "review_started_at": "TEXT", "decision_at": "TEXT",
+        }.items():
+            if name not in existing:
+                self.db.execute(f"ALTER TABLE publishing_packages ADD COLUMN {name} {sql_type}")
 
     def snapshot_packages(self, clip_id, packages, context=None, prediction=None, predicted_score=None):
         context = context or {}
@@ -73,15 +111,18 @@ class PublishingOutcomeService:
                 """INSERT INTO publishing_packages(
                    id,clip_candidate_id,platform,generated_title,generated_description,
                    generated_caption,generated_hook,generated_hashtags_json,
-                   predicted_performance,predicted_score,clip_type,topic,package_json,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   predicted_performance,predicted_score,clip_type,topic,package_json,created_at,
+                   intelligence_version)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (package_id, int(clip_id), platform, package.get("title"),
                  package.get("description"), package.get("caption"), package.get("hook"),
                  json.dumps(package.get("hashtags") or []), prediction, predicted_score,
                  context.get("clip_type"), context.get("topic"),
-                 json.dumps(package, default=str), now),
+                 json.dumps(package, default=str), now, "creator-packaging-v6"),
             )
             created[package_key] = package_id
+            self.record_metric("package_generated", package_id=package_id,
+                               clip_candidate_id=int(clip_id))
         return created
 
     def record_decision(self, package_id, status, used=None):
@@ -120,10 +161,17 @@ class PublishingOutcomeService:
                approved_at=CASE
                  WHEN ? IN ('Approved','Published') THEN COALESCE(approved_at,?)
                  WHEN ? IN ('Generated','Rejected') THEN NULL ELSE approved_at END
+               ,decision_at=?
                WHERE id=?""",
             (status, edit_status, final["title"], final["description"],
              final["caption"], final["hook"], json.dumps(final["hashtags"]),
-             status, now, status, package_id),
+             status, now, status, now, package_id),
+        )
+        self.record_metric(
+            "package_decision", package_id=package_id,
+            clip_candidate_id=int(row["clip_candidate_id"]),
+            value=1.0 if edit_status == "Edited" else 0.0,
+            payload={"status": status, "edit_status": edit_status},
         )
         updated = self.package(package_id)
         metadata = {
@@ -178,6 +226,153 @@ class PublishingOutcomeService:
                 source="publishing_outcomes",
             )
         return updated
+
+    def begin_review(self, package_id):
+        row = self.package(package_id)
+        if not row.get("review_started_at"):
+            now = datetime.now(UTC).isoformat()
+            self.db.execute("UPDATE publishing_packages SET review_started_at=? WHERE id=?", (now, package_id))
+            self.record_metric("review_started", package_id=package_id,
+                               clip_candidate_id=int(row["clip_candidate_id"]))
+        return self.package(package_id)
+
+    def ensure_content_link(self, package_id):
+        package = self.package(package_id)
+        if package.get("content_item_id"):
+            return str(package["content_item_id"])
+        from creator_intelligence.services.content_library import ContentLibraryService
+        library = ContentLibraryService(self.db)
+        title = package.get("used_title") or package.get("used_caption") or package.get("generated_title") or package.get("generated_caption") or "Untitled clip"
+        content_id = library.create_item({
+            "platform": package["platform"].title(), "content_type": "Short",
+            "title": title, "game_topic": package.get("topic"), "status": "Needs review",
+            "tags": ["content-intelligence", package.get("clip_type") or "clip"],
+            "notes": json.dumps({"package_id": package_id,
+                                  "clip_candidate_id": package["clip_candidate_id"]}),
+        })
+        self.db.execute("UPDATE publishing_packages SET content_item_id=? WHERE id=?", (content_id, package_id))
+        return content_id
+
+    def record_provenance(self, package_id, source_type, *, source_id=None, payload=None,
+                          confidence=None, provider=None, model=None,
+                          intelligence_version="creator-packaging-v6"):
+        self.package(package_id)
+        return int(self.db.execute(
+            """INSERT INTO package_provenance(package_id,source_type,source_id,payload_json,
+               confidence,provider,model,intelligence_version,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (package_id, source_type, source_id, json.dumps(payload or {}, default=str),
+             confidence, provider, model, intelligence_version,
+             datetime.now(UTC).isoformat()),
+        ))
+
+    def provenance(self, package_id):
+        return self.db.frame(
+            "SELECT * FROM package_provenance WHERE package_id=? ORDER BY id", (package_id,)
+        )
+
+    def record_normalized_outcome(self, package_id, external_id, metrics, *,
+                                  captured_at=None, milestone_hours=None,
+                                  variant_id=None, raw_payload=None):
+        package = self.package(package_id)
+        platform = str(package["platform"]).lower()
+        if platform not in {"youtube", "twitch", "tiktok", "instagram"}:
+            raise ValueError("Unsupported outcome platform.")
+        content_id = self.ensure_content_link(package_id)
+        captured = captured_at or datetime.now(UTC).isoformat()
+        fields = ("views", "reach", "watch_time", "retention_rate", "ctr",
+                  "likes", "comments", "shares")
+        values = [None if metrics.get(name) in (None, "") else float(metrics[name]) for name in fields]
+        row_id = int(self.db.execute(
+            """INSERT INTO platform_outcome_snapshots(
+               package_id,content_item_id,variant_id,platform,external_id,captured_at,
+               milestone_hours,views,reach,watch_time,retention_rate,ctr,likes,comments,
+               shares,raw_payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (package_id, content_id, variant_id, platform, str(external_id), captured,
+             milestone_hours, *values, json.dumps(raw_payload or metrics, default=str)),
+        ))
+        self.record_metric("outcome_captured", package_id=package_id,
+                           clip_candidate_id=int(package["clip_candidate_id"]),
+                           payload={"platform": platform, "external_id": str(external_id)})
+        return row_id
+
+    def import_platform_outcomes(self, platform, records):
+        """Import connector-neutral metrics while preserving unavailable values as null."""
+        platform = str(platform).lower()
+        if platform not in {"youtube", "twitch", "tiktok", "instagram"}:
+            raise ValueError("Unsupported outcome platform.")
+        imported, failed = [], {}
+        metric_names = (
+            "views", "reach", "watch_time", "retention_rate", "ctr",
+            "likes", "comments", "shares",
+        )
+        for index, record in enumerate(records):
+            try:
+                package_id = str(record["package_id"])
+                package = self.package(package_id)
+                if str(package["platform"]).lower() != platform:
+                    raise ValueError("Package platform does not match the imported platform.")
+                external_id = record.get("external_id") or record.get("source_video_id")
+                if not external_id:
+                    raise ValueError("An external platform identifier is required.")
+                metrics = record.get("metrics") or {
+                    name: record.get(name) for name in metric_names
+                }
+                imported.append(self.record_normalized_outcome(
+                    package_id, external_id, metrics,
+                    captured_at=record.get("captured_at"),
+                    milestone_hours=record.get("milestone_hours"),
+                    variant_id=record.get("variant_id"), raw_payload=record,
+                ))
+            except Exception as exc:
+                failed[str(index)] = str(exc)
+        return {"imported": imported, "failed": failed}
+
+    def record_provider_usage(self, provider, operation, *, model=None, package_id=None,
+                              input_units=None, output_units=None, estimated_cost=None,
+                              status="Completed", error=None):
+        return int(self.db.execute(
+            """INSERT INTO intelligence_provider_usage(provider,model,operation,package_id,
+               input_units,output_units,estimated_cost,status,error,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (provider, model, operation, package_id, input_units, output_units,
+             estimated_cost, status, error, datetime.now(UTC).isoformat()),
+        ))
+
+    def record_metric(self, event_type, *, package_id=None, clip_candidate_id=None,
+                      duration_seconds=None, value=None, payload=None):
+        return int(self.db.execute(
+            """INSERT INTO intelligence_metric_events(event_type,package_id,clip_candidate_id,
+               duration_seconds,value,payload_json,created_at) VALUES(?,?,?,?,?,?,?)""",
+            (event_type, package_id, clip_candidate_id, duration_seconds, value,
+             json.dumps(payload or {}, default=str), datetime.now(UTC).isoformat()),
+        ))
+
+    def quality_summary(self):
+        packages = self.db.frame("SELECT * FROM publishing_packages")
+        metrics = self.db.frame("SELECT * FROM intelligence_metric_events")
+        usage = self.db.frame("SELECT * FROM intelligence_provider_usage")
+        decisions = packages[packages["decision_status"].isin(["Approved", "Rejected", "Published"])] if not packages.empty else packages
+        approved = decisions[decisions["decision_status"].isin(["Approved", "Published"])] if not decisions.empty else decisions
+        processing = metrics[metrics["event_type"] == "analysis_completed"] if not metrics.empty else metrics
+        review_seconds = []
+        if not decisions.empty:
+            for _, row in decisions.iterrows():
+                started = self._dt(row.get("review_started_at"))
+                finished = self._dt(row.get("decision_at"))
+                if started and finished and finished >= started:
+                    review_seconds.append((finished - started).total_seconds())
+        outcomes = self.db.frame("SELECT * FROM platform_outcome_snapshots")
+        return {
+            "packages": len(packages), "decisions": len(decisions),
+            "approval_rate": round(len(approved) / len(decisions), 3) if len(decisions) else None,
+            "edit_rate": round(float((decisions["edit_status"] == "Edited").mean()), 3) if len(decisions) else None,
+            "average_processing_seconds": round(float(processing["duration_seconds"].dropna().mean()), 2) if not processing.empty and not processing["duration_seconds"].dropna().empty else None,
+            "average_review_seconds": round(sum(review_seconds) / len(review_seconds), 2) if review_seconds else None,
+            "outcome_snapshots": len(outcomes),
+            "failed_analyses": int((metrics["event_type"] == "analysis_failed").sum()) if not metrics.empty else 0,
+            "estimated_provider_cost": round(float(usage["estimated_cost"].dropna().sum()), 4) if not usage.empty else 0.0,
+        }
 
     def link(self, package_id, source_video_id, method="manual", confidence=1.0, manually_confirmed=True):
         from creator_intelligence.services.creator_dna import CreatorDNAService

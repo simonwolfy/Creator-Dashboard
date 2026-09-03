@@ -119,3 +119,48 @@ def test_social_sync_runs_outcome_matching(tmp_path):
     assert "historical_title_recorded" in set(events["event_type"])
     assert "package_published" in set(events["event_type"])
     assert "social_platform_sync" in set(events["source"])
+
+
+def test_normalized_outcomes_preserve_missing_metrics_and_raw_payload(tmp_path):
+    db, outcomes = setup(tmp_path)
+    package_id = outcomes.snapshot_packages(4, {
+        "instagram": {"caption": "The floor choice changed everything"}
+    }, {}, "Moderate", 65)["instagram"]
+    db.execute(
+        "UPDATE publishing_packages SET content_item_id='content-4' WHERE id=?",
+        (package_id,),
+    )
+
+    result = outcomes.import_platform_outcomes("instagram", [{
+        "package_id": package_id, "external_id": "ig-4",
+        "views": 1200, "likes": 85, "retention_rate": None,
+        "connector_payload": {"source": "fixture"},
+    }])
+
+    assert not result["failed"]
+    snapshot = db.frame("SELECT * FROM platform_outcome_snapshots").iloc[0]
+    assert snapshot["views"] == 1200
+    assert pd.isna(snapshot["reach"])
+    assert pd.isna(snapshot["retention_rate"])
+    assert "connector_payload" in snapshot["raw_payload_json"]
+
+
+def test_provenance_and_review_metrics_are_auditable(tmp_path):
+    db, outcomes = setup(tmp_path)
+    package_id = outcomes.snapshot_packages(5, {
+        "youtube_shorts": {"title": "A Better Floor Decision"}
+    }, {}, "High", 81)["youtube_shorts"]
+    outcomes.record_provenance(
+        package_id, "transcript", source_id="transcript-5",
+        payload={"segment_ids": [1, 2]}, confidence=.91,
+        provider="local-whisper", model="small.en",
+    )
+    outcomes.begin_review(package_id)
+    outcomes.record_decision(package_id, "Approved")
+
+    evidence = outcomes.provenance(package_id).iloc[0]
+    assert evidence["provider"] == "local-whisper"
+    assert evidence["intelligence_version"] == "creator-packaging-v6"
+    summary = outcomes.quality_summary()
+    assert summary["approval_rate"] == 1
+    assert summary["average_review_seconds"] is not None

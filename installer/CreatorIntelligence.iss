@@ -1,9 +1,9 @@
 #define MyAppName "Creator Intelligence"
 #ifndef MyAppVersion
-  #define MyAppVersion "5.0.0-alpha.2"
+  #define MyAppVersion "5.0.0-alpha.3"
 #endif
 #ifndef MyAppReleaseRank
-  #define MyAppReleaseRank "000050000000000100002"
+  #define MyAppReleaseRank "000050000000000100003"
 #endif
 #define MyAppExeName "CreatorIntelligence.exe"
 

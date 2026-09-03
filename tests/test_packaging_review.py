@@ -18,8 +18,9 @@ class DB:
 
 
 class Transcripts:
-    def __init__(self):self.regenerated=[]
+    def __init__(self):self.regenerated=[];self.visual=[]
     def analyze_clip_candidate(self,clip_id):self.regenerated.append(clip_id);return {"id":clip_id,"fresh":True}
+    def save_clip_visual_context(self,clip_id,**values):self.visual.append((clip_id,values));return values
 
 
 def setup(tmp_path,platform="youtube",title="Can They Wear Pants?"):
@@ -170,3 +171,26 @@ def test_caption_edit_records_before_after_and_approved_copy(tmp_path):
     ).iloc[0]
     assert event["old_value"]=="Original caption"
     assert event["new_value"]=="My final creator caption"
+
+
+def test_visual_context_is_saved_before_regeneration(tmp_path):
+    _,planner,service,transcripts,package_id=setup(tmp_path)
+    result=service.regenerate_with_visual_context(
+        package_id,"The player picks up a purple octopus plushie","Press E to pick up plushie")
+    assert result["fresh"] is True
+    assert transcripts.visual==[(5,{"visual_summary":"The player picks up a purple octopus plushie",
+                                    "on_screen_text":"Press E to pick up plushie","confidence":1.0})]
+    assert planner.outcomes.package(package_id)["decision_status"]=="Rejected"
+
+
+def test_automatic_visual_analysis_regenerates_package(tmp_path):
+    _,planner,service,transcripts,package_id=setup(tmp_path)
+    service.visual=type("Visual",(),{"analyze_package":lambda self,_package_id:{
+        "clip_id":5,"frame_count":3,"visual_summary":"Purple octopus plushie","confidence":.9}})()
+
+    result=service.automatic_visual_regenerate(package_id)
+
+    assert result["evidence"]["frame_count"]==3
+    assert result["generated"]["fresh"] is True
+    assert transcripts.regenerated==[5]
+    assert planner.outcomes.package(package_id)["decision_status"]=="Rejected"

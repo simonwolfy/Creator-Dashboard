@@ -1,5 +1,17 @@
 # Changelog
 
+## 5.0.0-alpha.3
+
+### Content Intelligence Rollout Foundation
+
+- Added durable folder-analysis jobs with restart recovery, retry, cancellation, progress, and watched-folder discovery.
+- Added local transcript-first bulk packaging with deterministic offline fallbacks and optional three-frame cloud visual evidence.
+- Added review-visible provenance, confidence, models, versions, failure reasons, variants, and explicit approval gates.
+- Added canonical content links and normalized, raw-auditable outcome snapshots for YouTube, Twitch, TikTok, and Instagram.
+- Added approval/edit/time/provider-usage metrics, conflict detection, calendar handoff, thumbnail-frame candidates, and release gates.
+- Kept provider credentials in the operating-system credential vault and diagnostics free of secrets.
+- Added hybrid Google Drive media processing with metadata-only queues, temporary chunked downloads, cache limits, and guaranteed cleanup.
+
 ## 5.0.0-dev
 
 ### Public-release verification
