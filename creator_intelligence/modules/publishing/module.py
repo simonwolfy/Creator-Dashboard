@@ -2,12 +2,15 @@ from creator_intelligence.core.contracts import ModuleMetadata, NavigationItem, 
 from creator_intelligence.services.edited_content_intake import EditedContentIntakeService
 from creator_intelligence.services.packaging import PackagingReviewService
 from creator_intelligence.services.publishing_planner import PublishingPlannerService
+from creator_intelligence.services.platform_publishing import PlatformPublishingService
 
 
 def _page(registry):
     from creator_intelligence.ui.pages.publishing import PublishingPage
     return PublishingPage(
-        registry.resolve("publishing"), registry.resolve("edited_content_intake")
+        registry.resolve("publishing"),
+        registry.resolve("edited_content_intake"),
+        registry.resolve("platform_publishing"),
     )
 
 def _review_page(registry):
@@ -19,7 +22,7 @@ class PublishingModule:
         module_id="publishing",name="Publishing Planner",
         version="1.1.0",category="content",
         description="Publishing calendar, edited-content intake, recurring slots, deadlines, readiness, and timing recommendations.",
-        dependencies=("storage","content","production","transcripts")
+        dependencies=("storage","content","production","transcripts","analytics")
     )
     def register(self,registry):
         registry.register_service(ServiceBinding(
@@ -29,6 +32,15 @@ class PublishingModule:
                 registry.resolve("notifications")
             ),
             module_id=self.metadata.module_id
+        ))
+        registry.register_service(ServiceBinding(
+            "platform_publishing",
+            lambda ctx: PlatformPublishingService(
+                ctx.db,
+                registry.resolve("social_platforms"),
+                registry.resolve("publishing"),
+            ),
+            module_id=self.metadata.module_id,
         ))
         registry.register_service(ServiceBinding(
             "edited_content_intake",

@@ -16,6 +16,8 @@ Phase 6F coordinates approved content from final edit through publication.
 - Historical timing analysis
 - Publishing recommendations
 - Publication activity history
+- Human-approved YouTube, TikTok, and Instagram Reel dispatch
+- Durable provider upload/container IDs and retry-safe status reconciliation
 
 ## Production integration
 
@@ -42,7 +44,16 @@ The score combines views, retention, engagement, and subscriber gain.
 This is intentionally based on the creator's own history rather than generic
 industry-wide recommendations.
 
-## Current limitation
+## Direct publishing
 
-This build plans and tracks releases but does not yet publish directly through
-YouTube, TikTok, Twitch, or social-platform APIs.
+The Edited Content Inbox can publish one approved item at a time to YouTube,
+TikTok, or Instagram. YouTube uses resumable upload sessions; TikTok uses local
+file upload plus publish-status polling; Instagram uses a public HTTPS source URL,
+a Reel container, processing checks, and `media_publish`. Every attempt is tied to
+its existing platform-specific publishing item. A retry reconciles the saved
+provider ID instead of starting a duplicate post.
+
+YouTube and TikTok default to private visibility. Instagram publishing is public
+and therefore has an explicit confirmation. Provider app review, account type,
+scope approval, quota, and audit restrictions still apply. Twitch direct
+publishing is not supported.

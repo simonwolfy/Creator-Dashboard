@@ -42,6 +42,34 @@ class EditedContentIntelligenceWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+
+class PlatformPublishWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, service, item_id, source_path=None, metadata=None, video_url=None):
+        super().__init__()
+        self.service = service
+        self.item_id = int(item_id)
+        self.source_path = source_path
+        self.metadata = metadata or {}
+        self.video_url = video_url
+
+    def run(self):
+        try:
+            if self.source_path:
+                result = self.service.dispatch(
+                    self.item_id,
+                    self.source_path,
+                    metadata=self.metadata,
+                    instagram_video_url=self.video_url,
+                )
+            else:
+                result = self.service.reconcile(self.item_id)
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
 class PublishingItemDialog(QDialog):
     def __init__(self, production_projects, parent=None):
         super().__init__(parent)
@@ -131,11 +159,13 @@ class EditedContentDialog(QDialog):
         }
 
 class PublishingPage(QWidget):
-    def __init__(self, service, intake_service=None):
+    def __init__(self, service, intake_service=None, platform_publisher=None):
         super().__init__()
         self.service=service
         self.intake=intake_service
+        self.platform_publisher=platform_publisher
         self.intelligence_worker=None
+        self.publish_worker=None
         layout=QVBoxLayout(self)
         title=QLabel("Publishing Planner"); title.setObjectName("pageTitle")
         layout.addWidget(title)
@@ -192,6 +222,8 @@ class PublishingPage(QWidget):
                 ("Edit selected",self.edit_intake_item),
                 ("Approve",self.approve_intake_items),
                 ("Schedule selected",self.schedule_intake_items),
+                ("Publish selected",self.publish_intake_item),
+                ("Check publish status",self.reconcile_intake_publish),
                 ("Reject",self.reject_intake_items),
                 ("Connect published content",self.connect_intake_content),
             ):
@@ -434,6 +466,13 @@ class PublishingPage(QWidget):
             )
             event.ignore()
             return
+        if self.publish_worker is not None and self.publish_worker.isRunning():
+            QMessageBox.information(
+                self,"Publishing in progress",
+                "Wait for the current platform request to finish before closing this page."
+            )
+            event.ignore()
+            return
         super().closeEvent(event)
 
     def approve_intake_items(self):
@@ -455,6 +494,106 @@ class PublishingPage(QWidget):
             if ids:
                 QMessageBox.information(self,"Edited content",f"Scheduled {len(ids)} video(s).")
         self.refresh()
+
+    def publish_intake_item(self):
+        if self.platform_publisher is None:
+            QMessageBox.warning(self,"Publishing unavailable","Platform publishing is unavailable.")
+            return
+        ids=self.selected_intake_ids()
+        if len(ids)!=1:
+            QMessageBox.information(self,"Publish video","Select one edited video to publish.")
+            return
+        item_id=ids[0]
+        rows=self.intake.items()
+        matches=rows[rows["id"]==item_id]
+        if matches.empty:
+            return
+        item=matches.iloc[0].to_dict()
+        if str(item.get("state") or "") not in {"Ready","Scheduled"}:
+            QMessageBox.information(
+                self,"Approval required","Approve this edited video before publishing it."
+            )
+            return
+        platform=str(item.get("platform") or "")
+        if platform not in {"YouTube","YouTube Shorts","TikTok","Instagram"}:
+            QMessageBox.information(
+                self,"Choose one platform",
+                "Choose YouTube Shorts, TikTok, or Instagram for this publishing item."
+            )
+            return
+        video_url=None
+        if platform=="Instagram":
+            video_url,ok=QInputDialog.getText(
+                self,"Instagram video URL",
+                "Public HTTPS URL where Meta can download this finished video:"
+            )
+            if not ok or not video_url.strip():
+                return
+            video_url=video_url.strip()
+        provider_note = (
+            "YouTube and TikTok default to private visibility."
+            if platform != "Instagram"
+            else "Instagram will publish this Reel to the connected professional account."
+        )
+        answer=QMessageBox.question(
+            self,"Approve and publish",
+            f"Publish “{item.get('title')}” to {platform}?\n\n{provider_note}",
+            QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer!=QMessageBox.StandardButton.Yes:
+            return
+        self._start_publish_worker(
+            int(item["publishing_item_id"]),
+            str(item.get("location") or ""),
+            {
+                "title":str(item.get("title") or ""),
+                "description":str(item.get("description") or ""),
+                "caption":str(item.get("description") or item.get("title") or ""),
+            },
+            video_url,
+        )
+
+    def reconcile_intake_publish(self):
+        if self.platform_publisher is None:
+            return
+        ids=self.selected_intake_ids()
+        if len(ids)!=1:
+            QMessageBox.information(self,"Check publishing","Select one edited video.")
+            return
+        item=self.intake.item(ids[0])
+        if item.get("publishing_item_id") is None:
+            QMessageBox.information(self,"Check publishing","This video has no publishing item.")
+            return
+        self._start_publish_worker(int(item["publishing_item_id"]))
+
+    def _start_publish_worker(self,item_id,source_path=None,metadata=None,video_url=None):
+        if self.publish_worker is not None and self.publish_worker.isRunning():
+            QMessageBox.information(self,"Publishing","A platform request is already running.")
+            return
+        self.publish_worker=PlatformPublishWorker(
+            self.platform_publisher,item_id,source_path,metadata,video_url
+        )
+        self.publish_worker.completed.connect(self._publish_completed)
+        self.publish_worker.failed.connect(self._publish_failed)
+        self.publish_worker.finished.connect(self._publish_worker_finished)
+        self.publish_worker.start()
+
+    def _publish_completed(self,result):
+        self.refresh()
+        state=str(result.get("state") or "Updated")
+        detail=str(result.get("detail") or result.get("url") or "")
+        QMessageBox.information(
+            self,"Platform publishing",f"Status: {state}" + (f"\n\n{detail}" if detail else "")
+        )
+
+    def _publish_failed(self,message):
+        self.refresh()
+        QMessageBox.warning(self,"Platform publishing failed",message)
+
+    def _publish_worker_finished(self):
+        self.publish_worker.deleteLater()
+        self.publish_worker=None
 
     def reject_intake_items(self):
         ids=self.selected_intake_ids()

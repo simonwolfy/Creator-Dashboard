@@ -201,7 +201,7 @@ and other media-processing features.
 
 - **YouTube:** enable YouTube Data API v3 and YouTube Analytics API, import a Google
   OAuth client JSON created as a **Desktop app**, click **Connect YouTube**, and
-  approve read-only access. The channel ID, refreshable tokens, content, watch time,
+  approve read, Analytics, and upload access. The channel ID, refreshable tokens, content, watch time,
   retention, subscriber, and engagement statistics sync automatically. An API key
   and channel ID remain available as a public-data fallback.
 - **Twitch:** paste the Client ID from a Twitch app registered as **Public**, then
@@ -213,12 +213,13 @@ and other media-processing features.
   `http://127.0.0.1:49153/callback/`; an approved HTTPS redirect uses the guided
   callback-URL fallback. Instagram Login supports professional Business and Creator
   accounts. Creator Intelligence syncs basic media and the insights Meta makes
-  available, shows partial permissions as Limited, and does not request publishing.
+  available, and requests `instagram_business_content_publish` for approved Reels.
 - **TikTok:** enter the client key and client secret, register
   `http://127.0.0.1:49152/callback/` as the Desktop Login Kit redirect, then click
   **Connect TikTok**. The PKCE browser flow fills the open ID and refreshable
   tokens. TikTok's Display API supplies public video views, likes, comments, and
   shares; it does not supply watch time, retention, revenue, or audience analytics.
+  Add the Content Posting API and approve `video.publish` for direct publishing.
 - **Google Drive:** enable Google Drive API, select a Google OAuth desktop client
   JSON file, connect in the browser, then choose folders under **Drive Folders**.
   The app requests metadata-only access and automatically validates and refreshes
@@ -328,8 +329,9 @@ directly into unrelated clips.
   metadata readiness, and publication status.
 - Use **Packaging Review** to copy approved text into the final publishing record.
 
-The current publishing planner organizes and tracks releases. It does not directly
-publish content to every connected social platform.
+The publishing planner can directly dispatch approved edited videos to YouTube,
+TikTok, and Instagram. It stores each provider session/container ID so partial
+successes and retries do not create duplicate posts. Twitch remains tracking-only.
 
 ### Schedule already-edited videos
 
@@ -341,7 +343,12 @@ publish content to every connected social platform.
    video.
 4. Select one or more videos and choose **Approve** or **Schedule selected**.
    Scheduled videos appear in the normal publishing queue and 30-day calendar.
-5. After publishing, sync the corresponding platform and choose **Connect published
+5. To publish from Creator Intelligence, select one approved video and choose
+   **Publish selected**. YouTube and TikTok default to private. Instagram asks for
+   a public HTTPS video URL that Meta can fetch, then requires confirmation.
+6. If a provider is still processing, use **Check publish status**. If publishing
+   fails, retrying reuses the saved provider session instead of duplicating a post.
+7. After publishing, sync the corresponding platform and choose **Connect published
    content** using that platform's content ID. This connects verified statistics to
    the intake record and strengthens future recommendations.
 
@@ -436,7 +443,7 @@ credential files. Switch to the intended development branch and confirm its
 - Transcript processing is local in the current implementation.
 - Provider API availability depends on account type, scopes, quotas, and app approval.
 - Generated recommendations require creator review.
-- Direct publishing support is not available for every platform.
+- Direct publishing is limited to approved YouTube, TikTok, and Instagram app/account configurations.
 
 Read the complete [privacy notice](PRIVACY.md) before connecting real creator accounts.
 

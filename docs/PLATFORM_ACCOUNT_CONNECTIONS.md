@@ -38,8 +38,8 @@ Official reference: [Twitch device code grant](https://dev.twitch.tv/docs/authen
    JSON file. Do not commit that file to Git.
 3. Open **YouTube > API setup**, click **Import Google OAuth client JSON**, then
    click **Connect YouTube**.
-4. Select the channel-owning Google account and approve read-only YouTube and
-   YouTube Analytics access. The channel ID and refreshable tokens are filled
+4. Select the channel-owning Google account and approve YouTube read, Analytics,
+   and upload access. The channel ID and refreshable tokens are filled
    automatically, followed by an initial content-and-analytics sync.
 
 An API key is optional after Google sign-in, but remains supported for public-only
@@ -51,7 +51,13 @@ shown as reconnect-required states; quota errors preserve the connection and sho
 temporary limited state instead of deleting credentials.
 
 Official references: [Google OAuth for mobile and desktop apps](https://developers.google.com/youtube/v3/guides/auth/installed-apps)
-and [YouTube Analytics reports](https://developers.google.com/youtube/analytics/reference/reports/query).
+[YouTube Analytics reports](https://developers.google.com/youtube/analytics/reference/reports/query),
+and [resumable video uploads](https://developers.google.com/youtube/v3/guides/using_resumable_upload_protocol).
+
+Creator-approved publishing uses `youtube.upload` and a durable resumable upload
+session. Retrying a partially completed publication continues or reconciles that
+session instead of creating a second upload. Uploads default to private. Google
+may restrict uploads from unverified API projects to private visibility.
 
 ## Google Drive
 
@@ -88,14 +94,19 @@ and [Resolve Drive API errors](https://developers.google.com/workspace/drive/api
    callback URL into the dialog so its code and anti-forgery state can be verified.
 
 Instagram Login supports professional **Business** and **Creator** accounts, not
-personal consumer accounts. The app requests `instagram_business_basic` and
-`instagram_business_manage_insights`; it does not request publishing or media
-editing. Standard Access covers accounts owned by or assigned to app-role users,
+personal consumer accounts. The app requests `instagram_business_basic`,
+`instagram_business_manage_insights`, and
+`instagram_business_content_publish`. Standard Access covers accounts owned by or assigned to app-role users,
 while other professional accounts require the appropriate Meta review and Advanced
 Access. Some metrics vary by media type, and Meta can return an empty result rather
 than zero when a metric is unavailable. Creator Intelligence preserves the basic
 media sync and marks the connection **Limited** when only some insights are
 available.
+
+Publishing creates a Reel container, retains its ID while Meta processes it, and
+publishes only after the container reports `FINISHED`. Meta must be able to fetch
+the video over a public HTTPS URL; the local file itself is never exposed by a
+desktop callback. Human confirmation remains mandatory in Creator Intelligence.
 
 The connection is checked hourly and content statistics are refreshed every 30
 minutes while the page is open. Reconnecting replaces the one active Instagram
@@ -108,7 +119,8 @@ Official reference: [Meta's Instagram API workspace](https://www.postman.com/met
 ## TikTok
 
 1. Create a TikTok developer app and add **Login Kit for Desktop**.
-2. Request or enable `user.info.basic` and `video.list`.
+2. Request or enable `user.info.basic`, `video.list`, and `video.publish`, and add
+   TikTok's Content Posting API product.
 3. Register `http://127.0.0.1:49152/callback/` as the Desktop redirect URI.
 4. Enter the client key and client secret on the TikTok page, then click
    **Connect TikTok**.
@@ -117,8 +129,9 @@ Official reference: [Meta's Instagram API workspace](https://www.postman.com/met
 
 TikTok's Display API exposes the public account profile and public video counts:
 views, likes, comments, and shares. It does not expose creator watch time,
-retention, revenue, or audience analytics, and Creator Intelligence does not request
-publishing permission. Content remains unavailable until `video.list` is granted;
+retention, revenue, or audience analytics. Creator-approved publishing queries the
+current creator options, initializes a local-file upload, and polls its durable
+publish ID. Content remains unavailable until `video.list` is granted;
 the page shows partial permissions as **Limited** instead of treating them as a
 complete connection.
 
@@ -131,7 +144,8 @@ temporarily unreachable.
 
 Official references: [TikTok Login Kit for Desktop](https://developers.tiktok.com/doc/login-kit-desktop/),
 [Display API](https://developers.tiktok.com/doc/display-api-overview/), and
-[access-token management](https://developers.tiktok.com/doc/oauth-user-access-token-management?enter_method=left_navigation).
+[access-token management](https://developers.tiktok.com/doc/oauth-user-access-token-management?enter_method=left_navigation),
+and [Content Posting API](https://developers.tiktok.com/doc/content-posting-api-get-started/).
 
 ## Disconnecting
 

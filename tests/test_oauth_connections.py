@@ -62,6 +62,7 @@ def test_youtube_desktop_oauth_imports_client_and_discovers_channel(tmp_path, mo
     assert set(query["scope"][0].split()) == {
         "https://www.googleapis.com/auth/youtube.readonly",
         "https://www.googleapis.com/auth/yt-analytics.readonly",
+        "https://www.googleapis.com/auth/youtube.upload",
     }
     monkeypatch.setattr(service, "_post_form", lambda url, values: {
         "access_token": "youtube-access", "refresh_token": "youtube-refresh", "expires_in": 3600,
@@ -89,6 +90,9 @@ def test_tiktok_desktop_oauth_uses_pkce_and_discovers_user(tmp_path, monkeypatch
     flow = service.begin_oauth("tiktok", "http://127.0.0.1:49152/callback/")
     query = parse_qs(urlparse(flow["authorization_url"]).query)
     assert len(query["code_challenge"][0]) == 64
+    assert set(query["scope"][0].split(",")) == {
+        "user.info.basic", "video.list", "video.publish",
+    }
     captured = {}
 
     def token_request(_url, values):
@@ -112,6 +116,12 @@ def test_instagram_oauth_discovers_account_and_keeps_tokens_in_vault(tmp_path, m
         "redirect_uri": "http://127.0.0.1:49153/callback/",
     })
     flow = service.begin_oauth("instagram", "http://127.0.0.1:49153/callback/")
+    query = parse_qs(urlparse(flow["authorization_url"]).query)
+    assert set(query["scope"][0].split(",")) == {
+        "instagram_business_basic",
+        "instagram_business_manage_insights",
+        "instagram_business_content_publish",
+    }
     monkeypatch.setattr(service, "_post_form", lambda url, values: {
         "access_token": "ig-short", "user_id": "ig-user", "expires_in": 3600,
     })

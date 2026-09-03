@@ -18,15 +18,22 @@ from creator_intelligence.services.desktop_oauth import oauth_state, pkce_pair
 class SocialPlatformService:
     """Shared credentials, sync state, and published-content analytics."""
 
-    YOUTUBE_SCOPES = (
+    YOUTUBE_READ_SCOPES = (
         "https://www.googleapis.com/auth/youtube.readonly",
         "https://www.googleapis.com/auth/yt-analytics.readonly",
     )
-    INSTAGRAM_SCOPES = (
+    YOUTUBE_SCOPES = YOUTUBE_READ_SCOPES + (
+        "https://www.googleapis.com/auth/youtube.upload",
+    )
+    INSTAGRAM_READ_SCOPES = (
         "instagram_business_basic",
         "instagram_business_manage_insights",
     )
-    TIKTOK_SCOPES = ("user.info.basic", "video.list")
+    INSTAGRAM_SCOPES = INSTAGRAM_READ_SCOPES + (
+        "instagram_business_content_publish",
+    )
+    TIKTOK_READ_SCOPES = ("user.info.basic", "video.list")
+    TIKTOK_SCOPES = TIKTOK_READ_SCOPES + ("video.publish",)
 
     FIELDS = {
         "youtube": (
@@ -271,7 +278,7 @@ class SocialPlatformService:
                 state = self._connection_state(saved_state, ConnectionState.CONNECTED)
                 if self._token_expired(config.get("token_expires_at")) and not config.get("refresh_token"):
                     state = ConnectionState.EXPIRED
-                missing_scopes = [scope for scope in self.YOUTUBE_SCOPES if scope not in granted]
+                missing_scopes = [scope for scope in self.YOUTUBE_READ_SCOPES if scope not in granted]
                 if state == ConnectionState.CONNECTED and missing_scopes:
                     state = ConnectionState.LIMITED
                 message = self._youtube_state_message(state, missing_scopes)
@@ -285,7 +292,7 @@ class SocialPlatformService:
                 account_id=config.get("channel_id") or None,
                 account_name=config.get("account_name") or None,
                 granted_scopes=granted,
-                required_scopes=self.YOUTUBE_SCOPES,
+                required_scopes=self.YOUTUBE_READ_SCOPES,
                 expires_at=config.get("token_expires_at") or None,
                 last_validated_at=config.get("last_validated_at") or None,
                 last_error=config.get("last_error") or None,
@@ -295,13 +302,13 @@ class SocialPlatformService:
             missing = [field for field in required if not config.get(field)]
             granted = self._scope_values(config.get("granted_scopes"))
             state, message = self._social_connection_state(
-                platform, config, granted, self.INSTAGRAM_SCOPES,
+                platform, config, granted, self.INSTAGRAM_READ_SCOPES,
             )
             lifecycle = ConnectionStatus(
                 provider="instagram", state=state, message=message,
                 account_id=config.get("account_id") or None,
                 account_name=config.get("account_name") or None,
-                granted_scopes=granted, required_scopes=self.INSTAGRAM_SCOPES,
+                granted_scopes=granted, required_scopes=self.INSTAGRAM_READ_SCOPES,
                 expires_at=config.get("token_expires_at") or None,
                 last_validated_at=config.get("last_validated_at") or None,
                 last_error=config.get("last_error") or None,
@@ -311,13 +318,13 @@ class SocialPlatformService:
             missing = [field for field in required if not config.get(field)]
             granted = self._scope_values(config.get("granted_scopes"))
             state, message = self._social_connection_state(
-                platform, config, granted, self.TIKTOK_SCOPES,
+                platform, config, granted, self.TIKTOK_READ_SCOPES,
             )
             lifecycle = ConnectionStatus(
                 provider="tiktok", state=state, message=message,
                 account_id=config.get("user_id") or None,
                 account_name=config.get("account_name") or None,
-                granted_scopes=granted, required_scopes=self.TIKTOK_SCOPES,
+                granted_scopes=granted, required_scopes=self.TIKTOK_READ_SCOPES,
                 expires_at=config.get("token_expires_at") or None,
                 last_validated_at=config.get("last_validated_at") or None,
                 last_error=config.get("last_error") or None,
@@ -382,9 +389,9 @@ class SocialPlatformService:
                 "permission": "YouTube Analytics read-only",
             },
             {
-                "capability": "Edit, upload, or delete videos",
-                "available": False,
-                "permission": "Not requested by Creator Intelligence",
+                "capability": "Upload approved videos",
+                "available": self.YOUTUBE_SCOPES[2] in granted,
+                "permission": "YouTube upload",
             },
         ]
 
@@ -412,9 +419,9 @@ class SocialPlatformService:
                     "permission": "Not supported by the Instagram professional API",
                 },
                 {
-                    "capability": "Publish, edit, or delete media",
-                    "available": False,
-                    "permission": "Not requested by Creator Intelligence",
+                    "capability": "Publish approved Reels",
+                    "available": self.INSTAGRAM_SCOPES[2] in granted,
+                    "permission": "Instagram business content publish",
                 },
             ]
         return [
@@ -434,9 +441,9 @@ class SocialPlatformService:
                 "permission": "Not exposed by TikTok Display API",
             },
             {
-                "capability": "Publish, edit, or delete videos",
-                "available": False,
-                "permission": "Not requested by Creator Intelligence",
+                "capability": "Publish approved videos",
+                "available": self.TIKTOK_SCOPES[2] in granted,
+                "permission": "TikTok video publish",
             },
         ]
 
@@ -505,7 +512,7 @@ class SocialPlatformService:
                 raise ValueError("Save the Meta app ID, app secret, and OAuth redirect URI first.")
             verifier = ""
             params = {"client_id": config.get("app_id"), "redirect_uri": target,
-                      "response_type": "code", "scope": "instagram_business_basic,instagram_business_manage_insights",
+                      "response_type": "code", "scope": ",".join(self.INSTAGRAM_SCOPES),
                       "state": state}
             base = "https://www.instagram.com/oauth/authorize"
         elif platform == "tiktok":
@@ -515,7 +522,7 @@ class SocialPlatformService:
             verifier, challenge = pkce_pair(hex_challenge=True)
             params = {
                 "client_key": config.get("client_key"), "redirect_uri": target,
-                "response_type": "code", "scope": "user.info.basic,video.list", "state": state,
+                "response_type": "code", "scope": ",".join(self.TIKTOK_SCOPES), "state": state,
                 "code_challenge": challenge, "code_challenge_method": "S256",
             }
             base = "https://www.tiktok.com/v2/auth/authorize/"
@@ -679,9 +686,9 @@ class SocialPlatformService:
             if payload.get("refresh_expires_in"):
                 config["refresh_expires_at"] = self._expires_at(payload.get("refresh_expires_in"))
             required = {
-                "youtube": self.YOUTUBE_SCOPES,
-                "instagram": self.INSTAGRAM_SCOPES,
-                "tiktok": self.TIKTOK_SCOPES,
+                "youtube": self.YOUTUBE_READ_SCOPES,
+                "instagram": self.INSTAGRAM_READ_SCOPES,
+                "tiktok": self.TIKTOK_READ_SCOPES,
             }[platform]
             granted = set(self._scope_values(config.get("granted_scopes")))
             config["connection_state"] = (
