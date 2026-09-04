@@ -27,7 +27,8 @@ def release(version, *, prerelease=False, draft=False, assets=True):
     asset_rows = []
     if assets:
         asset_rows = [
-            {"name": installer, "browser_download_url": f"{DOWNLOAD_ROOT}/v{version}/{installer}"},
+            {"name": installer, "size": 52428800,
+             "browser_download_url": f"{DOWNLOAD_ROOT}/v{version}/{installer}"},
             {
                 "name": installer + ".sha256",
                 "browser_download_url": f"{DOWNLOAD_ROOT}/v{version}/{installer}.sha256",
@@ -39,6 +40,7 @@ def release(version, *, prerelease=False, draft=False, assets=True):
         "prerelease": prerelease,
         "draft": draft,
         "published_at": "2026-08-06T00:00:00Z",
+        "body": "Release notes for this update.",
         "assets": asset_rows,
     }
 
@@ -96,6 +98,8 @@ def test_newer_release_is_available_and_equal_or_older_is_current(tmp_path):
     result = update.check(force=True)
     assert result.status == UpdateStatus.AVAILABLE
     assert result.release.installer_name == "CreatorIntelligence-5.0.0-windows-x64-setup.exe"
+    assert result.release.installer_size == 52428800
+    assert result.release.notes == "Release notes for this update."
 
     current = checker(tmp_path / "same", FakeTransport([release("5.0.0-alpha.2", prerelease=True)]), channel="preview")
     assert current.check(force=True).status == UpdateStatus.CURRENT

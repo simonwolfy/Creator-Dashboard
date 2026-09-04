@@ -59,6 +59,8 @@ class ReleaseInfo:
     installer_url: str
     checksum_url: str
     published_at: str | None = None
+    notes: str = ""
+    installer_size: int | None = None
 
     def to_cache(self) -> dict[str, Any]:
         return asdict(self)
@@ -443,6 +445,8 @@ def _release_info(item: dict[str, Any]) -> ReleaseInfo:
         installer_url=installer_url,
         checksum_url=checksum_url,
         published_at=item.get("published_at"),
+        notes=str(item.get("body") or "").strip(),
+        installer_size=int(installers[0].get("size") or 0) or None,
     )
     _validate_release_urls(release)
     return release

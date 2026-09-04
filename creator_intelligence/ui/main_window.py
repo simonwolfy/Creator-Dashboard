@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from creator_intelligence.core.versioning import APPLICATION_VERSION
 from creator_intelligence.services.update_checker import UpdateStatus
-from creator_intelligence.ui.update_worker import UpdateCheckWorker
+from creator_intelligence.ui.update_worker import UpdateCheckWorker, UpdateDownloadWorker
 
 log = logging.getLogger(__name__)
 
@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
 
         self.update_checker = self.context.services.get("update_checker")
         self._update_worker = None
+        self._update_download_worker = None
         if (
             self.update_checker is not None
             and getattr(runtime.settings, "auto_check_updates", True)
@@ -167,18 +168,84 @@ class MainWindow(QMainWindow):
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("Creator Intelligence update available")
         box.setText(f"Version {result.release.version} is ready.")
-        box.setInformativeText(
-            "Your workspace stays in its current location. You can view the release, "
-            "install it later, or skip this version."
+        size = (
+            f" ({result.release.installer_size / 1024**2:.1f} MB)"
+            if result.release.installer_size else ""
         )
-        view_button = box.addButton("View update", QMessageBox.ButtonRole.AcceptRole)
+        notes = result.release.notes[:800]
+        box.setInformativeText(
+            f"Verified Windows installer{size}. Your workspace stays in its current location."
+            + (f"\n\n{notes}" if notes else "")
+        )
+        download_button = box.addButton("Download update", QMessageBox.ButtonRole.AcceptRole)
+        view_button = box.addButton("View release", QMessageBox.ButtonRole.ActionRole)
         box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
         skip_button = box.addButton("Skip this version", QMessageBox.ButtonRole.DestructiveRole)
         box.exec()
-        if box.clickedButton() is view_button:
+        if box.clickedButton() is download_button:
+            self._download_update(result.release)
+        elif box.clickedButton() is view_button:
             QDesktopServices.openUrl(QUrl(result.release.page_url))
         elif box.clickedButton() is skip_button:
             self.update_checker.skip(result.release.version)
+
+    def _download_update(self, release) -> None:
+        if self._has_active_processing():
+            QMessageBox.information(
+                self, "Update postponed",
+                "Content processing is active. Finish or cancel those jobs before downloading an update.",
+            )
+            return
+        if self._update_download_worker is not None and self._update_download_worker.running:
+            return
+        self.statusBar().showMessage("Downloading and verifying the Creator Intelligence update…")
+        self._update_download_worker = UpdateDownloadWorker(
+            self.update_checker, release, parent=self
+        )
+        self._update_download_worker.download_ready.connect(self._update_download_ready)
+        self._update_download_worker.download_failed.connect(self._update_download_failed)
+        self._update_download_worker.start()
+
+    def _update_download_ready(self, path) -> None:
+        self.statusBar().showMessage(f"Verified update ready: {path.name}")
+        answer = QMessageBox.question(
+            self, "Install verified update?",
+            "The installer passed its SHA-256 verification. Close Creator Intelligence "
+            "and start the installer now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            if QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                self.close()
+            else:
+                QMessageBox.warning(self, "Update installer", "Windows could not start the installer.")
+
+    def _update_download_failed(self, message) -> None:
+        self.statusBar().showMessage("The update could not be downloaded and verified.")
+        QMessageBox.warning(self, "Update download", message)
+
+    def _has_active_processing(self) -> bool:
+        tables = {
+            "content_analysis_jobs": ("Queued", "Running", "Retrying"),
+            "transcript_jobs": ("Queued", "Running"),
+            "media_processing_jobs": ("Queued", "Running"),
+            "scene_analysis_jobs": ("Queued", "Running"),
+        }
+        existing = set(self.db.frame(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )["name"].astype(str))
+        for table, statuses in tables.items():
+            if table not in existing:
+                continue
+            placeholders = ",".join("?" for _ in statuses)
+            active = self.db.frame(
+                f"SELECT COUNT(*) AS count FROM {table} WHERE status IN ({placeholders})",
+                statuses,
+            )
+            if not active.empty and int(active.iloc[0]["count"]) > 0:
+                return True
+        return False
 
     @staticmethod
     def _navigation_key(item) -> str:

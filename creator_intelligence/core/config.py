@@ -20,7 +20,7 @@ class AppConfig:
     exclude_outliers: bool = False
     short_duration_threshold_seconds: int = 180
     auto_check_updates: bool = True
-    update_channel: str = "stable"
+    update_channel: str = "preview"
 
 
 class ConfigService:
