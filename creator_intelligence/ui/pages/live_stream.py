@@ -1,11 +1,12 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
 import pandas as pd
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QWidget,QVBoxLayout,QLabel,QPushButton,QTabWidget,
     QTableView,QAbstractItemView,QGroupBox,QGridLayout,QFormLayout,
-    QLineEdit,QSpinBox,QDoubleSpinBox,QCheckBox,QMessageBox,QInputDialog
+    QLineEdit,QSpinBox,QDoubleSpinBox,QCheckBox,QMessageBox,QInputDialog,
+    QLayout,QScrollArea
 )
 from creator_intelligence.ui.pages.twitch import FrameModel
 from creator_intelligence.ui.oauth_connect import run_twitch_device_oauth, show_connection_result
@@ -158,7 +159,14 @@ class LiveStreamPage(QWidget):
         return page
 
     def _settings_tab(self):
-        page=QWidget(); layout=QVBoxLayout(page)
+        page=QWidget(); page_layout=QVBoxLayout(page)
+        self.settings_scroll=QScrollArea()
+        self.settings_scroll.setObjectName("liveSettingsScroll")
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        settings_content=QWidget()
+        layout=QVBoxLayout(settings_content)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         self.connection_panel=ConnectionStatusPanel("Twitch")
         layout.addWidget(self.connection_panel)
         self.connection_notice=StatusBanner("Twitch connection controls are ready.")
@@ -239,6 +247,8 @@ class LiveStreamPage(QWidget):
         layout.addWidget(save)
         disconnect_obs=QPushButton("Disconnect OBS and clear password")
         disconnect_obs.clicked.connect(lambda:self.disconnect_integration("obs"));layout.addWidget(disconnect_obs)
+        self.settings_scroll.setWidget(settings_content)
+        page_layout.addWidget(self.settings_scroll)
         return page
 
     def start_simulation(self):

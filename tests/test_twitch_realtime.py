@@ -9,7 +9,8 @@ import pandas as pd
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QLayout
 
 from creator_intelligence.core.credential_vault import MemoryCredentialBackend
 from creator_intelligence.services.live_integrations import TwitchLiveAdapter
@@ -262,6 +263,12 @@ def test_live_stream_page_explains_unavailable_twitch_actions(tmp_path):
     assert page.twitch_access_token.isReadOnly()
     assert not page.connect_twitch_button.isEnabled()
     assert page.connect_twitch_button.toolTip() == "Paste the Twitch Client ID first."
+    assert page.settings_scroll.widgetResizable() is True
+    assert page.settings_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert (
+        page.settings_scroll.widget().layout().sizeConstraint()
+        == QLayout.SizeConstraint.SetMinimumSize
+    )
 
     page.close()
     app.processEvents()

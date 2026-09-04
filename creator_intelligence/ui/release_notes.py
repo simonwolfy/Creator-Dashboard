@@ -14,4 +14,5 @@ CURRENT_RELEASE_NOTES = (
     "Real Twitch connection, account validation, Helix polling, EventSub events, and live chat have been restored.",
     "Twitch connection status now explains expired access, missing permissions, and which live features are available.",
     "Twitch analytics are chronological, use the dark theme, and clearly distinguish missing revenue data from zero revenue.",
+    "The Twitch connection and marker settings now scroll vertically instead of compressing controls together.",
 )
