@@ -1,64 +1,145 @@
 import logging
+from html import escape
 
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
-    QListWidget,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QStackedWidget,
     QStatusBar,
+    QTextBrowser,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from creator_intelligence.core.versioning import APPLICATION_VERSION
 from creator_intelligence.services.update_checker import UpdateStatus
+from creator_intelligence.ui.page_help import (
+    CATEGORY_ORDER,
+    help_for_page,
+    navigation_category,
+)
+from creator_intelligence.ui.release_notes import CURRENT_RELEASE_NOTES, NOTES_REVISION
 from creator_intelligence.ui.update_worker import UpdateCheckWorker, UpdateDownloadWorker
 
 log = logging.getLogger(__name__)
 
 STYLE = """
-QMainWindow,QWidget { background:#0d1018; color:#eef1ff; font-size:13px; }
-QListWidget { background:#131827; border:none; padding:10px; font-size:15px; }
-QListWidget::item { padding:13px; border-radius:8px; }
-QListWidget::item:selected { background:#6f36c9; }
-QPushButton { background:#7137c8; border:none; padding:9px 14px; border-radius:7px; font-weight:600; }
+QMainWindow,QWidget { background:#0d1018; color:#eef1ff; font-size:14px; }
+QTreeWidget { background:#131827; border:none; padding:8px; font-size:14px; outline:none; }
+QTreeWidget::item { min-height:30px; padding:3px 5px; border-radius:7px; }
+QTreeWidget::item:selected { background:#6f36c9; color:#ffffff; }
+QPushButton { background:#7137c8; border:none; padding:9px 14px; min-height:20px; border-radius:7px; font-weight:600; }
 QPushButton:hover { background:#8248d8; }
 QLineEdit,QComboBox,QSpinBox,QDoubleSpinBox,QDateEdit,QDateTimeEdit,QPlainTextEdit {
- background:#171d2d; border:1px solid #333d5d; padding:7px; border-radius:6px;
+ background:#171d2d; border:1px solid #333d5d; padding:7px; min-height:20px; border-radius:6px;
 }
-QTableView,QTableWidget { background:#121725; gridline-color:#29314b; alternate-background-color:#171d2d; }
-QHeaderView::section { background:#202841; padding:7px; border:none; }
+QLabel { min-height:18px; }
+QCheckBox { min-height:22px; spacing:7px; }
+QTabBar::tab { min-height:22px; padding:8px 12px; }
+QTableView,QTableWidget { background:#121725; gridline-color:#29314b; alternate-background-color:#171d2d; font-size:13px; }
+QHeaderView::section { background:#202841; padding:8px; min-height:22px; border:none; font-weight:600; }
 QGroupBox { border:1px solid #303a5e; border-radius:8px; margin-top:8px; padding-top:12px; }
 QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 5px; }
-#pageTitle { font-size:27px; font-weight:700; padding:8px 0 14px 0; }
+#pageTitle { font-size:27px; font-weight:700; min-height:38px; padding:8px 0 14px 0; }
 #metricCard { background:#151b2d; border:1px solid #303a5e; border-radius:12px; padding:8px; }
 #metricTitle { color:#abb4d5; font-weight:600; }
 #metricValue { font-size:24px; font-weight:700; }
 #metricSubtitle { color:#8993b4; }
+#sidebarToggle { background:#171d2d; border:1px solid #384362; text-align:left; }
+#pageHelpButton { background:#7137c8; color:white; border-radius:15px; font-size:17px; font-weight:700; }
+#pageHelpButton:hover { background:#8248d8; }
 """
 
 NAV_KEY_ROLE = Qt.ItemDataRole.UserRole
 
 
-class ReorderableNavigation(QListWidget):
-    orderChanged = Signal()
+class GroupedNavigation(QWidget):
+    pageSelected = Signal(str)
 
     def __init__(self):
         super().__init__()
-        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
+        self.setFixedWidth(272)
+        self._expanded_width = 272
+        self._groups: dict[str, QTreeWidgetItem] = {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(7, 7, 7, 7)
+        self.toggle = QPushButton("◀  Collapse navigation")
+        self.toggle.setObjectName("sidebarToggle")
+        self.toggle.clicked.connect(self.toggle_collapsed)
+        layout.addWidget(self.toggle)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setIndentation(17)
+        self.tree.itemSelectionChanged.connect(self._selection_changed)
+        layout.addWidget(self.tree, 1)
 
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        self.orderChanged.emit()
+    def add_page(self, category: str, label: str, key: str) -> QTreeWidgetItem:
+        group = self._groups.get(category)
+        if group is None:
+            group = QTreeWidgetItem([category])
+            font = QFont()
+            font.setBold(True)
+            group.setFont(0, font)
+            group.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.tree.addTopLevelItem(group)
+            self._groups[category] = group
+        item = QTreeWidgetItem([label])
+        item.setData(0, NAV_KEY_ROLE, key)
+        group.addChild(item)
+        group.setExpanded(True)
+        return item
+
+    def select_first_page(self) -> None:
+        for index in range(self.tree.topLevelItemCount()):
+            group = self.tree.topLevelItem(index)
+            if group.childCount():
+                self.tree.setCurrentItem(group.child(0))
+                return
+
+    def toggle_collapsed(self) -> None:
+        collapsed = self.tree.isVisible()
+        self.tree.setVisible(not collapsed)
+        self.setFixedWidth(46 if collapsed else self._expanded_width)
+        self.toggle.setText("▶" if collapsed else "◀  Collapse navigation")
+        self.toggle.setToolTip("Expand navigation" if collapsed else "Collapse navigation")
+
+    def _selection_changed(self) -> None:
+        item = self.tree.currentItem()
+        key = item.data(0, NAV_KEY_ROLE) if item is not None else None
+        if key:
+            self.pageSelected.emit(str(key))
+
+
+class GuidedPage(QWidget):
+    helpRequested = Signal(str)
+
+    def __init__(self, key: str, page: QWidget):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 8)
+        help_row = QHBoxLayout()
+        help_row.addStretch()
+        button = QToolButton()
+        button.setObjectName("pageHelpButton")
+        button.setText("?")
+        button.setFixedSize(30, 30)
+        button.setToolTip("What does this page do?")
+        button.setAccessibleName("Page help")
+        button.clicked.connect(lambda: self.helpRequested.emit(key))
+        help_row.addWidget(button)
+        layout.addLayout(help_row)
+        layout.addWidget(page, 1)
 
 
 class ModuleFailurePage(QWidget):
@@ -91,17 +172,16 @@ class MainWindow(QMainWindow):
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.nav = ReorderableNavigation()
-        self.nav.setFixedWidth(245)
+        self.nav = GroupedNavigation()
         self.stack = QStackedWidget()
         self.pages_by_key: dict[str, QWidget] = {}
+        self.page_help_by_key: dict[str, tuple[str, str, str]] = {}
 
         navigation = list(self.registry.build_navigation())
-        saved_order = self.settings.value("navigation/order", [], list)
-        saved_positions = {key: index for index, key in enumerate(saved_order)}
+        category_positions = {category: index for index, category in enumerate(CATEGORY_ORDER)}
         navigation.sort(
             key=lambda item: (
-                saved_positions.get(self._navigation_key(item), len(saved_positions) + item.order),
+                category_positions[navigation_category(item.label, item.module_id)],
                 item.order,
                 item.label,
             )
@@ -109,27 +189,39 @@ class MainWindow(QMainWindow):
 
         for item in navigation:
             key = self._navigation_key(item)
+            category = navigation_category(item.label, item.module_id)
+            module_id = str(item.module_id or "").split(":", 1)[0]
+            metadata = self.registry.modules.get(module_id)
+            description = metadata.description if metadata is not None else ""
             try:
                 page = item.factory()
             except Exception as exc:
                 log.exception("Failed to create page %s", item.label)
                 page = ModuleFailurePage(item.label, exc)
-            self._add_navigation_item(item.label, key)
-            self.pages_by_key[key] = page
-            self.stack.addWidget(page)
+            guided_page = GuidedPage(key, page)
+            guided_page.helpRequested.connect(self._show_page_help)
+            self.nav.add_page(category, item.label, key)
+            self.pages_by_key[key] = guided_page
+            self.page_help_by_key[key] = (item.label, category, description)
+            self.stack.addWidget(guided_page)
 
-        if self.nav.count() == 0:
+        if not self.pages_by_key:
             page = ModuleFailurePage(
                 "Application modules",
                 "No application modules loaded. Check config/modules.json and the logs.",
             )
-            self._add_navigation_item("No modules", "system:no-modules")
-            self.pages_by_key["system:no-modules"] = page
-            self.stack.addWidget(page)
+            key = "system:no-modules"
+            guided_page = GuidedPage(key, page)
+            guided_page.helpRequested.connect(self._show_page_help)
+            self.nav.add_page("System", "No modules", key)
+            self.pages_by_key[key] = guided_page
+            self.page_help_by_key[key] = (
+                "No modules", "System", "Diagnose why application modules did not load."
+            )
+            self.stack.addWidget(guided_page)
 
-        self.nav.currentRowChanged.connect(self._show_current_navigation_page)
-        self.nav.orderChanged.connect(self._navigation_reordered)
-        self.nav.setCurrentRow(0)
+        self.nav.pageSelected.connect(self._show_navigation_page)
+        self.nav.select_first_page()
         layout.addWidget(self.nav)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(container)
@@ -144,6 +236,9 @@ class MainWindow(QMainWindow):
         )
         self.setStatusBar(status)
 
+        if str(self.settings.value("updates/last_notes_revision", "")) != NOTES_REVISION:
+            QTimer.singleShot(700, self._show_release_notes)
+
         self.update_checker = self.context.services.get("update_checker")
         self._update_worker = None
         self._update_download_worker = None
@@ -152,7 +247,7 @@ class MainWindow(QMainWindow):
             and getattr(runtime.settings, "auto_check_updates", True)
             and self.update_checker.should_check()
         ):
-            QTimer.singleShot(1500, self._start_automatic_update_check)
+            QTimer.singleShot(2500, self._start_automatic_update_check)
 
     def _start_automatic_update_check(self) -> None:
         if self._update_worker is not None and self._update_worker.running:
@@ -253,27 +348,59 @@ class MainWindow(QMainWindow):
         module = str(item.module_id or "unowned")
         return f"{module}:{item.label}"
 
-    def _add_navigation_item(self, label: str, key: str):
-        self.nav.addItem(label)
-        item = self.nav.item(self.nav.count() - 1)
-        item.setData(NAV_KEY_ROLE, key)
-        return item
-
-    def _show_current_navigation_page(self, row: int) -> None:
-        item = self.nav.item(row) if row >= 0 else None
-        key = item.data(NAV_KEY_ROLE) if item else None
-        page = self.pages_by_key.get(str(key)) if key is not None else None
+    def _show_navigation_page(self, key: str) -> None:
+        page = self.pages_by_key.get(str(key))
         if page is not None:
             self.stack.setCurrentWidget(page)
 
-    def _navigation_reordered(self) -> None:
-        ordered_keys = [
-            str(self.nav.item(index).data(NAV_KEY_ROLE))
-            for index in range(self.nav.count())
-        ]
-        self.settings.setValue("navigation/order", ordered_keys)
+    def _show_page_help(self, key: str) -> None:
+        label, category, description = self.page_help_by_key[key]
+        content = help_for_page(label, category, description)
+        steps = "".join(
+            f"<li style='margin-bottom:8px'>{escape(step)}</li>" for step in content.steps
+        )
+        self._show_information_dialog(
+            f"{label} help",
+            (
+                f"<h2>{escape(label)}</h2>"
+                f"<p><b>What it does</b></p><p>{escape(content.purpose)}</p>"
+                f"<p><b>First-time steps</b></p><ol>{steps}</ol>"
+                "<p>You can reopen this guide at any time with the <b>?</b> button.</p>"
+            ),
+        )
+
+    def _show_release_notes(self) -> None:
+        self.settings.setValue("updates/last_notes_revision", NOTES_REVISION)
+        self.settings.setValue("updates/last_seen_version", APPLICATION_VERSION)
         self.settings.sync()
-        self._show_current_navigation_page(self.nav.currentRow())
+        notes = "".join(
+            f"<li style='margin-bottom:9px'>{escape(note)}</li>"
+            for note in CURRENT_RELEASE_NOTES
+        )
+        self._show_information_dialog(
+            f"What’s new in Creator Intelligence {APPLICATION_VERSION}",
+            (
+                f"<h2>What’s new in {escape(APPLICATION_VERSION)}</h2>"
+                "<p>This appears once after an updated build is installed.</p>"
+                f"<ul>{notes}</ul>"
+                "<p>Your existing workspace and creator data remain in their current location.</p>"
+            ),
+        )
+
+    def _show_information_dialog(self, title: str, html: str) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(650, 460)
+        layout = QVBoxLayout(dialog)
+        content = QTextBrowser()
+        content.setOpenExternalLinks(True)
+        content.setHtml(html)
+        layout.addWidget(content)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def closeEvent(self, event):
         if self.application_core is not None:

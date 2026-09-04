@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
     QGridLayout,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -91,8 +92,16 @@ class CreatorDashboardPage(QWidget):
         table.setAlternatingRowColors(True)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setWordWrap(False)
         table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(True)
+        header = table.horizontalHeader()
+        header.setMinimumSectionSize(105)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        widths = (280, 125, 135, 130, 140, 190)
+        for index in range(len(columns)):
+            table.setColumnWidth(index, widths[index])
+        header.setStretchLastSection(True)
         table.setMinimumHeight(190)
         self.body_layout.addWidget(table)
         return table
@@ -139,4 +148,4 @@ class CreatorDashboardPage(QWidget):
                 item = QTableWidgetItem("" if value is None else str(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 table.setItem(row_index, column_index, item)
-        table.resizeColumnsToContents()
+        table.resizeRowsToContents()
