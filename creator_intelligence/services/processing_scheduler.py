@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Any, Callable
 
+from creator_intelligence.utils.subprocesses import hidden_process_kwargs
+
 
 GPU_JOB_TYPES = {"Generate proxy"}
 CPU_JOB_TYPES = {"Probe metadata", "Extract audio", "Generate thumbnails"}
@@ -50,6 +52,7 @@ class ProcessingSchedulerService:
                 capture_output=True,
                 text=True,
                 timeout=5,
+                **hidden_process_kwargs(),
             )
             if result.returncode == 0:
                 gpu_name = next(
@@ -68,6 +71,7 @@ class ProcessingSchedulerService:
                     capture_output=True,
                     text=True,
                     timeout=10,
+                    **hidden_process_kwargs(),
                 )
                 encoders = f"{result.stdout}\n{result.stderr}".lower()
                 nvenc = "h264_nvenc" in encoders

@@ -8,6 +8,8 @@ import shutil
 import subprocess
 from typing import Any, Callable
 
+from creator_intelligence.utils.subprocesses import hidden_process_kwargs
+
 
 @dataclass(frozen=True)
 class FFmpegStatus:
@@ -88,7 +90,10 @@ class FFmpegManagerService:
             "--accept-source-agreements",
             "--silent",
         ]
-        result = self.runner(command, capture_output=True, text=True, timeout=900)
+        result = self.runner(
+            command, capture_output=True, text=True, timeout=900,
+            **hidden_process_kwargs(),
+        )
         output = "\n".join(part for part in (getattr(result, "stdout", ""), getattr(result, "stderr", "")) if part).strip()
         if int(getattr(result, "returncode", 1)) != 0:
             raise RuntimeError(output or f"winget exited with code {result.returncode}")
@@ -152,7 +157,10 @@ class FFmpegManagerService:
         if not executable:
             return None
         try:
-            result = self.runner([executable, "-version"], capture_output=True, text=True, timeout=15)
+            result = self.runner(
+                [executable, "-version"], capture_output=True, text=True, timeout=15,
+                **hidden_process_kwargs(),
+            )
             if int(getattr(result, "returncode", 1)) != 0:
                 return None
             first_line = str(getattr(result, "stdout", "") or "").splitlines()

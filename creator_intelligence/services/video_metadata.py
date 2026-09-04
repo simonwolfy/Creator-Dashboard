@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from typing import Any, Callable
 
+from creator_intelligence.utils.subprocesses import hidden_process_kwargs
+
 
 class VideoMetadataService:
     """Extract technical metadata for canonical managed video assets with FFprobe."""
@@ -80,7 +82,10 @@ class VideoMetadataService:
             str(path),
         ]
         try:
-            result = self.runner(command, capture_output=True, text=True, timeout=120)
+            result = self.runner(
+                command, capture_output=True, text=True, timeout=120,
+                **hidden_process_kwargs(),
+            )
             if int(getattr(result, "returncode", 0)) != 0:
                 raise RuntimeError((getattr(result, "stderr", "") or "FFprobe failed").strip())
             payload = json.loads(getattr(result, "stdout", "") or "{}")

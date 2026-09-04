@@ -11,6 +11,8 @@ import threading
 import time
 from typing import Callable
 
+from creator_intelligence.utils.subprocesses import hidden_process_kwargs
+
 
 JOB_TYPES = (
     "Probe metadata",
@@ -410,7 +412,10 @@ class VideoProcessingService:
             asset["source_path"],
         ]
         self._command(job_id, command)
-        result = subprocess.run(command, capture_output=True, text=True)
+        result = subprocess.run(
+            command, capture_output=True, text=True,
+            **hidden_process_kwargs(),
+        )
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or "FFprobe failed")
         data = json.loads(result.stdout or "{}")
@@ -562,6 +567,7 @@ class VideoProcessingService:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **hidden_process_kwargs(),
         )
         self._processes[int(job_id)] = process
         last_update = 0.0

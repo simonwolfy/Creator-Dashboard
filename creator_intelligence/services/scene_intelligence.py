@@ -7,6 +7,8 @@ import math
 import re
 import subprocess
 
+from creator_intelligence.utils.subprocesses import hidden_process_kwargs
+
 class SceneIntelligenceService:
     def __init__(
         self, db, transcript_service=None, video_processing=None,
@@ -438,7 +440,8 @@ class SceneIntelligenceService:
             "-f","null","-"
         ]
         process = subprocess.run(
-            command,capture_output=True,text=True,check=False
+            command, capture_output=True, text=True, check=False,
+            **hidden_process_kwargs(),
         )
         output = (process.stderr or "") + "\n" + (process.stdout or "")
         starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)",output)]

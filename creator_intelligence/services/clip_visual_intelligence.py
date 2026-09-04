@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 from creator_intelligence.core.credential_vault import CredentialVault, MASK
 from creator_intelligence.services.google_drive_media_cache import GoogleDriveMediaCacheService
+from creator_intelligence.utils.subprocesses import hidden_process_kwargs
 
 
 class ClipVisualIntelligenceService:
@@ -185,7 +186,10 @@ class ClipVisualIntelligenceService:
                 "-ss", f"{timestamp:.3f}", "-i", str(source), "-frames:v", "1",
                 "-vf", "scale='min(768,iw)':-2", "-q:v", "3", str(destination),
             ]
-            result = self.runner(command, capture_output=True, text=True, timeout=60)
+            result = self.runner(
+                command, capture_output=True, text=True, timeout=60,
+                **hidden_process_kwargs(),
+            )
             if int(getattr(result, "returncode", 0)) != 0 or not destination.is_file():
                 error = str(getattr(result, "stderr", "") or "FFmpeg did not create a frame.").strip()
                 raise RuntimeError(error)

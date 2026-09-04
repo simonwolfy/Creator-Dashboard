@@ -6,6 +6,8 @@ import re
 import subprocess
 from typing import Any, Callable
 
+from creator_intelligence.utils.subprocesses import hidden_process_kwargs
+
 
 _SHOWINFO_TIME = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 _SHOWINFO_SCORE = re.compile(r"scene_score=([0-9]+(?:\.[0-9]+)?)")
@@ -120,6 +122,7 @@ class VisualSceneEngineService:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **hidden_process_kwargs(),
         )
         detected: list[tuple[float, float | None]] = []
         pending_time: float | None = None

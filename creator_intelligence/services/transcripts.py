@@ -12,6 +12,8 @@ import subprocess
 import threading
 import uuid
 
+from creator_intelligence.utils.subprocesses import hidden_process_kwargs
+
 TRANSCRIPT_JOB_TYPES = (
     "Transcribe audio",
     "Import transcript",
@@ -769,7 +771,7 @@ class TranscriptService:
             ]
             process = subprocess.Popen(
                 command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                text=True,bufsize=1
+                text=True,bufsize=1,**hidden_process_kwargs()
             )
             self._processes[int(job["id"])] = process
             for line in process.stdout or []:
@@ -808,7 +810,7 @@ class TranscriptService:
         ]
         process = subprocess.Popen(
             command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-            text=True,bufsize=1
+            text=True,bufsize=1,**hidden_process_kwargs()
         )
         self._processes[int(job["id"])] = process
         for line in process.stdout or []:
