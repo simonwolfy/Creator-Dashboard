@@ -54,6 +54,14 @@ def test_release_pipeline_has_privacy_history_gate_and_artifacts():
     assert "simulated downgrade" in workflow
 
 
+def test_local_release_build_detects_per_user_inno_setup():
+    script = (ROOT / "tools" / "build_release.ps1").read_text(encoding="utf-8")
+    assert 'Programs\\Inno Setup 6\\ISCC.exe' in script
+    assert "$IsccPath" in script
+    assert "function Invoke-Checked" in script
+    assert '"Packaged application smoke test"' in script
+
+
 def test_installer_preserves_external_workspaces_and_creates_shortcuts():
     installer = (ROOT / "installer" / "CreatorIntelligence.iss").read_text(encoding="utf-8")
     assert "{group}" in installer
