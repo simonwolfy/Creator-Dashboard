@@ -139,10 +139,19 @@ jobs:
           if ($downgrade.ExitCode -eq 0) { throw "The installer accepted a simulated downgrade." }
           $releaseRank = python -m creator_intelligence.core.release_verification --print-release-rank
           Set-ItemProperty -Path $rankKey -Name ReleaseRank -Value $releaseRank
+          $restoredRank = (Get-ItemProperty -Path $rankKey -Name ReleaseRank).ReleaseRank
+          if ($restoredRank -ne $releaseRank) { throw "The release rank was not restored after the downgrade test." }
+          # Inno Setup can briefly retain its setup mutex after an InitializeSetup rejection.
+          Start-Sleep -Seconds 2
 
           & (Join-Path $installDir "CreatorIntelligence.exe") --release-upgrade-smoke-test $upgradeWorkspace
-          $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
-          if ($upgrade.ExitCode -ne 0) { throw "Reinstallation failed with exit code $($upgrade.ExitCode)." }
+          $upgradeLog = Join-Path $env:RUNNER_TEMP "creator-intelligence-reinstall.log"
+          $upgradeArguments = $arguments + "/LOG=$upgradeLog"
+          $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList $upgradeArguments -Wait -PassThru
+          if ($upgrade.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $upgradeLog) { Get-Content -LiteralPath $upgradeLog }
+            throw "Reinstallation failed with exit code $($upgrade.ExitCode)."
+          }
           & (Join-Path $installDir "CreatorIntelligence.exe") --release-smoke-test
           $uninstallers = @(Get-ChildItem $installDir -File -Filter unins*.exe)
           if ($uninstallers.Count -ne 1) { throw "Expected exactly one uninstaller." }
