@@ -97,7 +97,10 @@ jobs:
       - name: Audit standalone bundle contents
         run: python -m creator_intelligence.core.release_verification --bundle dist\CreatorIntelligence
       - name: Smoke test standalone app and packaged OAuth runtime
-        run: dist\CreatorIntelligence\CreatorIntelligence.exe --release-smoke-test
+        shell: pwsh
+        run: |
+          $smoke = Start-Process -FilePath dist\CreatorIntelligence\CreatorIntelligence.exe -ArgumentList "--release-smoke-test" -Wait -PassThru
+          if ($smoke.ExitCode -ne 0) { throw "Standalone smoke test failed with exit code $($smoke.ExitCode)." }
       - name: Install Inno Setup
         run: choco install innosetup --version=6.7.1 --no-progress -y
       - name: Build installer
@@ -131,7 +134,9 @@ jobs:
           $arguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir")
           $first = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
           if ($first.ExitCode -ne 0) { throw "Clean installation failed with exit code $($first.ExitCode)." }
-          & (Join-Path $installDir "CreatorIntelligence.exe") --release-smoke-test
+          $installedExe = Join-Path $installDir "CreatorIntelligence.exe"
+          $initialSmoke = Start-Process -FilePath $installedExe -ArgumentList "--release-smoke-test" -Wait -PassThru
+          if ($initialSmoke.ExitCode -ne 0) { throw "Installed smoke test failed with exit code $($initialSmoke.ExitCode)." }
 
           $rankKey = "HKCU:\Software\Creator Intelligence"
           Set-ItemProperty -Path $rankKey -Name ReleaseRank -Value ("9" * 21)
@@ -144,7 +149,8 @@ jobs:
           # Inno Setup can briefly retain its setup mutex after an InitializeSetup rejection.
           Start-Sleep -Seconds 2
 
-          & (Join-Path $installDir "CreatorIntelligence.exe") --release-upgrade-smoke-test $upgradeWorkspace
+          $upgradeSmoke = Start-Process -FilePath $installedExe -ArgumentList @("--release-upgrade-smoke-test", $upgradeWorkspace) -Wait -PassThru
+          if ($upgradeSmoke.ExitCode -ne 0) { throw "Upgrade smoke test failed with exit code $($upgradeSmoke.ExitCode)." }
           $upgradeLog = Join-Path $env:RUNNER_TEMP "creator-intelligence-reinstall.log"
           $upgradeArguments = $arguments + "/LOG=$upgradeLog"
           $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList $upgradeArguments -Wait -PassThru
@@ -152,7 +158,8 @@ jobs:
             if (Test-Path -LiteralPath $upgradeLog) { Get-Content -LiteralPath $upgradeLog }
             throw "Reinstallation failed with exit code $($upgrade.ExitCode)."
           }
-          & (Join-Path $installDir "CreatorIntelligence.exe") --release-smoke-test
+          $reinstalledSmoke = Start-Process -FilePath $installedExe -ArgumentList "--release-smoke-test" -Wait -PassThru
+          if ($reinstalledSmoke.ExitCode -ne 0) { throw "Reinstalled smoke test failed with exit code $($reinstalledSmoke.ExitCode)." }
           $uninstallers = @(Get-ChildItem $installDir -File -Filter unins*.exe)
           if ($uninstallers.Count -ne 1) { throw "Expected exactly one uninstaller." }
           $uninstall = Start-Process -FilePath $uninstallers[0].FullName -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
