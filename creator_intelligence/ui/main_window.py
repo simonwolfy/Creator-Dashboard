@@ -58,6 +58,17 @@ QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 5px; }
 #sidebarToggle { background:#171d2d; border:1px solid #384362; text-align:left; }
 #pageHelpButton { background:#7137c8; color:white; border-radius:15px; font-size:17px; font-weight:700; }
 #pageHelpButton:hover { background:#8248d8; }
+#statusBanner { background:#171d2d; color:#eef1ff; border:1px solid #333d5d; border-radius:7px; padding:8px 10px; }
+#statusBanner[statusLevel="success"] { background:#143424; color:#8ce3a7; }
+#statusBanner[statusLevel="error"] { background:#431c2a; color:#ff9eb5; }
+#connectionStatusPanel { background:#171d2d; border:1px solid #333d5d; border-radius:8px; padding:8px; }
+#connectionState { font-size:16px; font-weight:700; }
+#connectionState[connectionState="connected"] { color:#8ce3a7; }
+#connectionState[connectionState="limited"] { color:#bca2ff; }
+#connectionState[connectionState="expired"],
+#connectionState[connectionState="revoked"],
+#connectionState[connectionState="error"] { color:#ff9eb5; }
+#connectionAccount, #connectionPermissions { color:#abb4d5; }
 """
 
 NAV_KEY_ROLE = Qt.ItemDataRole.UserRole

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QAbstractTableModel, Qt, QDate
 from creator_intelligence.ui.widgets import MetricCard
-from creator_intelligence.ui.charts import Chart
+from creator_intelligence.ui.charts import Chart, has_nonzero_numeric_values
 from creator_intelligence.services.reporting import ReportingService
 from creator_intelligence.utils.paths import EXPORT_DIR
 
@@ -28,7 +28,9 @@ class FrameModel(QAbstractTableModel):
             return str(value)
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole:
-            return str(self.frame.columns[section]) if orientation == Qt.Horizontal else str(section+1)
+            if orientation == Qt.Horizontal:
+                return str(self.frame.columns[section]) if 0 <= section < len(self.frame.columns) else None
+            return str(section+1) if 0 <= section < len(self.frame) else None
 
 class TwitchPage(QWidget):
     def __init__(self, service, db):
@@ -152,25 +154,39 @@ class TwitchPage(QWidget):
         ]].sort_values("date",ascending=False)))
         if not df.empty:
             self.viewer_chart.line(df["date"],df["average_viewers"],"Viewers")
-            self.revenue_chart.line(df["date"],df["total_revenue"],"Revenue")
+            if has_nonzero_numeric_values(df["total_revenue"]):
+                self.revenue_chart.line(df["date"],df["total_revenue"],"Revenue")
+            else:
+                self.revenue_chart.no_data("No revenue recorded for this period")
+        else:
+            self.viewer_chart.no_data()
+            self.revenue_chart.no_data()
         weekday=self.service.weekday(start,end)
         if not weekday.empty:
             self.weekday_chart.bar(weekday["weekday"],weekday["average_viewers"],"Viewers")
+        else:
+            self.weekday_chart.no_data()
         bands=self.service.duration_bands(start,end)
-        if not bands.empty:
+        if not bands.empty and has_nonzero_numeric_values(df["total_revenue"]):
             self.duration_chart.bar(bands["duration_band"],bands["revenue_per_hour"],"Revenue/hour")
+        else:
+            self.duration_chart.no_data("No revenue recorded for this period")
 
         games=self.service.game_summary()
         self.game_table.setModel(FrameModel(games))
         if not games.empty:
             top=games.head(15)
             self.game_chart.bar(top["game"],top["hours"],"Hours")
+        else:
+            self.game_chart.no_data()
 
         switches=self.service.switch_impact()
         self.switch_table.setModel(FrameModel(switches))
         if not switches.empty:
             labels=[f'{a} → {b}' for a,b in zip(switches["from_game"],switches["to_game"])]
             self.switch_chart.bar(labels,switches["change_15m"].fillna(0),"Viewer change")
+        else:
+            self.switch_chart.no_data()
 
         self.timeline_table.setModel(FrameModel(self.service.game_segments().sort_values("segment_start_ts",ascending=False)))
         self.raid_table.setModel(FrameModel(self.service.raids()))

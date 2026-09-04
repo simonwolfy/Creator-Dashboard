@@ -3,7 +3,7 @@ import sqlite3
 
 from creator_intelligence.data.database import Database
 from creator_intelligence.services.import_schema_compat import upgrade_legacy_import_jobs
-from creator_intelligence.ui.charts import safe_numeric_values
+from creator_intelligence.ui.charts import has_nonzero_numeric_values, safe_numeric_values
 
 
 def test_legacy_import_jobs_is_upgraded(tmp_path: Path):
@@ -48,3 +48,8 @@ def test_legacy_import_jobs_is_upgraded(tmp_path: Path):
 def test_chart_numeric_values_replace_invalid_data():
     values = safe_numeric_values([1, None, float("nan"), "2.5", "bad"])
     assert values == [1.0, 0.0, 0.0, 2.5, 0.0]
+
+
+def test_chart_detects_absent_metric_data():
+    assert has_nonzero_numeric_values([0, None, float("nan"), "bad"]) is False
+    assert has_nonzero_numeric_values([0, "1.5"]) is True

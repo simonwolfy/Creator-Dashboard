@@ -26,7 +26,10 @@ class TwitchIntelligenceService:
             df = df[df["date"] >= pd.Timestamp(start)]
         if end:
             df = df[df["date"] <= pd.Timestamp(end)]
-        return df
+        # Source exports use human-readable dates (for example, "Fri Apr 03
+        # 2026"). SQLite sorts those alphabetically, so always sort again after
+        # parsing or the chart connects streams out of chronological order.
+        return df.dropna(subset=["date"]).sort_values("date", kind="stable").reset_index(drop=True)
 
     def summary(self, start=None, end=None):
         df = self.daily(start, end)

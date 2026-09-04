@@ -28,6 +28,7 @@ UPGRADE_MARKER_VALUE = "preserve-across-upgrade-and-uninstall"
 def run_release_smoke() -> int:
     """Exercise packaged imports, startup, migrations, and an empty disposable workspace."""
     _verify_packaged_oauth_dependencies()
+    _verify_packaged_twitch_dependencies()
     with tempfile.TemporaryDirectory(prefix="creator-intelligence-release-smoke-") as temporary:
         workspace = Path(temporary) / "workspace"
         app = CreatorIntelligenceApplication(workspace)
@@ -64,6 +65,17 @@ def _verify_packaged_oauth_dependencies() -> None:
     if float(getattr(keyring.get_keyring(), "priority", 0)) <= 0:
         raise RuntimeError("The packaged operating-system credential backend is unavailable.")
     _verify_oauth_loopback_round_trip(InstalledAppFlow)
+
+
+def _verify_packaged_twitch_dependencies() -> None:
+    """Fail the release if the real-time Twitch transport was omitted."""
+    from PySide6.QtWebSockets import QWebSocket
+    from creator_intelligence.services.twitch_eventsub import TwitchEventSubClient
+
+    if not callable(QWebSocket):
+        raise RuntimeError("The packaged Qt WebSockets runtime is unavailable.")
+    if not callable(TwitchEventSubClient):
+        raise RuntimeError("The packaged Twitch EventSub client is unavailable.")
 
 
 def _verify_oauth_loopback_round_trip(installed_app_flow) -> None:

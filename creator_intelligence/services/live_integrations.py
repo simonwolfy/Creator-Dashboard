@@ -37,10 +37,19 @@ class TwitchLiveAdapter:
                 "Client ID and OAuth access token are required.",
                 datetime.now().isoformat()
             )
+        try:
+            status=self.live_service.ensure_twitch_connection()
+        except Exception as exc:
+            return IntegrationStatus(
+                "Twitch",False,self.live_service.vault.redact(exc),
+                datetime.now().isoformat()
+            )
         self.connected=True
+        missing=status.get("missing_scopes") or []
+        suffix=f" Limited permissions: {', '.join(missing)}." if missing else ""
         return IntegrationStatus(
             "Twitch",True,
-            "Credentials are configured. EventSub and polling transport are ready to initialize.",
+            "Twitch access is valid. EventSub and polling are ready."+suffix,
             datetime.now().isoformat()
         )
 
@@ -58,28 +67,35 @@ class TwitchLiveAdapter:
                 source_mode="twitch",twitch_stream_id=event.get("id")
             )
         if event_type=="stream.offline":
-            return self.live_service.end_session()
+            active=self.live_service.active_session()
+            return self.live_service.end_session(active["id"]) if active and active.get("source_mode")=="twitch" else None
         if event_type=="channel.raid":
+            if not self.live_service.active_session():return None
             return self.live_service.add_raid(
                 event.get("viewers",0),
                 event.get("from_broadcaster_user_name") or "Unknown",
                 message_id
             )
         if event_type=="channel.follow":
+            if not self.live_service.active_session():return None
             return self.live_service.add_follow(
                 event.get("user_name"),message_id
             )
         if event_type=="channel.update":
+            if not self.live_service.active_session():return None
             return self.live_service.add_game_change(
                 event.get("category_name") or "Unknown",
                 event.get("title")
             )
         if event_type=="channel.chat.message":
+            return self.live_service.record_chat_message(event,message_id)
+        if event_type=="channel.subscribe":
+            session=self.live_service.active_session()
+            if not session:return None
             return self.live_service.add_event(
-                self.live_service.active_session()["id"],
-                "chat_message","Chat message received",None,
-                "Twitch",message_id,
-                {"chatter_user_name":event.get("chatter_user_name")}
+                session["id"],"subscription","New subscriber",
+                f'{event.get("user_name") or "A viewer"} subscribed.',
+                "Twitch",external_id=message_id,payload=event,severity="Success"
             )
         return None
 
