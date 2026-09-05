@@ -20,6 +20,24 @@ class DetectionResult:
     warnings: list[str]
 
 class ImportCenterService:
+    IMPORTER_VERSIONS = {
+        "twitch_daily": "twitch_daily:revenue-components-v2",
+    }
+
+    TWITCH_REVENUE_COMPONENT_HEADERS = (
+        "sub revenue",
+        "prime revenue",
+        "gifted subs revenue",
+        "bits revenue",
+        "ad revenue",
+        "turbo revenue",
+        "game sales revenue",
+        "extensions revenue",
+        "bounties revenue",
+        "experimental revenue",
+        "other bits interactions revenue",
+    )
+
     DETECTORS = {
         "twitch_daily": {
             "platform": "Twitch",
@@ -42,6 +60,35 @@ class ImportCenterService:
                 "chat messages": "chat_messages",
                 "total revenue": "total_revenue",
                 "revenue": "total_revenue",
+            },
+        },
+        "twitch_monthly_revenue": {
+            "platform": "Twitch",
+            "forbidden_any": {
+                "average viewers",
+                "maximum viewers",
+                "max viewers",
+                "unique viewers",
+                "minutes watched",
+                "live views",
+            },
+            "required_any": [
+                {
+                    "date",
+                    "minutes streamed",
+                    "sub revenue",
+                    "ad revenue",
+                },
+                {
+                    "date",
+                    "total paid subs",
+                    "gifted subs revenue",
+                    "total gifted subs",
+                },
+            ],
+            "destination": None,
+            "aliases": {
+                "date": "date",
             },
         },
         "youtube_content": {
@@ -224,6 +271,8 @@ class ImportCenterService:
         header_set = set(normalized)
         candidates = []
         for export_type, definition in self.DETECTORS.items():
+            if definition.get("forbidden_any", set()) & header_set:
+                continue
             best_match = 0
             for signature in definition["required_any"]:
                 matched = len(signature & header_set)
@@ -257,16 +306,21 @@ class ImportCenterService:
         path = Path(path).resolve()
         detection = self.detect(path)
         file_hash = self._file_hash(path)
+        importer_id = self.IMPORTER_VERSIONS.get(
+            detection.export_type, detection.export_type
+        )
         prior = self.db.frame(
             """SELECT id,status,finished_at FROM import_jobs
-               WHERE file_hash=? AND status IN ('Completed','Completed with warnings')
+               WHERE file_hash=? AND importer_id=?
+                 AND status IN ('Completed','Completed with warnings')
                ORDER BY id DESC LIMIT 1""",
-            (file_hash,),
+            (file_hash, importer_id),
         )
         return {
             "path": str(path),
             "name": path.name,
             "hash": file_hash,
+            "importer_id": importer_id,
             "size_bytes": path.stat().st_size,
             "duplicate_file": not prior.empty,
             "previous_import_id": int(prior.iloc[0]["id"]) if not prior.empty else None,
@@ -291,6 +345,22 @@ class ImportCenterService:
         if column in numeric_float:
             return float(text.replace(",", "").replace("$", "").replace("%", ""))
         return text
+
+    def _twitch_total_revenue(self, raw):
+        normalized_raw = {
+            self._normalize_header(header): value
+            for header, value in raw.items()
+            if header is not None
+        }
+        components = []
+        for header in self.TWITCH_REVENUE_COMPONENT_HEADERS:
+            value = normalized_raw.get(header)
+            if value is None or str(value).strip() == "":
+                continue
+            components.append(self._coerce_value("total_revenue", value))
+        if not components:
+            return None
+        return round(sum(components), 6)
 
     def _record_key(self, export_type, row):
         if export_type == "twitch_daily":
@@ -327,6 +397,12 @@ class ImportCenterService:
             raise ValueError(
                 f"This exact file was already imported in job {info['previous_import_id']}."
             )
+        if info["export_type"] == "twitch_monthly_revenue":
+            raise ValueError(
+                "This is a monthly Twitch revenue summary. Import the daily "
+                "Analytics and Revenue export so earnings can be matched to "
+                "the correct stream dates."
+            )
         if info["export_type"] == "unknown" or not info["destination_table"]:
             raise ValueError("The file type could not be identified.")
 
@@ -339,7 +415,7 @@ class ImportCenterService:
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 batch_id,info["path"],info["name"],info["hash"],
-                info["export_type"],info["platform"],info["export_type"],
+                info["importer_id"],info["platform"],info["export_type"],
                 info["destination_table"],"Staging",
                 json.dumps(info["warnings"]),now,
             ),
@@ -364,6 +440,17 @@ class ImportCenterService:
                         )
                     except Exception as exc:
                         errors.append(f"{source}: {exc}")
+
+                if (
+                    info["export_type"] == "twitch_daily"
+                    and normalized.get("total_revenue") is None
+                ):
+                    try:
+                        component_total = self._twitch_total_revenue(raw)
+                        if component_total is not None:
+                            normalized["total_revenue"] = component_total
+                    except Exception as exc:
+                        errors.append(f"Twitch revenue components: {exc}")
 
                 key = self._record_key(info["export_type"], normalized)
                 if not key:
@@ -547,6 +634,13 @@ class ImportCenterService:
 
             warning_count = int(job.get("rows_rejected") or 0)
             status = "Completed with warnings" if warning_count else "Completed"
+            self.db.execute(
+                """UPDATE import_jobs
+                   SET status='Superseded',rollback_available=0
+                   WHERE file_hash=? AND batch_id<>?
+                     AND status IN ('Completed','Completed with warnings')""",
+                (job["file_hash"], batch_id),
+            )
             self.db.execute(
                 """UPDATE import_jobs SET status=?,rows_inserted=?,rows_updated=?,
                    backup_path=?,archived_path=?,rollback_available=1,finished_at=?
